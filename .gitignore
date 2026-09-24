@@ -8,7 +8,10 @@ Cargo.lock.bak
 *.key
 !crates/**/keys/
 license-private*.hex
+attest-private*.hex
 MEMO_LICENSE_PRIVATE*
+MEMO_ATTEST_PRIVATE*
+/attest-data/
 
 # Optional local build artifacts
 /dist/*.exe

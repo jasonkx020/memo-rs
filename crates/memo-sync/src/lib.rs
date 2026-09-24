@@ -1,7 +1,3 @@
-mod auth;
-
-pub use auth::{derive_psk, hello_mac, random_nonce_hex, verify_hello_mac};
-
 use memo_core::store::{Broadcaster, MemoItem, MemoStore};
 use memo_core::MemoService;
 use parking_lot::RwLock;
@@ -9,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -56,13 +51,6 @@ struct Announce {
     salt_fp: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HelloPayload {
-    node_id: String,
-    nonce: String,
-    mac: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct DiscoveredPeer {
     pub node_id: String,
@@ -81,8 +69,6 @@ struct DiscoEntry {
 struct PeerHandle {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     remote_id: RwLock<String>,
-    /// 已验证对端 Hello MAC
-    authed: AtomicBool,
 }
 
 pub struct SyncEngine {
@@ -90,7 +76,6 @@ pub struct SyncEngine {
     port: u16,
     peers_cfg: Vec<String>,
     salt_fp: String,
-    psk: [u8; 32],
     lan_discovery: bool,
     store: Arc<MemoStore>,
     service: RwLock<Weak<MemoService>>,
@@ -114,13 +99,11 @@ impl SyncEngine {
         salt_hex: String,
         lan_discovery: bool,
     ) -> Arc<Self> {
-        let salt_bytes = hex::decode(salt_hex.trim()).unwrap_or_default();
         Arc::new(Self {
             node_id,
             port,
             peers_cfg: peers,
             salt_fp: compute_salt_fp(&salt_hex),
-            psk: derive_psk(&salt_bytes),
             lan_discovery,
             store,
             service: RwLock::new(Weak::new()),
@@ -293,7 +276,10 @@ impl SyncEngine {
 
     fn is_addr_connected(&self, addr: &str) -> bool {
         let peers = self.peers.read();
-        peers.contains_key(addr)
+        if peers.contains_key(addr) {
+            return true;
+        }
+        false
     }
 
     fn is_peer_connected(&self, node_id: &str, addr: &str) -> bool {
@@ -302,26 +288,11 @@ impl SyncEngine {
             return true;
         }
         for p in peers.values() {
-            if p.remote_id.read().as_str() == node_id && p.authed.load(Ordering::Relaxed) {
+            if p.remote_id.read().as_str() == node_id {
                 return true;
             }
         }
         false
-    }
-
-    fn make_hello(&self) -> Envelope {
-        let nonce = random_nonce_hex();
-        let mac = hello_mac(&self.psk, &self.node_id, &nonce);
-        Envelope {
-            msg_type: MsgType::Hello,
-            from: self.node_id.clone(),
-            payload: serde_json::to_value(HelloPayload {
-                node_id: self.node_id.clone(),
-                nonce,
-                mac,
-            })
-            .unwrap_or_default(),
-        }
     }
 
     async fn handle_conn(
@@ -335,7 +306,6 @@ impl SyncEngine {
         let peer = Arc::new(PeerHandle {
             tx: tx.clone(),
             remote_id: RwLock::new(String::new()),
-            authed: AtomicBool::new(false),
         });
         self.peers.write().insert(key.clone(), peer.clone());
 
@@ -347,16 +317,25 @@ impl SyncEngine {
             }
         });
 
-        let _ = self.send_env(&peer, &self.make_hello());
+        let hello = Envelope {
+            msg_type: MsgType::Hello,
+            from: self.node_id.clone(),
+            payload: serde_json::json!({ "node_id": self.node_id }),
+        };
+        let _ = self.send_env(&peer, &hello);
+        if active {
+            let req = Envelope {
+                msg_type: MsgType::SyncRequest,
+                from: self.node_id.clone(),
+                payload: serde_json::to_value(SyncRequest { since_seq: 0 })?,
+            };
+            let _ = self.send_env(&peer, &req);
+        }
 
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Ok(env) = serde_json::from_str::<Envelope>(&line) {
-                match self.on_message(&peer, env, active) {
-                    Ok(true) => {}
-                    Ok(false) => break, // 认证失败，断开
-                    Err(_) => {}
-                }
+                self.on_message(&peer, env);
             }
         }
         self.peers.write().remove(&key);
@@ -370,49 +349,23 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// 返回 Ok(false) 表示应断开连接。
-    fn on_message(
-        &self,
-        peer: &Arc<PeerHandle>,
-        env: Envelope,
-        active: bool,
-    ) -> anyhow::Result<bool> {
+    fn on_message(&self, peer: &Arc<PeerHandle>, env: Envelope) {
         match env.msg_type {
             MsgType::Hello => {
-                let hp: HelloPayload = serde_json::from_value(env.payload)?;
-                if hp.node_id.is_empty() || hp.nonce.is_empty() || hp.mac.is_empty() {
-                    return Ok(false);
+                if let Some(id) = env.payload.get("node_id").and_then(|v| v.as_str()) {
+                    *peer.remote_id.write() = id.to_string();
                 }
-                if !verify_hello_mac(&self.psk, &hp.node_id, &hp.nonce, &hp.mac) {
-                    return Ok(false);
-                }
-                *peer.remote_id.write() = hp.node_id;
-                let first = !peer.authed.swap(true, Ordering::SeqCst);
-                if first && active {
-                    let req = Envelope {
-                        msg_type: MsgType::SyncRequest,
-                        from: self.node_id.clone(),
-                        payload: serde_json::to_value(SyncRequest { since_seq: 0 })?,
-                    };
-                    let _ = self.send_env(peer, &req);
-                }
-                Ok(true)
             }
             MsgType::MemoUpdate => {
-                if !peer.authed.load(Ordering::Relaxed) {
-                    return Ok(true);
-                }
                 if let Ok(item) = serde_json::from_value::<MemoItem>(env.payload) {
-                    if self.store.merge(item, &env.from).is_ok() {
-                        self.notify();
+                    match self.store.merge(item, &env.from) {
+                        Ok(true) => self.notify(),
+                        Ok(false) => self.notify(), // 冲突也通知 UI 拉取
+                        Err(_) => {}
                     }
                 }
-                Ok(true)
             }
             MsgType::SyncRequest => {
-                if !peer.authed.load(Ordering::Relaxed) {
-                    return Ok(true);
-                }
                 let items = self.store.all();
                 let resp = Envelope {
                     msg_type: MsgType::SyncResponse,
@@ -420,24 +373,21 @@ impl SyncEngine {
                     payload: serde_json::to_value(SyncResponse { items }).unwrap_or_default(),
                 };
                 let _ = self.send_env(peer, &resp);
-                Ok(true)
             }
             MsgType::SyncResponse => {
-                if !peer.authed.load(Ordering::Relaxed) {
-                    return Ok(true);
-                }
                 if let Ok(resp) = serde_json::from_value::<SyncResponse>(env.payload) {
                     let mut notify = false;
                     for it in resp.items {
-                        if self.store.merge(it, &env.from).is_ok() {
-                            notify = true;
+                        match self.store.merge(it, &env.from) {
+                            Ok(true) => notify = true,
+                            Ok(false) => notify = true,
+                            Err(_) => {}
                         }
                     }
                     if notify {
                         self.notify();
                     }
                 }
-                Ok(true)
             }
         }
     }
@@ -452,9 +402,6 @@ impl SyncEngine {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         for (k, p) in self.peers.read().iter() {
-            if !p.authed.load(Ordering::Relaxed) {
-                continue;
-            }
             let id = p.remote_id.read().clone();
             let name = if id.is_empty() { k.clone() } else { id };
             if seen.insert(name.clone()) {
@@ -509,9 +456,6 @@ impl Broadcaster for EngineBroadcaster {
         };
         line.push(b'\n');
         for p in self.engine.peers.read().values() {
-            if !p.authed.load(Ordering::Relaxed) {
-                continue;
-            }
             let _ = p.tx.send(line.clone());
         }
     }

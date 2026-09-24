@@ -5,11 +5,10 @@ members = [
     "crates/memo-sync",
     "crates/memo-app",
     "crates/memo-cli",
-    "tools/license-sign",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
@@ -27,9 +26,7 @@ rand = "=0.8.5"
 hex = "=0.4.3"
 base64 = "=0.21.7"
 sha2 = "=0.10.8"
-hmac = "=0.12.1"
 aes-gcm = "=0.10.3"
-tempfile = "=3.10.1"
 argon2 = "=0.5.3"
 ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 zeroize = { version = "=1.7.0", features = ["derive"] }

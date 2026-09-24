@@ -59,40 +59,22 @@ fn run_headless(cfg: Config) -> anyhow::Result<()> {
     let (svc, _) = memo_core::service::unlock(cfg.clone(), password.as_bytes())?;
     password.zeroize();
 
-    let lic = if let Ok(p) = config::settings_path() {
-        p.parent()
-            .map(memo_core::license::load_status)
-            .unwrap_or(memo_core::license::LicenseStatus::Community)
-    } else {
-        memo_core::license::LicenseStatus::Community
-    };
-    let sync_enabled = lic.allows_lan_sync();
-
     let engine = SyncEngine::new(
         cfg.node_id.clone(),
         cfg.listen_port,
         cfg.peers.clone(),
         svc.store(),
         cfg.salt_hex.clone(),
-        cfg.lan_discovery && sync_enabled,
+        cfg.lan_discovery,
     );
     engine.set_service(&svc);
-    if sync_enabled {
-        svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
-        engine.start();
-        println!(
-            "headless · 节点 {} · 同步已启用（{}）",
-            cfg.node_id,
-            memo_core::license::status_label(&lic)
-        );
-    } else {
-        println!(
-            "headless · 节点 {} · 社区版仅本机（{}）",
-            cfg.node_id,
-            memo_core::license::status_label(&lic)
-        );
-    }
-    println!("命令: add | list | edit | del | export | verify | peers | discover | quit");
+    svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
+    engine.start();
+
+    println!(
+        "headless · 节点 {}\n命令: add | list | edit | del | export | verify | peers | discover | quit",
+        cfg.node_id
+    );
     if let Ok(p) = config::settings_path() {
         println!("设置: {}", p.display());
     }

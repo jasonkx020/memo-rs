@@ -199,7 +199,7 @@ pub fn password_field(
 
 pub const APP_NAME: &str = "分布式备忘录";
 pub const APP_COPYRIGHT: &str = "Copyright (C) 2026 DistributedMemo. All rights reserved.";
-pub const APP_FILE_VERSION: &str = "0.2.0.0";
+pub const APP_FILE_VERSION: &str = "0.3.0.0";
 pub const APP_DESCRIPTION: &str = "本地加密 · 局域网同步 · 绿色单文件分布式备忘录";
 
 pub fn muted_label(text: impl Into<String>) -> egui::RichText {

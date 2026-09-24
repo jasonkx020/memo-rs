@@ -87,7 +87,7 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
                             let key = cols.first().map(|s| s.as_str()).unwrap_or("");
                             let val = cols.get(1).map(|s| s.as_str()).unwrap_or("");
                             ui.label(
-                                RichText::new(key.to_string())
+                                RichText::new(format!("{key}"))
                                     .strong()
                                     .size(13.0)
                                     .color(theme::TEXT),
@@ -132,7 +132,7 @@ fn heading_level(line: &str) -> Option<usize> {
         return None;
     }
     let level = t.chars().take_while(|c| *c == '#').count();
-    if (1..=3).contains(&level) && t.as_bytes().get(level) == Some(&b' ') {
+    if level >= 1 && level <= 3 && t.as_bytes().get(level) == Some(&b' ') {
         Some(level)
     } else {
         None

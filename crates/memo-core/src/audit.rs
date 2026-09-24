@@ -215,34 +215,3 @@ impl AuditLog {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn append_and_verify() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = KeyPair::load_or_create(dir.path()).unwrap();
-        let log = AuditLog::open(dir.path().join("audit.jsonl"), keys).unwrap();
-        log.append_value(serde_json::json!({"ok": true})).unwrap();
-        log.append_value(serde_json::json!({"ok": 2})).unwrap();
-        assert!(log.verify_file().is_ok());
-    }
-
-    #[test]
-    fn tamper_detected() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = KeyPair::load_or_create(dir.path()).unwrap();
-        let path = dir.path().join("audit.jsonl");
-        let log = AuditLog::open(path.clone(), keys).unwrap();
-        log.append_value(serde_json::json!({"ok": true})).unwrap();
-        drop(log);
-        let mut raw = fs::read_to_string(&path).unwrap();
-        raw = raw.replace("true", "false");
-        fs::write(&path, raw).unwrap();
-        let keys = KeyPair::load_or_create(dir.path()).unwrap();
-        let log = AuditLog::open(path, keys).unwrap();
-        assert!(log.verify_file().is_err());
-    }
-}

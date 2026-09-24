@@ -35,6 +35,3 @@ bitflags = { workspace = true }
 windows-sys = { workspace = true }
 libc = { workspace = true }
 generic-array = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

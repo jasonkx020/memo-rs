@@ -52,11 +52,8 @@ struct AppRuntime {
     svc: Arc<MemoService>,
     engine: Arc<SyncEngine>,
     cfg: Config,
-    /// 商业授权通过后才启动同步
-    sync_enabled: bool,
 }
 
-#[allow(clippy::large_enum_variant)]
 enum Screen {
     Unlock {
         password: String,
@@ -213,14 +210,6 @@ impl MemoApp {
                         LicenseStatus::Community
                     };
                     about_kv(ui, "授权", &license::status_label(&lic));
-                    if !lic.allows_lan_sync() {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new("社区版仅本机存储；局域网同步需放置有效 license.json")
-                                .small()
-                                .color(theme::TEXT_MUTED),
-                        );
-                    }
                     #[cfg(windows)]
                     about_kv(ui, "平台", "Windows x64");
                     #[cfg(not(windows))]
@@ -753,9 +742,7 @@ impl eframe::App for MemoApp {
                     .show(ctx, |ui| {
                         ui.label(RichText::new("节点").strong().size(15.0).color(theme::TEXT));
                         ui.label(
-                            theme::muted_label(if !rt.sync_enabled {
-                                "社区版：同步未启用（需商业授权）"
-                            } else if rt.cfg.lan_discovery {
+                            theme::muted_label(if rt.cfg.lan_discovery {
                                 "局域网发现已开启"
                             } else {
                                 "局域网发现已关闭"
@@ -1458,35 +1445,22 @@ impl eframe::App for MemoApp {
                                 }
                             }
                             ui.label("对端列表（每行 host:port，可选；同网段可依赖自动发现）");
-                            if !rt.sync_enabled {
-                                ui.label(
-                                    RichText::new(
-                                        "当前为社区版：局域网发现与同步已禁用。将签发的 license.json 放到配置目录并重启。",
-                                    )
-                                    .small()
-                                    .color(theme::DANGER),
-                                );
-                            }
                             let mut peers_text = settings_draft.peers.join("\n");
-                            let peers_edit = ui.add_enabled(
-                                rt.sync_enabled,
-                                egui::TextEdit::multiline(&mut peers_text)
-                                    .desired_rows(4)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if peers_edit.changed() {
+                            if ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut peers_text)
+                                        .desired_rows(4)
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed()
+                            {
                                 settings_draft.peers = peers_text
                                     .lines()
                                     .map(|l| l.trim().to_string())
                                     .filter(|l| !l.is_empty())
                                     .collect();
                             }
-                            ui.add_enabled_ui(rt.sync_enabled, |ui| {
-                                ui.checkbox(
-                                    &mut settings_draft.lan_discovery,
-                                    "局域网自动发现 (UDP 17000)",
-                                );
-                            });
+                            ui.checkbox(&mut settings_draft.lan_discovery, "局域网自动发现 (UDP 17000)");
                             ui.label("集群共享盐 salt_hex（32 位 hex）");
                             ui.text_edit_singleline(&mut settings_draft.salt_hex);
                             ui.add_space(8.0);
@@ -1608,34 +1582,19 @@ fn unlock_runtime(cfg: Config, password: &[u8]) -> anyhow::Result<Arc<AppRuntime
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
     let (svc, _audit) = memo_core::service::unlock(cfg.clone(), password)?;
-    let lic = if let Ok(p) = config::settings_path() {
-        p.parent()
-            .map(license::load_status)
-            .unwrap_or(LicenseStatus::Community)
-    } else {
-        LicenseStatus::Community
-    };
-    let sync_enabled = lic.allows_lan_sync();
     let engine = SyncEngine::new(
         cfg.node_id.clone(),
         cfg.listen_port,
         cfg.peers.clone(),
         svc.store(),
         cfg.salt_hex.clone(),
-        cfg.lan_discovery && sync_enabled,
+        cfg.lan_discovery,
     );
     engine.set_service(&svc);
-    if sync_enabled {
-        svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
-        engine.start();
-    }
+    svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
+    engine.start();
     std::mem::forget(rt);
-    Ok(Arc::new(AppRuntime {
-        svc,
-        engine,
-        cfg,
-        sync_enabled,
-    }))
+    Ok(Arc::new(AppRuntime { svc, engine, cfg }))
 }
 
 pub fn run_gui(cfg: Config) -> eframe::Result<()> {

@@ -13,11 +13,11 @@ fn main() {
         res.set("CompanyName", "DistributedMemo");
         res.set("InternalName", "memo");
         res.set("OriginalFilename", "memo.exe");
-        // 0.2.0.0
-        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, 0x0000_0002_0000_0000);
-        res.set_version_info(winres::VersionInfo::FILEVERSION, 0x0000_0002_0000_0000);
-        res.set("ProductVersion", "0.2.0");
-        res.set("FileVersion", "0.2.0.0");
+        // 0.1.0.0
+        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, 0x0000_0001_0000_0000);
+        res.set_version_info(winres::VersionInfo::FILEVERSION, 0x0000_0001_0000_0000);
+        res.set("ProductVersion", "0.1.0");
+        res.set("FileVersion", "0.1.0.0");
         if let Err(e) = res.compile() {
             eprintln!("cargo:warning=winres compile failed: {e}");
         }
