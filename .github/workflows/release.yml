@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-green:
+    name: build-sign-upload
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.77.2"
+      - name: Build release exe
+        run: |
+          cargo build -p memo-cli --release
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\memo.exe dist\memo.exe -Force
+      - name: Authenticode sign (optional)
+        env:
+          MEMO_SIGN_CERT: ${{ secrets.MEMO_SIGN_CERT }}
+          MEMO_SIGN_PFX_BASE64: ${{ secrets.MEMO_SIGN_PFX_BASE64 }}
+          MEMO_SIGN_PFX_PASSWORD: ${{ secrets.MEMO_SIGN_PFX_PASSWORD }}
+        shell: pwsh
+        run: |
+          if (-not $env:MEMO_SIGN_CERT -and -not $env:MEMO_SIGN_PFX_BASE64) {
+            Write-Host "No signing secrets; skip Authenticode."
+            exit 0
+          }
+          if ($env:MEMO_SIGN_PFX_BASE64) {
+            $pfxPath = Join-Path $env:RUNNER_TEMP "memo-sign.pfx"
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:MEMO_SIGN_PFX_BASE64))
+            $pass = $env:MEMO_SIGN_PFX_PASSWORD
+            if ($pass) {
+              & signtool sign /f $pfxPath /p $pass /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\memo.exe
+            } else {
+              & signtool sign /f $pfxPath /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\memo.exe
+            }
+          } elseif ($env:MEMO_SIGN_CERT) {
+            & signtool sign /sha1 $env:MEMO_SIGN_CERT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\memo.exe
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: memo-windows-x64
+          path: dist/memo.exe
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/memo.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

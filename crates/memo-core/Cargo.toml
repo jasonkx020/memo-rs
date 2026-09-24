@@ -1,0 +1,40 @@
+[package]
+name = "memo-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+zeroize = { workspace = true }
+directories = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+# 钉死传递依赖版本
+base64ct = { workspace = true }
+password-hash = { workspace = true }
+getrandom = { workspace = true }
+idna = { workspace = true }
+url = { workspace = true }
+zeroize_derive = { workspace = true }
+crypto-common = { workspace = true }
+digest = { workspace = true }
+typenum = { workspace = true }
+once_cell = { workspace = true }
+bitflags = { workspace = true }
+windows-sys = { workspace = true }
+libc = { workspace = true }
+generic-array = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

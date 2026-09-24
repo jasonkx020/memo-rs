@@ -1,0 +1,22 @@
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local signing & license secrets (never commit)
+*.pfx
+*.p12
+*.key
+!crates/**/keys/
+license-private*.hex
+MEMO_LICENSE_PRIVATE*
+
+# Optional local build artifacts
+/dist/*.exe
+/dist/*.pdb
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store

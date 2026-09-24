@@ -1,0 +1,15 @@
+[package]
+name = "license-sign"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "license-sign"
+path = "src/main.rs"
+
+[dependencies]
+memo-core = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }

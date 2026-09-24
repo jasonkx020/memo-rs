@@ -1,0 +1,4 @@
+# 锁定 Rust 1.77.2：避免 ProcessPrng（Win10+ API），兼容 Win7 SP1+
+[toolchain]
+channel = "1.77.2"
+components = ["rustfmt", "clippy"]
