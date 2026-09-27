@@ -35,3 +35,4 @@ bitflags = { workspace = true }
 windows-sys = { workspace = true }
 libc = { workspace = true }
 generic-array = { workspace = true }
+fs2 = { workspace = true }

@@ -64,8 +64,11 @@ fn run_headless(cfg: Config) -> anyhow::Result<()> {
         cfg.listen_port,
         cfg.peers.clone(),
         svc.store(),
+        svc.person_store(),
+        svc.task_store(),
         cfg.salt_hex.clone(),
         cfg.lan_discovery,
+        std::path::PathBuf::from(&cfg.data_dir),
     );
     engine.set_service(&svc);
     svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));

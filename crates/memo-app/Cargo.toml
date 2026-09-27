@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }
 # 钉住传递依赖，阻止 Cargo 拉 edition2024 包
 url = { workspace = true }
 idna = { workspace = true }

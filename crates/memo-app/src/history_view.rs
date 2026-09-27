@@ -1,4 +1,4 @@
-//! 备忘变更时间线与简易 diff。
+//! 变更时间线与简易 diff（备忘 / 任务 / 人员）。
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use memo_core::service::HistoryEvent;
@@ -14,6 +14,23 @@ pub fn event_type_label(t: &str) -> String {
     }
 }
 
+pub fn entity_window_title(entity: &str) -> &'static str {
+    match entity {
+        "task" => "任务变更历史",
+        "person" => "人员变更历史",
+        _ => "备忘变更历史",
+    }
+}
+
+fn actor_label(ev: &HistoryEvent) -> String {
+    let name = ev.actor_name.trim();
+    if name.is_empty() {
+        "未记录操作人".into()
+    } else {
+        name.to_string()
+    }
+}
+
 /// 展示时间线列表；返回选中的两条索引（用于下方 diff）。
 pub fn show_list(
     ui: &mut egui::Ui,
@@ -23,11 +40,11 @@ pub fn show_list(
     sel_b: &mut Option<usize>,
 ) {
     if events.is_empty() {
-        ui.label(theme::muted_label("本机暂无该备忘的审计记录。").size(13.0));
+        ui.label(theme::muted_label("本机暂无该条目的审计记录。").size(13.0));
         return;
     }
     ui.label(
-        theme::muted_label("点击选择两条记录进行对比（本机视角 · 节点非用户账号）").small(),
+        theme::muted_label("点击选择两条记录进行对比 · 显示：操作人 / 节点 / 时间").small(),
     );
     ui.add_space(6.0);
     ScrollArea::vertical()
@@ -35,7 +52,8 @@ pub fn show_list(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (i, ev) in events.iter().enumerate() {
-                let author = display_name(&ev.author_node);
+                let who = actor_label(ev);
+                let node = display_name(&ev.author_node);
                 let sync = if ev.source.is_empty() {
                     "本地".to_string()
                 } else {
@@ -52,12 +70,13 @@ pub fn show_list(
                     .map(|s| s.title.as_str())
                     .unwrap_or("(无)");
                 let label = format!(
-                    "#{}  {}  v{}  {}  ·  {}  ·  {}",
+                    "#{}  {}  v{}  ·  {}  ·  {}  ·  {}  ·  {}",
                     ev.seq,
                     event_type_label(&ev.event_type),
                     ver,
+                    who,
+                    node,
                     short_time(&ev.time),
-                    author,
                     sync
                 );
                 let selected = *sel_a == Some(i) || *sel_b == Some(i);
@@ -66,7 +85,10 @@ pub fn show_list(
                     toggle_sel(sel_a, sel_b, i);
                 }
                 if resp.hovered() {
-                    resp.on_hover_text(format!("标题: {title}\n完整时间: {}", ev.time));
+                    resp.on_hover_text(format!(
+                        "标题: {title}\n操作人: {who}\n版本节点: {}\n记录节点: {}\n完整时间: {}",
+                        ev.author_node, ev.record_node, ev.time
+                    ));
                 }
             }
         });
@@ -121,12 +143,20 @@ pub fn show_diff(ui: &mut egui::Ui, events: &[HistoryEvent], a: Option<usize>, b
     ui.separator();
     ui.add_space(6.0);
     ui.label(
-        RichText::new(format!(
-            "对比 #{} → #{}",
-            older.seq, newer.seq
+        RichText::new(format!("对比 #{} → #{}", older.seq, newer.seq))
+            .strong()
+            .color(theme::TEXT),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        theme::muted_label(format!(
+            "{} → {}  ·  {} → {}",
+            actor_label(older),
+            actor_label(newer),
+            short_time(&older.time),
+            short_time(&newer.time)
         ))
-        .strong()
-        .color(theme::TEXT),
+        .small(),
     );
     ui.add_space(6.0);
 
@@ -137,7 +167,7 @@ pub fn show_diff(ui: &mut egui::Ui, events: &[HistoryEvent], a: Option<usize>, b
     let oc = ob.map(|s| s.content.as_str()).unwrap_or("");
     let nc = nb.map(|s| s.content.as_str()).unwrap_or("");
     ui.add_space(8.0);
-    ui.label(RichText::new("正文").strong().size(13.0));
+    ui.label(RichText::new("详情").strong().size(13.0));
     ScrollArea::vertical()
         .max_height(180.0)
         .auto_shrink([false, false])
@@ -156,8 +186,16 @@ fn field_diff(ui: &mut egui::Ui, name: &str, old: &str, new: &str) {
         }
     });
     if old != new {
-        ui.label(RichText::new(format!("− {old}")).color(theme::DANGER).size(13.0));
-        ui.label(RichText::new(format!("+ {new}")).color(theme::SUCCESS).size(13.0));
+        ui.label(
+            RichText::new(format!("− {old}"))
+                .color(theme::DANGER)
+                .size(13.0),
+        );
+        ui.label(
+            RichText::new(format!("+ {new}"))
+                .color(theme::SUCCESS)
+                .size(13.0),
+        );
     } else {
         ui.label(RichText::new(old).size(13.0).color(theme::TEXT));
     }
@@ -165,7 +203,7 @@ fn field_diff(ui: &mut egui::Ui, name: &str, old: &str, new: &str) {
 
 fn text_diff_lines(ui: &mut egui::Ui, old: &str, new: &str) {
     if old == new {
-        ui.label(theme::muted_label("正文无变化").small());
+        ui.label(theme::muted_label("内容无变化").small());
         if !new.is_empty() {
             ui.add_space(4.0);
             ui.label(RichText::new(new).size(13.0));

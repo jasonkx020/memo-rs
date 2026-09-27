@@ -13,6 +13,30 @@ pub struct MemoItem {
     pub deleted: bool,
     pub version: u64,
     pub node_id: String,
+    /// 最后修改人员 id（随 LWW 同步）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub modified_by_person_id: String,
+    /// 最后修改人员姓名快照
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub modified_by_name: String,
+}
+
+fn actor_opts(person_id: &str, name: &str) -> (Option<String>, Option<String>) {
+    let pid = if person_id.is_empty() {
+        None
+    } else {
+        Some(person_id.to_string())
+    };
+    let pname = if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    };
+    (pid, pname)
+}
+
+fn actor_from_memo(item: &MemoItem) -> (Option<String>, Option<String>) {
+    actor_opts(&item.modified_by_person_id, &item.modified_by_name)
 }
 
 /// 同步时本机版本获胜、远端被拒的提示。
@@ -28,6 +52,8 @@ pub struct ConflictNotice {
 
 pub trait Broadcaster: Send + Sync {
     fn broadcast_memo(&self, item: &MemoItem);
+    fn broadcast_person(&self, item: &crate::person::Person);
+    fn broadcast_task(&self, item: &crate::task::TaskItem);
 }
 
 pub struct MemoStore {
@@ -68,7 +94,14 @@ impl MemoStore {
         *c
     }
 
-    pub fn put(&self, id: &str, title: &str, content: &str) -> anyhow::Result<MemoItem> {
+    pub fn put(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        actor_person_id: &str,
+        actor_name: &str,
+    ) -> anyhow::Result<MemoItem> {
         let mut items = self.items.write();
         let prev = items.get(id).cloned();
         let ver = self.tick(0);
@@ -79,6 +112,8 @@ impl MemoStore {
             deleted: false,
             version: ver,
             node_id: self.node_id.clone(),
+            modified_by_person_id: actor_person_id.to_string(),
+            modified_by_name: actor_name.to_string(),
         };
         items.insert(id.to_string(), item.clone());
         drop(items);
@@ -88,13 +123,17 @@ impl MemoStore {
         } else {
             EventType::Create
         };
+        let (aid, aname) = actor_opts(actor_person_id, actor_name);
         let data = EventData {
             event_type: ev,
+            entity: "memo".into(),
             memo_id: id.to_string(),
             before: prev.map(|p| serde_json::to_value(p).unwrap()),
             after: Some(serde_json::to_value(&item).unwrap()),
             node_id: self.node_id.clone(),
             source: String::new(),
+            actor_person_id: aid,
+            actor_name: aname,
         };
         self.audit
             .append_value(serde_json::to_value(data)?)?;
@@ -104,7 +143,12 @@ impl MemoStore {
         Ok(item)
     }
 
-    pub fn delete(&self, id: &str) -> anyhow::Result<MemoItem> {
+    pub fn delete(
+        &self,
+        id: &str,
+        actor_person_id: &str,
+        actor_name: &str,
+    ) -> anyhow::Result<MemoItem> {
         let mut items = self.items.write();
         let prev = items
             .get(id)
@@ -115,16 +159,22 @@ impl MemoStore {
         item.deleted = true;
         item.version = ver;
         item.node_id = self.node_id.clone();
+        item.modified_by_person_id = actor_person_id.to_string();
+        item.modified_by_name = actor_name.to_string();
         items.insert(id.to_string(), item.clone());
         drop(items);
 
+        let (aid, aname) = actor_opts(actor_person_id, actor_name);
         let data = EventData {
             event_type: EventType::Delete,
+            entity: "memo".into(),
             memo_id: id.to_string(),
             before: Some(serde_json::to_value(&prev)?),
             after: Some(serde_json::to_value(&item)?),
             node_id: self.node_id.clone(),
             source: String::new(),
+            actor_person_id: aid,
+            actor_name: aname,
         };
         self.audit
             .append_value(serde_json::to_value(data)?)?;
@@ -177,13 +227,17 @@ impl MemoStore {
         }
         drop(items);
 
+        let (aid, aname) = actor_from_memo(&remote);
         let data = EventData {
             event_type: ev,
+            entity: "memo".into(),
             memo_id: remote.id.clone(),
             before: local.map(|l| serde_json::to_value(l).unwrap()),
             after: Some(serde_json::to_value(&remote).unwrap()),
             node_id: self.node_id.clone(),
             source: source.to_string(),
+            actor_person_id: aid,
+            actor_name: aname,
         };
         self.audit
             .append_value(serde_json::to_value(data)?)?;
@@ -213,8 +267,14 @@ impl MemoStore {
         let mut clock = 0u64;
         for e in entries {
             let ed: EventData = serde_json::from_value(e.data)?;
+            if ed.entity != "memo" {
+                continue;
+            }
             if let Some(after) = ed.after {
-                let item: MemoItem = serde_json::from_value(after)?;
+                let item: MemoItem = match serde_json::from_value(after) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 if item.version > clock {
                     clock = item.version;
                 }

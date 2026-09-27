@@ -28,10 +28,18 @@ pub enum EventType {
     Delete,
 }
 
+fn default_entity_memo() -> String {
+    "memo".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventData {
     #[serde(rename = "type")]
     pub event_type: EventType,
+    /// 实体类型：memo | person | task（缺省为 memo，兼容旧审计）
+    #[serde(default = "default_entity_memo")]
+    pub entity: String,
+    /// 实体 id（历史字段名 memo_id，人员/任务亦复用）
     pub memo_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<serde_json::Value>,
@@ -40,6 +48,12 @@ pub struct EventData {
     pub node_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+    /// 操作人员 id（会话登录人员；旧日志缺省）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_person_id: Option<String>,
+    /// 操作人员姓名快照
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_name: Option<String>,
 }
 
 pub fn compute_hash(seq: u64, prev: &str, time: &str, data: &serde_json::Value) -> String {
