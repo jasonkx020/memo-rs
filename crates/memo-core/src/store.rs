@@ -5,6 +5,23 @@ use std::sync::Arc;
 
 use crate::audit::{AuditLog, EventData, EventType};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoVisibility {
+    #[default]
+    Private,
+    Public,
+}
+
+impl MemoVisibility {
+    pub fn label(self) -> &'static str {
+        match self {
+            MemoVisibility::Private => "私密",
+            MemoVisibility::Public => "公开",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoItem {
     pub id: String,
@@ -19,6 +36,11 @@ pub struct MemoItem {
     /// 最后修改人员姓名快照
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub modified_by_name: String,
+    #[serde(default)]
+    pub visibility: MemoVisibility,
+    /// 所属身份公钥指纹
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_fp: String,
 }
 
 fn actor_opts(person_id: &str, name: &str) -> (Option<String>, Option<String>) {
@@ -54,6 +76,9 @@ pub trait Broadcaster: Send + Sync {
     fn broadcast_memo(&self, item: &MemoItem);
     fn broadcast_person(&self, item: &crate::person::Person);
     fn broadcast_task(&self, item: &crate::task::TaskItem);
+    fn broadcast_hosted(&self, blob: &crate::hosted::HostedBlob) {
+        let _ = blob;
+    }
 }
 
 pub struct MemoStore {
@@ -81,6 +106,10 @@ impl MemoStore {
         *self.broadcaster.write() = Some(bc);
     }
 
+    pub fn broadcaster_opt(&self) -> Option<Arc<dyn Broadcaster>> {
+        self.broadcaster.read().clone()
+    }
+
     pub fn take_conflicts(&self) -> Vec<ConflictNotice> {
         std::mem::take(&mut *self.conflicts.write())
     }
@@ -101,6 +130,8 @@ impl MemoStore {
         content: &str,
         actor_person_id: &str,
         actor_name: &str,
+        visibility: MemoVisibility,
+        owner_fp: &str,
     ) -> anyhow::Result<MemoItem> {
         let mut items = self.items.write();
         let prev = items.get(id).cloned();
@@ -114,6 +145,8 @@ impl MemoStore {
             node_id: self.node_id.clone(),
             modified_by_person_id: actor_person_id.to_string(),
             modified_by_name: actor_name.to_string(),
+            visibility,
+            owner_fp: owner_fp.to_string(),
         };
         items.insert(id.to_string(), item.clone());
         drop(items);

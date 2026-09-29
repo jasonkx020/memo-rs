@@ -40,6 +40,7 @@ pub enum MsgType {
     SyncRequest,
     SyncResponse,
     SyncReject,
+    PrivateBackupPush,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,14 +74,25 @@ pub struct SyncReject {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Announce {
+    /// 协议版本：2 = 身份密钥架构
     v: u8,
     node_id: String,
     tcp_port: u16,
     salt_fp: String,
+    #[serde(default)]
+    key_fingerprint: String,
+    #[serde(default)]
+    alias: String,
+    #[serde(default = "default_true_announce")]
+    accept_backup: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disk_free: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disk_total: Option<u64>,
+}
+
+fn default_true_announce() -> bool {
+    true
 }
 
 /// UDP 成员状态（控制面）
@@ -119,6 +131,9 @@ pub struct DiscoveredPeer {
     pub disk_total: Option<u64>,
     /// 兼容旧字段：等同 sync_ready
     pub connected: bool,
+    pub key_fingerprint: String,
+    pub alias: String,
+    pub accept_backup: bool,
 }
 
 struct DiscoEntry {
@@ -127,6 +142,9 @@ struct DiscoEntry {
     last_seen: Instant,
     disk_free: Option<u64>,
     disk_total: Option<u64>,
+    key_fingerprint: String,
+    alias: String,
+    accept_backup: bool,
 }
 
 struct PeerHandle {
@@ -143,6 +161,10 @@ pub struct SyncEngine {
     peers_cfg: Vec<String>,
     salt_fp: String,
     lan_discovery: bool,
+    node_visible: bool,
+    accept_foreign_backup: bool,
+    identity_fp: RwLock<String>,
+    identity_alias: RwLock<String>,
     data_dir: PathBuf,
     store: Arc<MemoStore>,
     person_store: Arc<PersonStore>,
@@ -183,9 +205,40 @@ impl SyncEngine {
         store: Arc<MemoStore>,
         person_store: Arc<PersonStore>,
         task_store: Arc<TaskStore>,
-        // 集群盐：局域网发现分组，与主密码无关
         cluster_salt_hex: String,
         lan_discovery: bool,
+        data_dir: PathBuf,
+    ) -> Arc<Self> {
+        Self::new_with_identity(
+            node_id,
+            port,
+            peers,
+            store,
+            person_store,
+            task_store,
+            cluster_salt_hex,
+            lan_discovery,
+            true,
+            true,
+            String::new(),
+            String::new(),
+            data_dir,
+        )
+    }
+
+    pub fn new_with_identity(
+        node_id: String,
+        port: u16,
+        peers: Vec<String>,
+        store: Arc<MemoStore>,
+        person_store: Arc<PersonStore>,
+        task_store: Arc<TaskStore>,
+        cluster_salt_hex: String,
+        lan_discovery: bool,
+        node_visible: bool,
+        accept_foreign_backup: bool,
+        identity_fp: String,
+        identity_alias: String,
         data_dir: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -194,6 +247,10 @@ impl SyncEngine {
             peers_cfg: peers,
             salt_fp: compute_salt_fp(&cluster_salt_hex),
             lan_discovery,
+            node_visible,
+            accept_foreign_backup,
+            identity_fp: RwLock::new(identity_fp),
+            identity_alias: RwLock::new(identity_alias),
             data_dir,
             store,
             person_store,
@@ -429,16 +486,21 @@ impl SyncEngine {
                 _ = interval.tick() => {
                     self.prune_discovered();
                     let disk = self.local_disk();
-                    let ann = Announce {
-                        v: 1,
-                        node_id: self.node_id.clone(),
-                        tcp_port: self.port,
-                        salt_fp: self.salt_fp.clone(),
-                        disk_free: Some(disk.free_bytes),
-                        disk_total: Some(disk.total_bytes),
-                    };
-                    if let Ok(bytes) = serde_json::to_vec(&ann) {
-                        let _ = sock.send_to(&bytes, broadcast).await;
+                    if self.node_visible {
+                        let ann = Announce {
+                            v: 2,
+                            node_id: self.node_id.clone(),
+                            tcp_port: self.port,
+                            salt_fp: self.salt_fp.clone(),
+                            key_fingerprint: self.identity_fp.read().clone(),
+                            alias: self.identity_alias.read().clone(),
+                            accept_backup: self.accept_foreign_backup,
+                            disk_free: Some(disk.free_bytes),
+                            disk_total: Some(disk.total_bytes),
+                        };
+                        if let Ok(bytes) = serde_json::to_vec(&ann) {
+                            let _ = sock.send_to(&bytes, broadcast).await;
+                        }
                     }
                 }
                 res = sock.recv_from(&mut buf) => {
@@ -446,7 +508,8 @@ impl SyncEngine {
                     let Ok(ann) = serde_json::from_slice::<Announce>(&buf[..n]) else {
                         continue;
                     };
-                    if ann.v != 1 {
+                    if ann.v != 2 {
+                        // 旧协议不兼容：忽略
                         continue;
                     }
                     if ann.node_id == self.node_id {
@@ -467,6 +530,9 @@ impl SyncEngine {
                             last_seen: Instant::now(),
                             disk_free: ann.disk_free,
                             disk_total: ann.disk_total,
+                            key_fingerprint: ann.key_fingerprint,
+                            alias: ann.alias,
+                            accept_backup: ann.accept_backup,
                         },
                     );
                 }
@@ -701,9 +767,22 @@ impl SyncEngine {
                     return;
                 }
                 if let Ok(item) = serde_json::from_value::<MemoItem>(env.payload) {
-                    match self.store.merge(item, &env.from) {
-                        Ok(_) => self.notify(),
-                        Err(_) => {}
+                    if let Some(svc) = self.service.read().upgrade() {
+                        match svc.merge_public_remote(item, &env.from) {
+                            Ok(true) => self.notify(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            MsgType::PrivateBackupPush => {
+                if let Ok(blob) = serde_json::from_value::<memo_core::hosted::HostedBlob>(env.payload)
+                {
+                    if let Some(svc) = self.service.read().upgrade() {
+                        match svc.ingest_hosted_blob(blob) {
+                            Ok(true) => {}
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -738,8 +817,23 @@ impl SyncEngine {
                 }
             }
             MsgType::SyncRequest => {
+                let items: Vec<MemoItem> = if let Some(svc) = self.service.read().upgrade() {
+                    self.store
+                        .all()
+                        .into_iter()
+                        .filter_map(|it| svc.for_public_broadcast(&it))
+                        .collect()
+                } else {
+                    self.store
+                        .all()
+                        .into_iter()
+                        .filter(|it| {
+                            matches!(it.visibility, memo_core::MemoVisibility::Public) && !it.deleted
+                        })
+                        .collect()
+                };
                 let resp_body = SyncResponse {
-                    items: self.store.all(),
+                    items,
                     persons: self.person_store.all(),
                     tasks: self.task_store.all(),
                 };
@@ -793,10 +887,12 @@ impl SyncEngine {
                 }
                 if let Ok(resp) = serde_json::from_value::<SyncResponse>(env.payload) {
                     let mut notify = false;
-                    for it in resp.items {
-                        match self.store.merge(it, &env.from) {
-                            Ok(_) => notify = true,
-                            Err(_) => {}
+                    if let Some(svc) = self.service.read().upgrade() {
+                        for it in resp.items {
+                            match svc.merge_public_remote(it, &env.from) {
+                                Ok(true) => notify = true,
+                                _ => {}
+                            }
                         }
                     }
                     for it in resp.persons {
@@ -870,6 +966,9 @@ impl SyncEngine {
                     disk_free: e.disk_free,
                     disk_total: e.disk_total,
                     connected: sync_ready,
+                    key_fingerprint: e.key_fingerprint.clone(),
+                    alias: e.alias.clone(),
+                    accept_backup: e.accept_backup,
                 },
             );
         }
@@ -904,6 +1003,9 @@ impl SyncEngine {
                     disk_free: None,
                     disk_total: None,
                     connected: sync_ready,
+                    key_fingerprint: String::new(),
+                    alias: String::new(),
+                    accept_backup: true,
                 },
             );
         }
@@ -963,10 +1065,16 @@ impl EngineBroadcaster {
 
 impl Broadcaster for EngineBroadcaster {
     fn broadcast_memo(&self, item: &MemoItem) {
+        let Some(svc) = self.engine.service.read().upgrade() else {
+            return;
+        };
+        let Some(pub_item) = svc.for_public_broadcast(item) else {
+            return; // 私密不走 mesh LWW
+        };
         self.broadcast_env(Envelope {
             msg_type: MsgType::MemoUpdate,
             from: self.engine.node_id.clone(),
-            payload: serde_json::to_value(item).unwrap_or_default(),
+            payload: serde_json::to_value(pub_item).unwrap_or_default(),
         });
     }
 
@@ -983,6 +1091,14 @@ impl Broadcaster for EngineBroadcaster {
             msg_type: MsgType::TaskUpdate,
             from: self.engine.node_id.clone(),
             payload: serde_json::to_value(item).unwrap_or_default(),
+        });
+    }
+
+    fn broadcast_hosted(&self, blob: &memo_core::hosted::HostedBlob) {
+        self.broadcast_env(Envelope {
+            msg_type: MsgType::PrivateBackupPush,
+            from: self.engine.node_id.clone(),
+            payload: serde_json::to_value(blob).unwrap_or_default(),
         });
     }
 }

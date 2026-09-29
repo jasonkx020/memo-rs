@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::identity_keys::SCHEMA_VERSION;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Argon2Params {
     pub memory: u32,
@@ -29,8 +31,15 @@ fn default_true() -> bool {
     true
 }
 
+fn default_schema() -> u32 {
+    SCHEMA_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// 配置 schema；与数据目录 schema 对齐
+    #[serde(default = "default_schema")]
+    pub schema_version: u32,
     pub node_id: String,
     /// 本机友好显示名（可选，仅本地展示）
     #[serde(default)]
@@ -39,14 +48,26 @@ pub struct Config {
     pub listen_port: u16,
     #[serde(default)]
     pub peers: Vec<String>,
-    /// 本机主密码 Argon2 盐（仅本地开库；各机可不同，与发现无关）
+    /// 遗留字段（身份模型下不再用于开库）；保留以免旧 settings 反序列化失败后被误用
+    #[serde(default)]
     pub salt_hex: String,
-    /// 局域网发现/集群身份盐（同集群须一致；与主密码无关）
+    /// 局域网发现/集群身份盐（同集群须一致）
     #[serde(default)]
     pub cluster_salt_hex: String,
-    /// 局域网 UDP 广播自动发现（端口 17000）
     #[serde(default = "default_true")]
     pub lan_discovery: bool,
+    /// 是否对外 UDP 广播本节点
+    #[serde(default = "default_true")]
+    pub node_visible: bool,
+    /// 是否接受他节点私人密文托管
+    #[serde(default = "default_true")]
+    pub accept_foreign_backup: bool,
+    /// 是否推送本身份私人备份
+    #[serde(default = "default_true")]
+    pub backup_enabled: bool,
+    /// 备份目标 node_id；空 = 所有可见且 accept_backup 的在线节点
+    #[serde(default)]
+    pub backup_targets: Vec<String>,
     #[serde(default)]
     pub argon2: Argon2Params,
 }
@@ -67,27 +88,97 @@ fn random_hex(n_bytes: usize) -> String {
     hex::encode(buf)
 }
 
+/// 枚举可用盘符（Windows）；非 Windows 返回空。
+pub fn list_drives() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut out = Vec::new();
+        for c in b'C'..=b'Z' {
+            let root = format!("{}:\\", c as char);
+            if Path::new(&root).exists() {
+                out.push(format!("{}:", c as char));
+            }
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// 默认数据盘：优先 D:，否则 C:；非 Windows 用配置根下 MemoData。
+pub fn default_data_drive() -> String {
+    #[cfg(windows)]
+    {
+        let drives = list_drives();
+        if drives.iter().any(|d| d.eq_ignore_ascii_case("D:")) {
+            return "D:".into();
+        }
+        if drives.iter().any(|d| d.eq_ignore_ascii_case("C:")) {
+            return "C:".into();
+        }
+        "C:".into()
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
+pub fn memo_data_path(drive: &str, node_id: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let drive = drive.trim().trim_end_matches('\\').trim_end_matches('/');
+        let drive = if drive.ends_with(':') {
+            drive.to_string()
+        } else {
+            format!("{drive}:")
+        };
+        PathBuf::from(format!("{drive}\\MemoData\\{node_id}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = drive;
+        app_root()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("MemoData")
+            .join(node_id)
+    }
+}
+
 pub fn default_config() -> anyhow::Result<Config> {
-    let root = app_root()?;
+    let node_id = format!("node-{}", &random_hex(4)[..8.min(8)]);
+    let drive = default_data_drive();
+    let data_dir = memo_data_path(&drive, &node_id)
+        .to_string_lossy()
+        .into_owned();
     Ok(Config {
-        node_id: format!("node-{}", &random_hex(4)[..8.min(8)]),
+        schema_version: SCHEMA_VERSION,
+        node_id,
         node_display_name: String::new(),
-        data_dir: root.join("data").to_string_lossy().into_owned(),
+        data_dir,
         listen_port: 7000,
         peers: vec![],
         salt_hex: random_hex(16),
         cluster_salt_hex: random_hex(16),
         lan_discovery: true,
+        node_visible: true,
+        accept_foreign_backup: true,
+        backup_enabled: true,
+        backup_targets: vec![],
         argon2: Argon2Params::default(),
     })
 }
 
 fn normalize(mut cfg: Config) -> Config {
     cfg.argon2 = Argon2Params::default();
+    cfg.schema_version = SCHEMA_VERSION;
     if cfg.data_dir.trim().is_empty() {
-        if let Ok(root) = app_root() {
-            cfg.data_dir = root.join("data").to_string_lossy().into_owned();
-        }
+        let drive = default_data_drive();
+        cfg.data_dir = memo_data_path(&drive, &cfg.node_id)
+            .to_string_lossy()
+            .into_owned();
     }
     if cfg.listen_port == 0 {
         cfg.listen_port = 7000;
@@ -104,14 +195,8 @@ fn normalize(mut cfg: Config) -> Config {
     if cfg.salt_hex.len() != 32 {
         cfg.salt_hex = random_hex(16);
     }
-    // 旧配置无 cluster_salt_hex：兼容迁移为与 salt_hex 相同，避免已部署集群突然失联。
-    // 新装则 default_config 已生成独立集群盐。
     if cfg.cluster_salt_hex.len() != 32 {
-        cfg.cluster_salt_hex = if cfg.salt_hex.len() == 32 {
-            cfg.salt_hex.clone()
-        } else {
-            random_hex(16)
-        };
+        cfg.cluster_salt_hex = random_hex(16);
     }
     cfg
 }
@@ -125,13 +210,8 @@ pub fn load_settings() -> anyhow::Result<Config> {
         return Ok(cfg);
     }
     let raw = fs::read_to_string(&path)?;
-    let needs_cluster_migrate = !raw.contains("\"cluster_salt_hex\"");
     let cfg: Config = serde_json::from_str(&raw)?;
     let cfg = normalize(cfg);
-    if needs_cluster_migrate {
-        // 把迁移出的 cluster_salt_hex 落盘，便于多机对齐
-        let _ = save_settings(&cfg);
-    }
     Ok(cfg)
 }
 
@@ -151,9 +231,9 @@ pub fn needs_restart(before: &Config, after: &Config) -> bool {
     before.node_id != after.node_id
         || before.data_dir != after.data_dir
         || before.listen_port != after.listen_port
-        || before.salt_hex != after.salt_hex
         || before.cluster_salt_hex != after.cluster_salt_hex
         || before.lan_discovery != after.lan_discovery
+        || before.node_visible != after.node_visible
 }
 
 pub fn ensure_data_dir(cfg: &Config) -> anyhow::Result<()> {

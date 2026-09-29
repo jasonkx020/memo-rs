@@ -188,6 +188,8 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 deleted: false,
                 version: m.version,
                 node_id: m.node_id,
+                visibility: crate::store::MemoVisibility::Private,
+                owner_fp: String::new(),
             })
             .collect(),
         persons: payload

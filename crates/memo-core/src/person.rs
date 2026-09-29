@@ -1,4 +1,4 @@
-//! 人员账号（主密码开库后，用人员密码切换身份）。
+//! 任务负责人等展示用人员目录（无日常密码；身份由密钥对决定）。
 
 use parking_lot::RwLock;
 use rand::RngCore;
@@ -9,20 +9,19 @@ use std::sync::Arc;
 
 use crate::audit::{AuditLog, EventData, EventType};
 use crate::config::Argon2Params;
-use crate::crypto::{self, derive_key};
 use crate::enc_store;
 use crate::store::{Broadcaster, ConflictNotice};
 
 const PERSON_FILE: &str = "persons.json.enc";
-const PERSON_MAGIC: &str = "MEMO_PERSON_V1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Person {
     pub id: String,
     pub name: String,
-    /// 人员密码校验密文（派生密钥加密的魔串）
+    /// 遗留字段，恒为空（不再校验人员密码）
+    #[serde(default)]
     pub password_verifier: String,
-    /// 人员独立盐（hex）
+    #[serde(default)]
     pub salt_hex: String,
     pub disabled: bool,
     pub deleted: bool,
@@ -45,6 +44,7 @@ pub struct PersonStore {
     node_id: String,
     data_dir: PathBuf,
     key: parking_lot::Mutex<Vec<u8>>,
+    #[allow(dead_code)]
     argon2: Argon2Params,
     audit: Arc<AuditLog>,
     broadcaster: RwLock<Option<Arc<dyn Broadcaster>>>,
@@ -78,7 +78,7 @@ impl PersonStore {
             audit,
             broadcaster: RwLock::new(None),
             conflicts: RwLock::new(Vec::new()),
-        })
+            })
     }
 
     pub fn set_broadcaster(&self, bc: Arc<dyn Broadcaster>) {
@@ -102,26 +102,6 @@ impl PersonStore {
         let items: Vec<_> = self.items.read().values().cloned().collect();
         let key = self.key.lock();
         enc_store::save_vec(&self.data_dir, PERSON_FILE, &key, &items)
-    }
-
-    fn make_verifier(&self, password: &str, salt_hex: &str) -> anyhow::Result<String> {
-        let salt = hex::decode(salt_hex.trim())?;
-        let derived = derive_key(password.as_bytes(), &salt, &self.argon2)?;
-        crypto::encrypt_string(&derived, PERSON_MAGIC)
-    }
-
-    pub fn verify_password(&self, person: &Person, password: &str) -> anyhow::Result<()> {
-        if password.is_empty() {
-            anyhow::bail!("请输入人员密码");
-        }
-        let salt = hex::decode(person.salt_hex.trim())?;
-        let derived = derive_key(password.as_bytes(), &salt, &self.argon2)?;
-        let plain = crypto::decrypt_string(&derived, &person.password_verifier)
-            .map_err(|_| anyhow::anyhow!("人员密码错误"))?;
-        if plain != PERSON_MAGIC {
-            anyhow::bail!("人员密码错误");
-        }
-        Ok(())
     }
 
     fn audit_write(
@@ -152,7 +132,7 @@ impl PersonStore {
         &self,
         id: &str,
         name: &str,
-        password: Option<&str>,
+        _password: Option<&str>,
         disabled: bool,
         keep_verifier: Option<(String, String)>,
         actor_person_id: &str,
@@ -161,18 +141,14 @@ impl PersonStore {
         let mut items = self.items.write();
         let prev = items.get(id).cloned();
         let ver = self.tick(0);
-        let (salt_hex, password_verifier) = if let Some(pw) = password {
-            let mut salt = vec![0u8; self.argon2.salt_len as usize];
-            rand::thread_rng().fill_bytes(&mut salt);
-            let salt_hex = hex::encode(&salt);
-            let verifier = self.make_verifier(pw, &salt_hex)?;
-            (salt_hex, verifier)
-        } else if let Some((s, v)) = keep_verifier {
+        let (salt_hex, password_verifier) = if let Some((s, v)) = keep_verifier {
             (s, v)
         } else if let Some(p) = &prev {
             (p.salt_hex.clone(), p.password_verifier.clone())
         } else {
-            anyhow::bail!("新建人员必须设置密码");
+            let mut salt = vec![0u8; 16];
+            rand::thread_rng().fill_bytes(&mut salt);
+            (hex::encode(salt), String::new())
         };
         let item = Person {
             id: id.to_string(),
@@ -207,27 +183,6 @@ impl PersonStore {
             bc.broadcast_person(&item);
         }
         Ok(item)
-    }
-
-    pub fn set_password(
-        &self,
-        id: &str,
-        new_password: &str,
-        actor_person_id: &str,
-        actor_name: &str,
-    ) -> anyhow::Result<Person> {
-        let prev = self
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("人员不存在"))?;
-        self.put_local(
-            id,
-            &prev.name,
-            Some(new_password),
-            prev.disabled,
-            None,
-            actor_person_id,
-            actor_name,
-        )
     }
 
     pub fn delete(
@@ -306,7 +261,6 @@ impl PersonStore {
             }
         }
         drop(items);
-        // 人员实体无 modified_by；同步合并审计不填操作人
         self.audit_write(ev, &remote.id, local.as_ref(), Some(&remote), source, None, None)?;
         self.persist()?;
         Ok(true)

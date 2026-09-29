@@ -3,19 +3,24 @@ mod china_calendar;
 mod fonts;
 mod help_view;
 mod history_view;
+mod identity_gate;
 mod people_view;
 mod save_dialog;
 mod theme;
 
 use calendar_view::CalUi;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Stroke, Vec2};
+use identity_gate::{GateAction, IdentityGateState};
 use memo_core::config::{self, Config};
+use memo_core::identity_keys::IdentityKeys;
 use memo_core::license::{self, LicenseStatus};
 use memo_core::service::{HistoryEvent, MemoService};
+use memo_core::store::MemoVisibility;
 use memo_core::task::TaskStatus;
 use memo_core::format_bytes;
 use memo_sync::{DiscoveredPeer, EngineBroadcaster, PeerStatus, SyncEngine};
 use people_view::PeopleUi;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -65,25 +70,12 @@ struct AppRuntime {
     svc: Arc<MemoService>,
     engine: Arc<SyncEngine>,
     cfg: Config,
+    /// 保持 tokio 运行时存活（同步引擎依赖它）
+    _rt: tokio::runtime::Runtime,
 }
 
 enum Screen {
-    Unlock {
-        password: String,
-        confirm: String,
-        first_setup: bool,
-        status: String,
-        busy: bool,
-    },
-    PersonGate {
-        rt: Arc<AppRuntime>,
-        selected: Option<String>,
-        password: String,
-        status: String,
-        create_name: String,
-        create_pw: String,
-        create_pw2: String,
-    },
+    IdentityGate(IdentityGateState),
     Main {
         rt: Arc<AppRuntime>,
         search: String,
@@ -96,6 +88,7 @@ enum Screen {
         show_new: bool,
         new_title: String,
         new_body: String,
+        new_public: bool,
         show_settings: bool,
         settings_draft: Config,
         show_delete: bool,
@@ -165,16 +158,10 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 impl MemoApp {
     pub fn new(cfg: Config) -> Self {
         let (tx, rx) = mpsc::channel();
-        let first_setup = is_first_setup(&cfg);
+        let gate = IdentityGateState::from_cfg(&cfg);
         Self {
             cfg,
-            screen: Screen::Unlock {
-                password: String::new(),
-                confirm: String::new(),
-                first_setup,
-                status: String::new(),
-                busy: false,
-            },
+            screen: Screen::IdentityGate(gate),
             tx,
             rx,
             theme_applied: false,
@@ -220,6 +207,7 @@ impl MemoApp {
             show_new: false,
             new_title: String::new(),
             new_body: String::new(),
+            new_public: false,
             show_settings: false,
             settings_draft: cfg.clone(),
             show_delete: false,
@@ -324,14 +312,11 @@ impl MemoApp {
                     ui.add_space(10.0);
                     ui.label(RichText::new("功能特性").strong().color(theme::TEXT));
                     ui.add_space(4.0);
-                    ui.label(RichText::new("· 绿色单文件，无需安装运行库").color(theme::TEXT));
-                    ui.label(RichText::new("· 本地 AES-256-GCM 加密存储").color(theme::TEXT));
-                    ui.label(RichText::new("· Argon2id 主密码派生").color(theme::TEXT));
+                    ui.label(RichText::new("· 身份密钥对登录 · 强制导出备份").color(theme::TEXT));
+                    ui.label(RichText::new("· 私人密文异地托管 · 公开备忘局域网同步").color(theme::TEXT));
                     ui.label(RichText::new("· Ed25519 审计链 · 变更时间线").color(theme::TEXT));
-                    ui.label(RichText::new("· LWW 同步 · 局域网 UDP 自动发现").color(theme::TEXT));
-                    ui.label(RichText::new("· 加密备份 (.memobak)").color(theme::TEXT));
-                    ui.label(RichText::new("· 人员管理与人员密码登录").color(theme::TEXT));
                     ui.label(RichText::new("· 日历：月历 / 周视图 / 甘特与工时").color(theme::TEXT));
+                    ui.label(RichText::new("· 加密备份 (.memobak)").color(theme::TEXT));
                     ui.add_space(10.0);
                     ui.label(
                         theme::muted_label(
@@ -356,20 +341,14 @@ impl MemoApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 BgMsg::UnlockResult(Ok(rt)) => {
-                    self.screen = Screen::PersonGate {
-                        rt,
-                        selected: None,
-                        password: String::new(),
-                        status: String::new(),
-                        create_name: String::new(),
-                        create_pw: String::new(),
-                        create_pw2: String::new(),
-                    };
+                    let cfg = rt.cfg.clone();
+                    self.cfg = cfg.clone();
+                    self.screen = Self::make_main(rt, &cfg);
                 }
                 BgMsg::UnlockResult(Err(e)) => {
-                    if let Screen::Unlock { status, busy, .. } = &mut self.screen {
-                        *status = format!("解锁失败: {e}");
-                        *busy = false;
+                    if let Screen::IdentityGate(st) = &mut self.screen {
+                        st.status = format!("打开失败: {e}");
+                        st.busy = false;
                     }
                 }
                 BgMsg::Error(e) => {
@@ -377,10 +356,10 @@ impl MemoApp {
                         Screen::Main { status_line, .. } => {
                             *status_line = format!("错误: {e}");
                         }
-                        Screen::PersonGate { status, .. } => {
-                            *status = format!("错误: {e}");
+                        Screen::IdentityGate(st) => {
+                            st.status = format!("错误: {e}");
+                            st.busy = false;
                         }
-                        _ => {}
                     }
                 }
                 BgMsg::Info(s) => {
@@ -507,19 +486,7 @@ impl eframe::App for MemoApp {
         self.pump(ctx);
 
         if self.pending_switch_person {
-            if let Screen::Main { rt, .. } = &self.screen {
-                let rt = rt.clone();
-                rt.svc.set_current_person(None);
-                self.screen = Screen::PersonGate {
-                    rt,
-                    selected: None,
-                    password: String::new(),
-                    status: String::new(),
-                    create_name: String::new(),
-                    create_pw: String::new(),
-                    create_pw2: String::new(),
-                };
-            }
+            self.screen = Screen::IdentityGate(IdentityGateState::from_cfg(&self.cfg));
             self.pending_switch_person = false;
         }
 
@@ -529,281 +496,45 @@ impl eframe::App for MemoApp {
 
         let mut show_help = self.show_help;
         let mut show_about = self.show_about;
-        let mut enter_main_rt: Option<Arc<AppRuntime>> = None;
 
         match &mut self.screen {
-            Screen::Unlock {
-                password,
-                confirm,
-                first_setup,
-                status,
-                busy,
-            } => {
-                egui::CentralPanel::default()
-                    .frame(Frame::none().fill(theme::BG))
-                    .show(ctx, |ui| {
-                        let avail = ui.available_size();
-                        let card_w = 400.0_f32;
-                        let card_h = if *first_setup { 420.0_f32 } else { 360.0_f32 };
-                        let left = ((avail.x - card_w) * 0.5).max(16.0);
-                        let top = ((avail.y - card_h) * 0.42).max(40.0);
-                        let card_rect = egui::Rect::from_min_size(
-                            egui::pos2(ui.min_rect().left() + left, ui.min_rect().top() + top),
-                            Vec2::new(card_w, card_h),
-                        );
-                        ui.allocate_ui_at_rect(card_rect, |ui| {
-                            theme::card_frame().show(ui, |ui| {
-                                ui.set_min_size(Vec2::new(card_w - 32.0, card_h - 32.0));
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(12.0);
-                                    ui.label(theme::brand_title(26.0));
-                                    ui.add_space(6.0);
-                                    ui.label(
-                                        theme::muted_label("本地加密 · 局域网同步 · 绿色单文件")
-                                            .size(13.0),
-                                    );
-                                    ui.add_space(28.0);
-                                    ui.label(
-                                        RichText::new(if *first_setup {
-                                            "设置主密码"
-                                        } else {
-                                            "主密码"
-                                        })
-                                        .strong()
-                                        .color(theme::TEXT)
-                                        .size(13.0),
-                                    );
-                                    ui.add_space(6.0);
-                                    theme::password_field(
-                                        ui,
-                                        password,
-                                        if *first_setup {
-                                            "设置主密码"
-                                        } else {
-                                            "输入主密码解锁"
-                                        },
-                                        320.0,
-                                        36.0,
-                                    );
-                                    if *first_setup {
-                                        ui.add_space(12.0);
-                                        ui.label(
-                                            RichText::new("确认主密码")
-                                                .strong()
-                                                .color(theme::TEXT)
-                                                .size(13.0),
-                                        );
-                                        ui.add_space(6.0);
-                                        theme::password_field(
-                                            ui,
-                                            confirm,
-                                            "再次输入以确认",
-                                            320.0,
-                                            36.0,
-                                        );
-                                    }
-                                    ui.add_space(18.0);
-                                    let btn_label = if *busy {
-                                        if *first_setup {
-                                            "初始化中…"
-                                        } else {
-                                            "解锁中…"
-                                        }
-                                    } else if *first_setup {
-                                        "开始使用"
-                                    } else {
-                                        "解锁"
-                                    };
-                                    let unlock = ui.add_sized(
-                                        [320.0, 36.0],
-                                        egui::Button::new(
-                                            RichText::new(btn_label)
-                                                .color(Color32::WHITE)
-                                                .strong()
-                                                .size(15.0),
-                                        )
-                                        .fill(theme::ACCENT),
-                                    );
-                                    if (unlock.clicked()
-                                        || ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                                        && !*busy
-                                    {
-                                        if password.is_empty() {
-                                            *status = "主密码不能为空".into();
-                                        } else if *first_setup
-                                            && (confirm.is_empty() || confirm != password)
-                                        {
-                                            *status = "两次输入不一致，请重新输入".into();
-                                        } else {
-                                            *busy = true;
-                                            *status = "正在派生密钥，请稍候…".into();
-                                            let cfg = self.cfg.clone();
-                                            let pw = password.clone();
-                                            *password = String::new();
-                                            *confirm = String::new();
-                                            let tx = self.tx.clone();
-                                            std::thread::spawn(move || {
-                                                let res = unlock_runtime(cfg, pw.as_bytes())
-                                                    .map_err(|e| e.to_string());
-                                                let _ = tx.send(BgMsg::UnlockResult(res));
-                                            });
-                                        }
-                                    }
-                                    ui.add_space(14.0);
-                                    if !status.is_empty() {
-                                        let c = if *busy {
-                                            theme::TEXT_MUTED
-                                        } else {
-                                            theme::DANGER
-                                        };
-                                        ui.label(RichText::new(status.as_str()).color(c).size(13.0));
-                                    }
-                                    ui.add_space(20.0);
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .link(RichText::new("使用说明").color(theme::ACCENT))
-                                            .clicked()
-                                        {
-                                            show_help = true;
-                                        }
-                                        ui.label(theme::muted_label("·").small());
-                                        if ui
-                                            .link(RichText::new("关于").color(theme::ACCENT))
-                                            .clicked()
-                                        {
-                                            show_about = true;
-                                        }
-                                    });
-                                });
-                            });
-                        });
-                    });
-            }
-            Screen::PersonGate {
-                rt,
-                selected,
-                password,
-                status,
-                create_name,
-                create_pw,
-                create_pw2,
-            } => {
-                let rt = rt.clone();
-                let persons = rt.svc.list_active_persons();
-                let need_create = persons.is_empty();
-                egui::CentralPanel::default()
-                    .frame(Frame::none().fill(theme::BG))
-                    .show(ctx, |ui| {
-                        let avail = ui.available_size();
-                        let card_w = 420.0_f32;
-                        let card_h = if need_create { 380.0_f32 } else { 420.0_f32 };
-                        let left = ((avail.x - card_w) * 0.5).max(16.0);
-                        let top = ((avail.y - card_h) * 0.35).max(40.0);
-                        let card_rect = egui::Rect::from_min_size(
-                            egui::pos2(ui.min_rect().left() + left, ui.min_rect().top() + top),
-                            Vec2::new(card_w, card_h),
-                        );
-                        ui.allocate_ui_at_rect(card_rect, |ui| {
-                            theme::card_frame().show(ui, |ui| {
-                                ui.set_min_width(card_w - 24.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        RichText::new("选择人员")
-                                            .size(22.0)
-                                            .strong()
-                                            .color(theme::TEXT),
-                                    );
-                                    ui.label(
-                                        theme::muted_label(
-                                            "主密码已解锁 · 请登录人员身份后继续",
-                                        )
-                                        .small(),
-                                    );
-                                });
-                                ui.add_space(12.0);
-                                if need_create {
-                                    ui.label(
-                                        RichText::new("首次使用：创建首位人员")
-                                            .strong()
-                                            .color(theme::TEXT),
-                                    );
-                                    ui.horizontal(|ui| {
-                                        ui.label("姓名");
-                                        ui.add(
-                                            egui::TextEdit::singleline(create_name)
-                                                .desired_width(220.0),
-                                        );
-                                    });
-                                    theme::password_field(ui, create_pw, "人员密码", 280.0, 34.0);
-                                    theme::password_field(ui, create_pw2, "确认密码", 280.0, 34.0);
-                                    ui.add_space(8.0);
-                                    if theme::primary_button(ui, "创建并进入").clicked() {
-                                        if create_pw != create_pw2 {
-                                            *status = "两次密码不一致".into();
-                                        } else {
-                                            match rt.svc.add_person(create_name, create_pw) {
-                                                Ok(id) => {
-                                                    if let Err(e) =
-                                                        rt.svc.verify_person_password(&id, create_pw)
-                                                    {
-                                                        *status = e.to_string();
-                                                    } else {
-                                                        enter_main_rt = Some(rt.clone());
-                                                    }
-                                                }
-                                                Err(e) => *status = e.to_string(),
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                                        for p in &persons {
-                                            let sel = selected.as_deref() == Some(p.id.as_str());
-                                            if ui
-                                                .selectable_label(
-                                                    sel,
-                                                    RichText::new(&p.name).size(15.0),
-                                                )
-                                                .clicked()
-                                            {
-                                                *selected = Some(p.id.clone());
-                                                password.clear();
-                                            }
-                                        }
-                                    });
-                                    ui.add_space(8.0);
-                                    theme::password_field(ui, password, "人员密码", 280.0, 34.0);
-                                    ui.add_space(8.0);
-                                    let can = selected.is_some() && !password.is_empty();
-                                    if ui
-                                        .add_enabled(
-                                            can,
-                                            egui::Button::new(
-                                                RichText::new("进入").color(Color32::WHITE).strong(),
-                                            )
-                                            .fill(theme::ACCENT),
-                                        )
-                                        .clicked()
-                                    {
-                                        if let Some(id) = selected.clone() {
-                                            match rt.svc.verify_person_password(&id, password) {
-                                                Ok(()) => {
-                                                    enter_main_rt = Some(rt.clone());
-                                                }
-                                                Err(e) => *status = e.to_string(),
-                                            }
-                                        }
-                                    }
+            Screen::IdentityGate(st) => {
+                if st.busy {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                match identity_gate::show(ctx, &mut self.cfg, st) {
+                    GateAction::ShowHelp => show_help = true,
+                    GateAction::Unlock {
+                        cfg,
+                        identity,
+                        export_path,
+                        export_pass,
+                    } => {
+                        st.busy = true;
+                        st.status = if export_path.is_some() {
+                            "正在导出并打开…".into()
+                        } else {
+                            "正在打开…".into()
+                        };
+                        let tx = self.tx.clone();
+                        ctx.request_repaint();
+                        std::thread::spawn(move || {
+                            let res = (|| {
+                                if let Some(path) = export_path.as_ref() {
+                                    let p = PathBuf::from(path);
+                                    identity.export_file(&p, &export_pass)?;
                                 }
-                                if !status.is_empty() {
-                                    ui.add_space(8.0);
-                                    ui.label(
-                                        RichText::new(status.as_str()).color(theme::DANGER).small(),
-                                    );
-                                }
-                            });
+                                config::ensure_data_dir(&cfg)?;
+                                let mut id = identity;
+                                id.mark_exported(PathBuf::from(&cfg.data_dir).as_path())?;
+                                unlock_runtime_identity(cfg, id)
+                            })()
+                            .map_err(|e| e.to_string());
+                            let _ = tx.send(BgMsg::UnlockResult(res));
                         });
-                    });
+                    }
+                    GateAction::None => {}
+                }
             }
             Screen::Main {
                 rt,
@@ -815,6 +546,7 @@ impl eframe::App for MemoApp {
                 show_new,
                 new_title,
                 new_body,
+                new_public,
                 show_settings,
                 settings_draft,
                 show_delete,
@@ -862,12 +594,6 @@ impl eframe::App for MemoApp {
                     self.last_peer_refresh = Instant::now();
                 }
 
-                let person_label = rt
-                    .svc
-                    .current_person_id()
-                    .map(|id| rt.svc.person_name(&id))
-                    .unwrap_or_else(|| "未选择".into());
-
                 egui::TopBottomPanel::top("top")
                     .frame(theme::top_bar_frame())
                     .show(ctx, |ui| {
@@ -875,14 +601,18 @@ impl eframe::App for MemoApp {
                             ui.label(theme::brand_title_on_navy(17.0));
                             ui.add_space(12.0);
                             ui.label(
-                                RichText::new(format!("人员 {person_label}"))
-                                    .color(Color32::from_rgb(0xE2, 0xE8, 0xF0))
-                                    .size(13.0),
+                                RichText::new(format!(
+                                    "身份 {} ({})",
+                                    rt.svc.session_alias(),
+                                    IdentityKeys::short_fp(rt.svc.session_fp())
+                                ))
+                                .color(Color32::from_rgb(0xE2, 0xE8, 0xF0))
+                                .size(13.0),
                             );
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("切换")
+                                        RichText::new("退出")
                                             .small()
                                             .color(Color32::from_rgb(0xE2, 0xE8, 0xF0)),
                                     )
@@ -1141,13 +871,28 @@ impl eframe::App for MemoApp {
                                                     egui::Sense::hover(),
                                                 );
                                                 ui.painter().circle_filled(rect.center(), 3.5, dot);
+                                                let title = if d.alias.is_empty() {
+                                                    d.node_id.clone()
+                                                } else {
+                                                    format!("{} · {}", d.alias, d.node_id)
+                                                };
                                                 ui.label(
-                                                    RichText::new(&d.node_id)
+                                                    RichText::new(title)
                                                         .strong()
                                                         .small()
                                                         .color(theme::TEXT),
                                                 );
                                             });
+                                            if !d.key_fingerprint.is_empty() {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "身份 {}",
+                                                        IdentityKeys::short_fp(&d.key_fingerprint)
+                                                    ))
+                                                    .small()
+                                                    .color(theme::TEXT_MUTED),
+                                                );
+                                            }
                                             ui.label(
                                                 RichText::new(&d.addr)
                                                     .small()
@@ -1164,6 +909,13 @@ impl eframe::App for MemoApp {
                                                         RichText::new("通道")
                                                             .small()
                                                             .color(theme::SUCCESS),
+                                                    );
+                                                }
+                                                if d.accept_backup {
+                                                    ui.label(
+                                                        RichText::new("可托管")
+                                                            .small()
+                                                            .color(theme::ACCENT),
                                                     );
                                                 }
                                                 if d.status != PeerStatus::Undiscovered
@@ -1952,14 +1704,20 @@ impl eframe::App for MemoApp {
                                     .desired_width(f32::INFINITY)
                                     .hint_text("输入内容…"),
                             );
+                            ui.checkbox(new_public, "公开（局域网可读；默认私密并异地密文托管）");
                             ui.horizontal(|ui| {
                                 if theme::success_button(ui, "添加").clicked() {
                                     let svc = rt.svc.clone();
                                     let t = new_title.clone();
                                     let b = new_body.clone();
+                                    let vis = if *new_public {
+                                        MemoVisibility::Public
+                                    } else {
+                                        MemoVisibility::Private
+                                    };
                                     let tx = self.tx.clone();
                                     *show_new = false;
-                                    std::thread::spawn(move || match svc.add(&t, &b) {
+                                    std::thread::spawn(move || match svc.add(&t, &b, vis) {
                                         Ok(id) => {
                                             let _ = tx.send(BgMsg::Info(format!("已添加 {id}")));
                                             let _ = tx.send(BgMsg::Refresh);
@@ -1987,7 +1745,7 @@ impl eframe::App for MemoApp {
                             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                             .show(ctx, |ui| {
                                 ui.label(
-                                    RichText::new("删除后不可轻易恢复，请输入主密码确认。").strong(),
+                                    RichText::new("删除后不可轻易恢复，确认删除？").strong(),
                                 );
                                 ui.add_space(8.0);
                                 ui.label("主密码");
@@ -2288,9 +2046,18 @@ impl eframe::App for MemoApp {
                                     .collect();
                             }
                             ui.checkbox(&mut settings_draft.lan_discovery, "局域网自动发现 (UDP 17000)");
+                            ui.checkbox(&mut settings_draft.node_visible, "对外广播本节点（可见）");
+                            ui.checkbox(
+                                &mut settings_draft.accept_foreign_backup,
+                                "接受他节点私人密文托管",
+                            );
+                            ui.checkbox(
+                                &mut settings_draft.backup_enabled,
+                                "推送本身份私人备份到网络",
+                            );
                             ui.label(
                                 RichText::new(
-                                    "集群盐 cluster_salt_hex（同局域网互通须一致；与主密码无关）",
+                                    "集群盐 cluster_salt_hex（同局域网互通须一致）",
                                 )
                                 .small()
                                 .color(theme::TEXT_MUTED),
@@ -2356,10 +2123,6 @@ impl eframe::App for MemoApp {
                         });
                 }
             }
-        }
-
-        if let Some(rt) = enter_main_rt {
-            self.screen = Self::make_main(rt, &self.cfg);
         }
 
         Self::draw_help_about_windows(ctx, &mut show_help, &mut show_about);
@@ -2801,33 +2564,49 @@ fn ellipsize_ui(ui: &egui::Ui, text: &str, font_id: egui::FontId, max_width: f32
     }
 }
 
-fn is_first_setup(cfg: &Config) -> bool {
-    !std::path::Path::new(&cfg.data_dir)
-        .join("keys")
-        .join("private.key")
-        .exists()
-}
+fn unlock_runtime_identity(
+    cfg: Config,
+    identity: IdentityKeys,
+) -> anyhow::Result<Arc<AppRuntime>> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("memo-sync")
+        .worker_threads(2)
+        .build()
+        .map_err(|e| anyhow::anyhow!("无法启动后台运行时: {e}"))?;
 
-fn unlock_runtime(cfg: Config, password: &[u8]) -> anyhow::Result<Arc<AppRuntime>> {
-    let rt = tokio::runtime::Runtime::new()?;
-    let _guard = rt.enter();
-    let (svc, _audit) = memo_core::service::unlock(cfg.clone(), password)?;
-    let engine = SyncEngine::new(
-        cfg.node_id.clone(),
-        cfg.listen_port,
-        cfg.peers.clone(),
-        svc.store(),
-        svc.person_store(),
-        svc.task_store(),
-        cfg.cluster_salt_hex.clone(),
-        cfg.lan_discovery,
-        std::path::PathBuf::from(&cfg.data_dir),
-    );
-    engine.set_service(&svc);
-    svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
-    engine.start();
-    std::mem::forget(rt);
-    Ok(Arc::new(AppRuntime { svc, engine, cfg }))
+    let (svc, engine) = {
+        let _guard = rt.enter();
+        let (svc, _audit) =
+            memo_core::service::unlock_with_identity(cfg.clone(), &identity)?;
+        let _ = svc.restore_from_hosted();
+        let engine = SyncEngine::new_with_identity(
+            cfg.node_id.clone(),
+            cfg.listen_port,
+            cfg.peers.clone(),
+            svc.store(),
+            svc.person_store(),
+            svc.task_store(),
+            cfg.cluster_salt_hex.clone(),
+            cfg.lan_discovery,
+            cfg.node_visible,
+            cfg.accept_foreign_backup,
+            identity.fingerprint.clone(),
+            identity.alias.clone(),
+            PathBuf::from(&cfg.data_dir),
+        );
+        engine.set_service(&svc);
+        svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
+        engine.start();
+        (svc, engine)
+    };
+
+    Ok(Arc::new(AppRuntime {
+        svc,
+        engine,
+        cfg,
+        _rt: rt,
+    }))
 }
 
 pub fn run_gui(cfg: Config) -> eframe::Result<()> {

@@ -4,10 +4,12 @@
 
 use clap::Parser;
 use memo_core::config::{self, Config};
+use memo_core::identity_keys::IdentityKeys;
+use memo_core::store::MemoVisibility;
 use memo_sync::{EngineBroadcaster, SyncEngine};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
-use zeroize::Zeroize;
 
 #[derive(Parser, Debug)]
 #[command(name = "memo", about = "分布式安全备忘录 (Rust)")]
@@ -15,6 +17,12 @@ struct Args {
     /// 无 UI 守护节点（REPL）
     #[arg(long)]
     headless: bool,
+    /// 身份指纹（headless 必填，或配合 --identity-file）
+    #[arg(long)]
+    identity: Option<String>,
+    /// .memokey 文件路径
+    #[arg(long)]
+    identity_file: Option<String>,
 }
 
 #[cfg(windows)]
@@ -40,26 +48,45 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let cfg = config::load_settings()?;
     if args.headless {
-        run_headless(cfg)
+        run_headless(cfg, args)
     } else {
         memo_app::run_gui(cfg).map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
 
-fn run_headless(cfg: Config) -> anyhow::Result<()> {
-    eprint!("请输入主密码: ");
-    let _ = io::stderr().flush();
-    let mut password = rpassword::read_password()?;
-    if password.is_empty() {
-        anyhow::bail!("主密码不能为空");
-    }
+fn run_headless(cfg: Config, args: Args) -> anyhow::Result<()> {
+    let identity = if let Some(path) = args.identity_file.as_deref() {
+        eprint!("若密钥包有保险口令请输入（可空）: ");
+        let _ = io::stderr().flush();
+        let pass = rpassword::read_password().unwrap_or_default();
+        IdentityKeys::import_file(PathBuf::from(path).as_path(), &pass)?
+    } else if let Some(fp) = args.identity.as_deref() {
+        IdentityKeys::load(PathBuf::from(&cfg.data_dir).as_path(), fp)?
+    } else {
+        let list = IdentityKeys::list(PathBuf::from(&cfg.data_dir).as_path())?;
+        if list.is_empty() {
+            anyhow::bail!("无身份。请先用 GUI 初始化，或指定 --identity / --identity-file");
+        }
+        eprintln!("可用身份:");
+        for m in &list {
+            eprintln!("  {}  {}", m.fingerprint, m.alias);
+        }
+        eprint!("输入指纹: ");
+        let _ = io::stderr().flush();
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        IdentityKeys::load(
+            PathBuf::from(&cfg.data_dir).as_path(),
+            line.trim(),
+        )?
+    };
 
     let rt = tokio::runtime::Runtime::new()?;
     let _enter = rt.enter();
-    let (svc, _) = memo_core::service::unlock(cfg.clone(), password.as_bytes())?;
-    password.zeroize();
+    let (svc, _) = memo_core::service::unlock_with_identity(cfg.clone(), &identity)?;
+    let _ = svc.restore_from_hosted();
 
-    let engine = SyncEngine::new(
+    let engine = SyncEngine::new_with_identity(
         cfg.node_id.clone(),
         cfg.listen_port,
         cfg.peers.clone(),
@@ -68,130 +95,82 @@ fn run_headless(cfg: Config) -> anyhow::Result<()> {
         svc.task_store(),
         cfg.cluster_salt_hex.clone(),
         cfg.lan_discovery,
-        std::path::PathBuf::from(&cfg.data_dir),
+        cfg.node_visible,
+        cfg.accept_foreign_backup,
+        identity.fingerprint.clone(),
+        identity.alias.clone(),
+        PathBuf::from(&cfg.data_dir),
     );
     engine.set_service(&svc);
     svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
     engine.start();
 
     println!(
-        "headless · 节点 {}\n命令: add | list | edit | del | export | verify | peers | discover | quit",
-        cfg.node_id
+        "headless · 节点 {} · 身份 {} ({})\n命令: add | list | edit | del | export | verify | peers | discover | quit",
+        cfg.node_id,
+        identity.alias,
+        IdentityKeys::short_fp(&identity.fingerprint)
     );
-    if let Ok(p) = config::settings_path() {
-        println!("设置: {}", p.display());
-    }
 
     let stdin = io::stdin();
     loop {
-        print!("> ");
-        let _ = io::stdout().flush();
+        eprint!("> ");
+        let _ = io::stderr().flush();
         let mut line = String::new();
         if stdin.read_line(&mut line)? == 0 {
             break;
         }
-        let line = line.trim();
-        if line.is_empty() {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.split_whitespace().collect();
         match parts[0] {
             "quit" | "exit" => break,
-            "add" => {
-                let title = parts.get(1).copied().unwrap_or("");
-                let content = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
-                match svc.add(title, &content) {
-                    Ok(id) => println!("id: {id}"),
-                    Err(e) => println!("err: {e}"),
-                }
-            }
             "list" => {
-                for v in svc.list() {
-                    let preview: String = v.content.chars().take(40).collect();
+                for m in svc.list() {
                     println!(
-                        "{}\t{}\tv{}\t{preview}",
-                        &v.id[..8.min(v.id.len())],
-                        v.title,
-                        v.version
+                        "{} [{}] {}  v{}",
+                        &m.id[..8.min(m.id.len())],
+                        m.visibility.label(),
+                        m.title,
+                        m.version
                     );
                 }
             }
-            "edit" => {
-                if parts.len() < 3 {
-                    println!("用法: edit <id> <title>");
+            "add" => {
+                if parts.len() < 2 {
+                    println!("用法: add <标题>");
                     continue;
                 }
-                let id = parts[1];
-                let title = parts[2..].join(" ");
-                print!("新内容: ");
-                let _ = io::stdout().flush();
-                let mut body = String::new();
-                stdin.read_line(&mut body)?;
-                match svc.edit(id, &title, body.trim_end()) {
-                    Ok(()) => println!("ok"),
-                    Err(e) => println!("err: {e}"),
+                let title = parts[1..].join(" ");
+                match svc.add(&title, "", MemoVisibility::Private) {
+                    Ok(id) => println!("ok {id}"),
+                    Err(e) => eprintln!("{e}"),
                 }
             }
-            "del" | "delete" => {
-                if parts.len() < 2 {
-                    println!("用法: del <id>");
-                    continue;
+            "peers" => {
+                for p in engine.connected_peers() {
+                    println!("{p}");
                 }
-                eprint!("请输入主密码以确认删除: ");
-                let _ = io::stderr().flush();
-                let mut pw = rpassword::read_password()?;
-                match svc.delete(parts[1], &pw) {
-                    Ok(()) => println!("ok"),
-                    Err(e) => println!("err: {e}"),
+            }
+            "discover" => {
+                for p in engine.discovered_peers() {
+                    println!(
+                        "{} {} {} backup={} fp={}",
+                        p.node_id,
+                        p.status.label(),
+                        p.alias,
+                        p.accept_backup,
+                        IdentityKeys::short_fp(&p.key_fingerprint)
+                    );
                 }
-                pw.zeroize();
             }
             "verify" => {
                 let (ok, detail) = svc.verify_audit();
-                if ok {
-                    println!("审计: 完整");
-                } else {
-                    println!("审计失败: {detail}");
-                }
+                println!("{} {}", if ok { "ok" } else { "fail" }, detail);
             }
-            "peers" => println!("{:?}", engine.connected_peers()),
-            "discover" => {
-                let list = engine.discovered_peers();
-                if list.is_empty() {
-                    println!("(无发现节点)");
-                } else {
-                    for d in list {
-                        let st = if d.connected { "在线" } else { "已发现" };
-                        println!(
-                            "{}\t{}\t{}\t{}s前",
-                            d.node_id, d.addr, st, d.last_seen_secs
-                        );
-                    }
-                }
-                if let Some(err) = engine.listen_error() {
-                    println!("listen_error: {err}");
-                }
-            }
-            "export" => {
-                if parts.len() < 2 {
-                    println!("用法: export <path.txt>");
-                    continue;
-                }
-                eprint!("请输入主密码以确认导出: ");
-                let _ = io::stderr().flush();
-                let mut pw = rpassword::read_password()?;
-                match svc.verify_password(&pw) {
-                    Ok(()) => match svc.export_txt(parts[1].into(), None) {
-                        Ok(()) => println!("ok: {}", parts[1]),
-                        Err(e) => println!("err: {e}"),
-                    },
-                    Err(e) => println!("err: {e}"),
-                }
-                pw.zeroize();
-            }
-            _ => println!("未知命令"),
+            other => println!("未知命令: {other}"),
         }
     }
-    engine.stop();
     Ok(())
 }

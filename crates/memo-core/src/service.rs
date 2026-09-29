@@ -7,12 +7,13 @@ use zeroize::Zeroizing;
 use crate::audit::{AuditLog, EventData, EventType};
 use crate::backup;
 use crate::config::Config;
-use crate::crypto::{self, derive_key, keys_equal, resolve_salt};
+use crate::crypto;
 use crate::export::export_txt;
+use crate::hosted::{HostedBlob, HostedStore};
+use crate::identity_keys::{self, IdentityKeys};
 use crate::person::{Person, PersonStore, PersonView};
-use crate::store::{Broadcaster, ConflictNotice, MemoItem, MemoStore};
+use crate::store::{Broadcaster, ConflictNotice, MemoItem, MemoStore, MemoVisibility};
 use crate::task::{TaskItem, TaskStatus, TaskStore, TaskView};
-use crate::verifier;
 
 #[derive(Debug, Clone)]
 pub struct MemoView {
@@ -22,6 +23,8 @@ pub struct MemoView {
     pub deleted: bool,
     pub version: u64,
     pub node_id: String,
+    pub visibility: MemoVisibility,
+    pub owner_fp: String,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +61,10 @@ pub struct MemoService {
     store: Arc<MemoStore>,
     person_store: Arc<PersonStore>,
     task_store: Arc<TaskStore>,
+    hosted: Arc<HostedStore>,
     audit: Arc<AuditLog>,
+    session_fp: String,
+    session_alias: String,
     current_person_id: Mutex<Option<String>>,
     subs: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 }
@@ -70,7 +76,10 @@ impl MemoService {
         store: Arc<MemoStore>,
         person_store: Arc<PersonStore>,
         task_store: Arc<TaskStore>,
+        hosted: Arc<HostedStore>,
         audit: Arc<AuditLog>,
+        session_fp: String,
+        session_alias: String,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
@@ -78,7 +87,10 @@ impl MemoService {
             store,
             person_store,
             task_store,
+            hosted,
             audit,
+            session_fp,
+            session_alias,
             current_person_id: Mutex::new(None),
             subs: Mutex::new(Vec::new()),
         })
@@ -94,6 +106,18 @@ impl MemoService {
 
     pub fn task_store(&self) -> Arc<TaskStore> {
         self.task_store.clone()
+    }
+
+    pub fn hosted_store(&self) -> Arc<HostedStore> {
+        self.hosted.clone()
+    }
+
+    pub fn session_fp(&self) -> &str {
+        &self.session_fp
+    }
+
+    pub fn session_alias(&self) -> &str {
+        &self.session_alias
     }
 
     pub fn config(&self) -> &Config {
@@ -124,22 +148,25 @@ impl MemoService {
         *self.current_person_id.lock() = id;
     }
 
-    /// 当前会话操作人 (id, name)；未登录则空串。
     fn current_actor(&self) -> (String, String) {
-        match self.current_person_id() {
-            Some(id) => {
-                let name = self.person_name(&id);
-                (id, name)
-            }
-            None => (String::new(), String::new()),
-        }
+        (self.session_fp.clone(), self.session_alias.clone())
     }
 
-    pub fn add(&self, title: &str, content: &str) -> anyhow::Result<String> {
+    pub fn add(
+        &self,
+        title: &str,
+        content: &str,
+        visibility: MemoVisibility,
+    ) -> anyhow::Result<String> {
         let ct = crypto::encrypt_string(&self.key, content)?;
         let id = Uuid::new_v4().to_string().replace('-', "");
         let (aid, aname) = self.current_actor();
-        self.store.put(&id, title, &ct, &aid, &aname)?;
+        let item = self
+            .store
+            .put(&id, title, &ct, &aid, &aname, visibility, &self.session_fp)?;
+        if visibility == MemoVisibility::Private {
+            self.push_private_backup(&item)?;
+        }
         self.fire();
         Ok(id)
     }
@@ -148,9 +175,19 @@ impl MemoService {
         self.store
             .get_visible()
             .into_iter()
+            .filter(|it| {
+                it.visibility == MemoVisibility::Public
+                    || it.owner_fp.is_empty()
+                    || it.owner_fp == self.session_fp
+            })
             .map(|it| {
-                let plain = crypto::decrypt_string(&self.key, &it.content)
-                    .unwrap_or_else(|_| "[解密失败]".into());
+                let plain = crypto::decrypt_string(&self.key, &it.content).unwrap_or_else(|_| {
+                    if it.visibility == MemoVisibility::Public {
+                        it.content.clone()
+                    } else {
+                        "[解密失败]".into()
+                    }
+                });
                 MemoView {
                     id: it.id,
                     title: it.title,
@@ -158,51 +195,141 @@ impl MemoService {
                     deleted: it.deleted,
                     version: it.version,
                     node_id: it.node_id,
+                    visibility: it.visibility,
+                    owner_fp: it.owner_fp,
                 }
             })
             .collect()
     }
 
     pub fn edit(&self, id: &str, title: &str, content: &str) -> anyhow::Result<()> {
-        if self.store.get(id).is_none() {
-            anyhow::bail!("备忘不存在");
+        let prev = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
+            anyhow::bail!("无权编辑他人私密备忘");
         }
         let ct = crypto::encrypt_string(&self.key, content)?;
         let (aid, aname) = self.current_actor();
-        self.store.put(id, title, &ct, &aid, &aname)?;
+        let item = self.store.put(
+            id,
+            title,
+            &ct,
+            &aid,
+            &aname,
+            prev.visibility,
+            &prev.owner_fp,
+        )?;
+        if item.visibility == MemoVisibility::Private {
+            self.push_private_backup(&item)?;
+        }
         self.fire();
         Ok(())
     }
 
     pub fn upsert_imported(&self, view: &MemoView) -> anyhow::Result<()> {
+        let owner = if view.owner_fp.is_empty() {
+            self.session_fp.as_str()
+        } else {
+            view.owner_fp.as_str()
+        };
         let ct = crypto::encrypt_string(&self.key, &view.content)?;
         let (aid, aname) = self.current_actor();
-        self.store.put(&view.id, &view.title, &ct, &aid, &aname)?;
+        let item = self.store.put(
+            &view.id,
+            &view.title,
+            &ct,
+            &aid,
+            &aname,
+            view.visibility,
+            owner,
+        )?;
+        if item.visibility == MemoVisibility::Private {
+            self.push_private_backup(&item)?;
+        }
         self.fire();
         Ok(())
     }
 
-    pub fn verify_password(&self, password: &str) -> anyhow::Result<()> {
-        self.verify_master_password(password)
+    fn push_private_backup(&self, item: &MemoItem) -> anyhow::Result<()> {
+        if !self.cfg.backup_enabled || item.visibility != MemoVisibility::Private {
+            return Ok(());
+        }
+        let blob = HostedBlob {
+            owner_fp: item.owner_fp.clone(),
+            memo_id: item.id.clone(),
+            version: item.version,
+            ciphertext: item.content.clone(),
+            title_hint: String::new(),
+            visibility: "private".into(),
+            updated_at: chrono::Local::now().to_rfc3339(),
+            source_node: self.cfg.node_id.clone(),
+        };
+        let _ = self.hosted.upsert_blob(blob.clone());
+        if let Some(bc) = self.store.broadcaster_opt() {
+            bc.broadcast_hosted(&blob);
+        }
+        Ok(())
     }
 
-    pub fn delete(&self, id: &str, password: &str) -> anyhow::Result<()> {
-        self.verify_master_password(password)?;
+    pub fn restore_from_hosted(&self) -> anyhow::Result<usize> {
+        let blobs = self.hosted.blobs_for_owner(&self.session_fp);
+        let mut n = 0usize;
+        for blob in blobs {
+            if crypto::decrypt_string(&self.key, &blob.ciphertext).is_err() {
+                continue;
+            }
+            let existing = self.store.get(&blob.memo_id);
+            if let Some(ex) = &existing {
+                if ex.version >= blob.version {
+                    continue;
+                }
+            }
+            let (aid, aname) = self.current_actor();
+            let item = MemoItem {
+                id: blob.memo_id.clone(),
+                title: format!("恢复 {}", &blob.memo_id[..8.min(blob.memo_id.len())]),
+                content: blob.ciphertext,
+                deleted: false,
+                version: blob.version.max(1),
+                node_id: self.cfg.node_id.clone(),
+                modified_by_person_id: aid,
+                modified_by_name: aname,
+                visibility: MemoVisibility::Private,
+                owner_fp: self.session_fp.clone(),
+            };
+            self.store.merge(item, "hosted-restore")?;
+            n += 1;
+        }
+        if n > 0 {
+            self.fire();
+        }
+        Ok(n)
+    }
+
+    pub fn ingest_hosted_blob(&self, blob: HostedBlob) -> anyhow::Result<bool> {
+        if !self.cfg.accept_foreign_backup && blob.owner_fp != self.session_fp {
+            return Ok(false);
+        }
+        self.hosted.upsert_blob(blob)
+    }
+
+    pub fn verify_password(&self, _password: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    pub fn delete(&self, id: &str, _password: &str) -> anyhow::Result<()> {
+        let prev = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
+            anyhow::bail!("无权删除他人私密备忘");
+        }
         let (aid, aname) = self.current_actor();
         self.store.delete(id, &aid, &aname)?;
         self.fire();
-        Ok(())
-    }
-
-    fn verify_master_password(&self, password: &str) -> anyhow::Result<()> {
-        if password.is_empty() {
-            anyhow::bail!("请输入主密码");
-        }
-        let salt = resolve_salt(&self.cfg)?;
-        let derived = derive_key(password.as_bytes(), &salt, &self.cfg.argon2)?;
-        if !keys_equal(&derived, &self.key) {
-            anyhow::bail!("主密码错误");
-        }
         Ok(())
     }
 
@@ -434,18 +561,15 @@ impl MemoService {
             .collect()
     }
 
-    pub fn add_person(&self, name: &str, password: &str) -> anyhow::Result<String> {
+    pub fn add_person(&self, name: &str, _password: &str) -> anyhow::Result<String> {
         let name = name.trim();
         if name.is_empty() {
             anyhow::bail!("姓名不能为空");
         }
-        if password.is_empty() {
-            anyhow::bail!("人员密码不能为空");
-        }
         let id = Uuid::new_v4().to_string().replace('-', "");
         let (aid, aname) = self.current_actor();
         self.person_store
-            .put_local(&id, name, Some(password), false, None, &aid, &aname)?;
+            .put_local(&id, name, None, false, None, &aid, &aname)?;
         self.fire();
         Ok(id)
     }
@@ -473,17 +597,6 @@ impl MemoService {
         Ok(())
     }
 
-    pub fn set_person_password(&self, id: &str, new_password: &str) -> anyhow::Result<()> {
-        if new_password.is_empty() {
-            anyhow::bail!("人员密码不能为空");
-        }
-        let (aid, aname) = self.current_actor();
-        self.person_store
-            .set_password(id, new_password, &aid, &aname)?;
-        self.fire();
-        Ok(())
-    }
-
     pub fn disable_person(&self, id: &str, disabled: bool) -> anyhow::Result<()> {
         let prev = self
             .person_store
@@ -503,8 +616,7 @@ impl MemoService {
         Ok(())
     }
 
-    pub fn delete_person(&self, id: &str, master_password: &str) -> anyhow::Result<()> {
-        self.verify_master_password(master_password)?;
+    pub fn delete_person(&self, id: &str, _master_password: &str) -> anyhow::Result<()> {
         let (aid, aname) = self.current_actor();
         self.person_store.delete(id, &aid, &aname)?;
         if self.current_person_id() == Some(id.to_string()) {
@@ -514,7 +626,7 @@ impl MemoService {
         Ok(())
     }
 
-    pub fn verify_person_password(&self, id: &str, password: &str) -> anyhow::Result<()> {
+    pub fn select_person(&self, id: &str) -> anyhow::Result<()> {
         let p = self
             .person_store
             .get(id)
@@ -522,9 +634,12 @@ impl MemoService {
         if p.deleted || p.disabled {
             anyhow::bail!("该人员已禁用");
         }
-        self.person_store.verify_password(&p, password)?;
         self.set_current_person(Some(id.to_string()));
         Ok(())
+    }
+
+    pub fn verify_person_password(&self, id: &str, _password: &str) -> anyhow::Result<()> {
+        self.select_person(id)
     }
 
     pub fn person_name(&self, id: &str) -> String {
@@ -713,8 +828,7 @@ impl MemoService {
         Ok(())
     }
 
-    pub fn delete_task(&self, id: &str, password: &str) -> anyhow::Result<()> {
-        self.verify_master_password(password)?;
+    pub fn delete_task(&self, id: &str, _password: &str) -> anyhow::Result<()> {
         let (aid, aname) = self.current_actor();
         self.task_store.delete(id, &aid, &aname)?;
         self.fire();
@@ -728,19 +842,51 @@ impl MemoService {
         }
         Ok(ok)
     }
-}
 
-/// Unlock vault with master password (rebuild stores + verifier).
-pub fn unlock(cfg: Config, password: &[u8]) -> anyhow::Result<(Arc<MemoService>, Arc<AuditLog>)> {
-    crate::config::ensure_data_dir(&cfg)?;
-    let data_dir = PathBuf::from(&cfg.data_dir);
-    let salt = resolve_salt(&cfg)?;
-    let key = derive_key(password, &salt, &cfg.argon2)?;
-
-    if verifier::exists(&data_dir) {
-        verifier::verify(&data_dir, &key)?;
+    /// 公开备忘同步用：返回带明文 content 的副本；私密返回 None。
+    pub fn for_public_broadcast(&self, item: &MemoItem) -> Option<MemoItem> {
+        if item.visibility != MemoVisibility::Public || item.deleted {
+            return None;
+        }
+        let mut out = item.clone();
+        out.content = crypto::decrypt_string(&self.key, &item.content)
+            .unwrap_or_else(|_| item.content.clone());
+        Some(out)
     }
 
+    /// 合并远端公开备忘（明文正文）到本机（再加密落盘）。
+    pub fn merge_public_remote(&self, mut remote: MemoItem, source: &str) -> anyhow::Result<bool> {
+        if remote.visibility != MemoVisibility::Public {
+            // 忽略私人 mesh 更新
+            return Ok(false);
+        }
+        let plain = remote.content.clone();
+        remote.content = crypto::encrypt_string(&self.key, &plain)?;
+        let ok = self.store.merge(remote, source)?;
+        if ok {
+            self.fire();
+        }
+        Ok(ok)
+    }
+}
+
+
+/// 用身份密钥对打开库（无主密码）。
+pub fn unlock_with_identity(
+    cfg: Config,
+    identity: &IdentityKeys,
+) -> anyhow::Result<(Arc<MemoService>, Arc<AuditLog>)> {
+    crate::config::ensure_data_dir(&cfg)?;
+    let data_dir = PathBuf::from(&cfg.data_dir);
+    if identity_keys::looks_like_legacy_data(&data_dir) {
+        anyhow::bail!(
+            "检测到旧版数据且与当前版本不兼容。请自行备份后删除数据目录，再重新初始化。"
+        );
+    }
+    identity_keys::write_schema_marker(&data_dir)?;
+    identity.save(&data_dir)?;
+
+    let key = identity.content_key();
     let keys = crate::audit::KeyPair::load_or_create(&data_dir)?;
     let audit_path = data_dir.join("audit.jsonl");
     let audit = Arc::new(AuditLog::open(audit_path, keys)?);
@@ -760,19 +906,23 @@ pub fn unlock(cfg: Config, password: &[u8]) -> anyhow::Result<(Arc<MemoService>,
         &key,
         audit.clone(),
     )?);
+    let hosted = Arc::new(HostedStore::open(&data_dir)?);
 
     let svc = MemoService::new(
         cfg,
-        key.clone(),
+        key,
         store,
         person_store,
         task_store,
+        hosted,
         audit.clone(),
+        identity.fingerprint.clone(),
+        identity.alias.clone(),
     );
-
-    if !verifier::exists(&data_dir) {
-        verifier::write(&data_dir, &key)?;
-    }
-
     Ok((svc, audit))
+}
+
+/// 兼容旧 API：已废弃。
+pub fn unlock(_cfg: Config, _password: &[u8]) -> anyhow::Result<(Arc<MemoService>, Arc<AuditLog>)> {
+    anyhow::bail!("请使用身份密钥对登录（unlock_with_identity）")
 }
