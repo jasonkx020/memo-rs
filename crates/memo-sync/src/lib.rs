@@ -160,8 +160,8 @@ pub struct SyncEngine {
     stop: tokio::sync::Notify,
 }
 
-fn compute_salt_fp(salt_hex: &str) -> String {
-    let hash = Sha256::digest(salt_hex.as_bytes());
+fn compute_salt_fp(cluster_salt_hex: &str) -> String {
+    let hash = Sha256::digest(cluster_salt_hex.as_bytes());
     hex::encode(&hash[..8])
 }
 
@@ -183,7 +183,8 @@ impl SyncEngine {
         store: Arc<MemoStore>,
         person_store: Arc<PersonStore>,
         task_store: Arc<TaskStore>,
-        salt_hex: String,
+        // 集群盐：局域网发现分组，与主密码无关
+        cluster_salt_hex: String,
         lan_discovery: bool,
         data_dir: PathBuf,
     ) -> Arc<Self> {
@@ -191,7 +192,7 @@ impl SyncEngine {
             node_id,
             port,
             peers_cfg: peers,
-            salt_fp: compute_salt_fp(&salt_hex),
+            salt_fp: compute_salt_fp(&cluster_salt_hex),
             lan_discovery,
             data_dir,
             store,

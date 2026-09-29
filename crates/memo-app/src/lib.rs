@@ -2288,8 +2288,21 @@ impl eframe::App for MemoApp {
                                     .collect();
                             }
                             ui.checkbox(&mut settings_draft.lan_discovery, "局域网自动发现 (UDP 17000)");
-                            ui.label("集群共享盐 salt_hex（32 位 hex）");
-                            ui.text_edit_singleline(&mut settings_draft.salt_hex);
+                            ui.label(
+                                RichText::new(
+                                    "集群盐 cluster_salt_hex（同局域网互通须一致；与主密码无关）",
+                                )
+                                .small()
+                                .color(theme::TEXT_MUTED),
+                            );
+                            ui.text_edit_singleline(&mut settings_draft.cluster_salt_hex);
+                            ui.label(
+                                RichText::new(
+                                    "主密码仅用于本机解锁；各机主密码可不同。改集群盐后需重启。",
+                                )
+                                .small()
+                                .color(theme::TEXT_MUTED),
+                            );
                             ui.add_space(8.0);
                             ui.separator();
                             ui.label(RichText::new("加密备份").strong());
@@ -2806,7 +2819,7 @@ fn unlock_runtime(cfg: Config, password: &[u8]) -> anyhow::Result<Arc<AppRuntime
         svc.store(),
         svc.person_store(),
         svc.task_store(),
-        cfg.salt_hex.clone(),
+        cfg.cluster_salt_hex.clone(),
         cfg.lan_discovery,
         std::path::PathBuf::from(&cfg.data_dir),
     );

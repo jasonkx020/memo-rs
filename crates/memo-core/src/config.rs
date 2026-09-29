@@ -39,7 +39,11 @@ pub struct Config {
     pub listen_port: u16,
     #[serde(default)]
     pub peers: Vec<String>,
+    /// 本机主密码 Argon2 盐（仅本地开库；各机可不同，与发现无关）
     pub salt_hex: String,
+    /// 局域网发现/集群身份盐（同集群须一致；与主密码无关）
+    #[serde(default)]
+    pub cluster_salt_hex: String,
     /// 局域网 UDP 广播自动发现（端口 17000）
     #[serde(default = "default_true")]
     pub lan_discovery: bool,
@@ -72,6 +76,7 @@ pub fn default_config() -> anyhow::Result<Config> {
         listen_port: 7000,
         peers: vec![],
         salt_hex: random_hex(16),
+        cluster_salt_hex: random_hex(16),
         lan_discovery: true,
         argon2: Argon2Params::default(),
     })
@@ -99,6 +104,15 @@ fn normalize(mut cfg: Config) -> Config {
     if cfg.salt_hex.len() != 32 {
         cfg.salt_hex = random_hex(16);
     }
+    // 旧配置无 cluster_salt_hex：兼容迁移为与 salt_hex 相同，避免已部署集群突然失联。
+    // 新装则 default_config 已生成独立集群盐。
+    if cfg.cluster_salt_hex.len() != 32 {
+        cfg.cluster_salt_hex = if cfg.salt_hex.len() == 32 {
+            cfg.salt_hex.clone()
+        } else {
+            random_hex(16)
+        };
+    }
     cfg
 }
 
@@ -111,8 +125,14 @@ pub fn load_settings() -> anyhow::Result<Config> {
         return Ok(cfg);
     }
     let raw = fs::read_to_string(&path)?;
+    let needs_cluster_migrate = !raw.contains("\"cluster_salt_hex\"");
     let cfg: Config = serde_json::from_str(&raw)?;
-    Ok(normalize(cfg))
+    let cfg = normalize(cfg);
+    if needs_cluster_migrate {
+        // 把迁移出的 cluster_salt_hex 落盘，便于多机对齐
+        let _ = save_settings(&cfg);
+    }
+    Ok(cfg)
 }
 
 pub fn save_settings(cfg: &Config) -> anyhow::Result<()> {
@@ -132,6 +152,7 @@ pub fn needs_restart(before: &Config, after: &Config) -> bool {
         || before.data_dir != after.data_dir
         || before.listen_port != after.listen_port
         || before.salt_hex != after.salt_hex
+        || before.cluster_salt_hex != after.cluster_salt_hex
         || before.lan_discovery != after.lan_discovery
 }
 

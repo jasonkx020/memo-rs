@@ -66,7 +66,7 @@ fn run_headless(cfg: Config) -> anyhow::Result<()> {
         svc.store(),
         svc.person_store(),
         svc.task_store(),
-        cfg.salt_hex.clone(),
+        cfg.cluster_salt_hex.clone(),
         cfg.lan_discovery,
         std::path::PathBuf::from(&cfg.data_dir),
     );
