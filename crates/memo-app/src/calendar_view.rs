@@ -2,8 +2,9 @@
 
 use chrono::{Datelike, Local, NaiveDate, TimeDelta};
 use eframe::egui::{self, Color32, Margin, RichText, Rounding, Sense, Stroke, Vec2};
+use memo_core::cycle::CycleConfig;
 use memo_core::person::PersonView;
-use memo_core::task::{TaskStatus, TaskView};
+use memo_core::task::{TaskKind, TaskStatus, TaskView};
 
 use crate::china_calendar::{self, DayKind};
 use crate::theme;
@@ -19,15 +20,43 @@ pub enum CalMode {
     Gantt,
 }
 
+/// 日历顶栏筛选：全部任务 / 仅会议 / 生理期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CalFilter {
+    #[default]
+    All,
+    Meeting,
+    Cycle,
+}
+
+impl CalFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            CalFilter::All => "全部",
+            CalFilter::Meeting => "会议",
+            CalFilter::Cycle => "生理期",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CalUi {
     pub mode: CalMode,
+    pub filter: CalFilter,
     pub year: i32,
     pub month: u32,
     /// Monday of the visible week (YYYY-MM-DD).
     pub week_monday: String,
     pub selected_day: String,
     pub selected_task: Option<String>,
+    /// 生理期设置草稿（仅女性当前人员）
+    pub cycle_last_start: String,
+    pub cycle_days: u32,
+    pub cycle_period_days: u32,
+    /// 侧栏点了「保存周期」
+    pub pending_cycle_save: bool,
+    /// 已同步草稿的人员 id（切换人员时重新加载）
+    pub cycle_synced_person: String,
 }
 
 impl Default for CalUi {
@@ -35,13 +64,70 @@ impl Default for CalUi {
         let today = Local::now().date_naive();
         Self {
             mode: CalMode::Month,
+            filter: CalFilter::All,
             year: today.year(),
             month: today.month(),
             week_monday: monday_of(today).format("%Y-%m-%d").to_string(),
             selected_day: today.format("%Y-%m-%d").to_string(),
             selected_task: None,
+            cycle_last_start: today.format("%Y-%m-%d").to_string(),
+            cycle_days: 28,
+            cycle_period_days: 5,
+            pending_cycle_save: false,
+            cycle_synced_person: String::new(),
         }
     }
+}
+
+impl CalUi {
+    pub fn load_cycle_draft(&mut self, cfg: Option<&CycleConfig>) {
+        if let Some(c) = cfg {
+            self.cycle_last_start = c.last_start.clone();
+            self.cycle_days = c.cycle_days.max(1);
+            self.cycle_period_days = c.period_days.max(1);
+        }
+    }
+
+    pub fn take_cycle_save(&mut self) -> Option<CycleConfig> {
+        if !self.pending_cycle_save {
+            return None;
+        }
+        self.pending_cycle_save = false;
+        Some(CycleConfig {
+            last_start: self.cycle_last_start.clone(),
+            cycle_days: self.cycle_days.max(1),
+            period_days: self.cycle_period_days.max(1),
+        })
+    }
+}
+
+/// 会议=蓝、报送=橙、普通=灰绿。
+pub fn kind_color(kind: TaskKind) -> Color32 {
+    match kind {
+        TaskKind::Meeting => Color32::from_rgb(0x3B, 0x82, 0xF6),
+        TaskKind::Report => Color32::from_rgb(0xF9, 0x73, 0x16),
+        TaskKind::Normal => Color32::from_rgb(0x6B, 0x8F, 0x71),
+    }
+}
+
+const PERIOD_TINT: Color32 = Color32::from_rgb(0xFD, 0xE2, 0xE8);
+
+/// 进日历且通过筛选的任务。
+pub fn calendar_tasks<'a>(tasks: &'a [TaskView], filter: CalFilter) -> Vec<&'a TaskView> {
+    tasks
+        .iter()
+        .filter(|t| {
+            if !t.on_calendar {
+                return false;
+            }
+            match filter {
+                CalFilter::All => true,
+                CalFilter::Meeting => t.kind == TaskKind::Meeting,
+                // Cycle 视图仍可弱化显示任务点
+                CalFilter::Cycle => true,
+            }
+        })
+        .collect()
 }
 
 pub fn monday_of(d: NaiveDate) -> NaiveDate {
@@ -122,10 +208,6 @@ fn person_color(idx: usize) -> Color32 {
     PALETTE[idx % PALETTE.len()]
 }
 
-fn person_index(persons: &[PersonView], id: &str) -> usize {
-    persons.iter().position(|p| p.id == id).unwrap_or(0)
-}
-
 fn person_name<'a>(persons: &'a [PersonView], id: &str) -> &'a str {
     persons
         .iter()
@@ -145,14 +227,41 @@ fn status_fg(status: TaskStatus) -> Color32 {
     }
 }
 
-/// Compact left navigator: mode + month/week nav + day task list.
+/// Compact left navigator: filter + mode + month/week nav + day / meeting list.
 pub fn show_left(
     ui: &mut egui::Ui,
     cal: &mut CalUi,
     tasks: &[TaskView],
     persons: &[PersonView],
+    female_current: bool,
+    cycle: Option<&CycleConfig>,
 ) -> Option<String> {
     let mut clicked: Option<String> = None;
+    let cal_tasks = calendar_tasks(tasks, cal.filter);
+
+    ui.horizontal_wrapped(|ui| {
+        for f in [CalFilter::All, CalFilter::Meeting] {
+            let sel = cal.filter == f;
+            if ui
+                .selectable_label(sel, RichText::new(f.label()).size(13.0))
+                .clicked()
+            {
+                cal.filter = f;
+            }
+        }
+        if female_current {
+            let sel = cal.filter == CalFilter::Cycle;
+            if ui
+                .selectable_label(sel, RichText::new(CalFilter::Cycle.label()).size(13.0))
+                .clicked()
+            {
+                cal.filter = CalFilter::Cycle;
+            }
+        } else if cal.filter == CalFilter::Cycle {
+            cal.filter = CalFilter::All;
+        }
+    });
+    ui.add_space(4.0);
 
     ui.horizontal(|ui| {
         for (label, mode) in [
@@ -166,7 +275,6 @@ pub fn show_left(
                 .clicked()
             {
                 cal.mode = mode;
-                // overview in center; keep selection unless switching away from detail intent
             }
         }
     });
@@ -174,23 +282,89 @@ pub fn show_left(
 
     match cal.mode {
         CalMode::Month => {
-            show_month_nav(ui, cal, tasks);
+            show_month_nav(ui, cal, &cal_tasks, cycle, cal.filter);
         }
         CalMode::Week | CalMode::Gantt => {
             show_week_nav(ui, cal);
         }
     }
 
+    if cal.filter == CalFilter::Cycle && female_current {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new("设置周期").strong().size(13.0).color(theme::TEXT));
+        ui.horizontal(|ui| {
+            ui.label("上次开始");
+            ui.add(
+                egui::TextEdit::singleline(&mut cal.cycle_last_start)
+                    .desired_width(100.0)
+                    .hint_text("YYYY-MM-DD"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("周期天");
+            ui.add(egui::DragValue::new(&mut cal.cycle_days).clamp_range(14..=60));
+            ui.label("持续");
+            ui.add(egui::DragValue::new(&mut cal.cycle_period_days).clamp_range(1..=14));
+        });
+        if theme::primary_button(ui, "保存周期").clicked() {
+            cal.pending_cycle_save = true;
+        }
+        if cycle.is_none() {
+            ui.label(theme::muted_label("尚未设置，保存后在月历显示淡粉底").small());
+        }
+    }
+
     ui.add_space(8.0);
     ui.separator();
+
+    if cal.filter == CalFilter::Meeting {
+        ui.label(
+            RichText::new("全部会议")
+                .strong()
+                .size(13.0)
+                .color(theme::TEXT),
+        );
+        let mut meetings: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.on_calendar && t.kind == TaskKind::Meeting)
+            .collect();
+        meetings.sort_by(|a, b| {
+            a.date
+                .cmp(&b.date)
+                .then_with(|| {
+                    a.start_hour
+                        .partial_cmp(&b.start_hour)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        ui.label(theme::muted_label(format!("共 {} 场 · 按日期", meetings.len())).small());
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if meetings.is_empty() {
+                    ui.label(theme::muted_label("暂无会议任务").small());
+                }
+                for t in meetings {
+                    if show_task_row(ui, cal, persons, t) {
+                        clicked = Some(t.id.clone());
+                    }
+                }
+            });
+        return clicked;
+    }
+
     ui.label(
         RichText::new(format!("当日 · {}", cal.selected_day))
             .strong()
             .size(13.0)
             .color(theme::TEXT),
     );
-    let day_tasks: Vec<_> = tasks
+    let day_tasks: Vec<_> = cal_tasks
         .iter()
+        .copied()
         .filter(|t| t.spans_date(&cal.selected_day))
         .collect();
     let total: f32 = day_tasks.iter().map(|t| t.hours).sum();
@@ -204,50 +378,72 @@ pub fn show_left(
                 ui.label(theme::muted_label("当天暂无任务").small());
             }
             for t in day_tasks {
-                let name = person_name(persons, &t.assignee_id);
-                let sel = cal.selected_task.as_deref() == Some(t.id.as_str());
-                let row_w = ui.available_width().max(40.0);
-                let (rect, resp) =
-                    ui.allocate_exact_size(Vec2::new(row_w, 48.0), Sense::click());
-                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                if ui.is_rect_visible(rect) {
-                    let fill = theme::list_row_fill(sel, resp.hovered());
-                    ui.painter().rect(
-                        rect,
-                        Rounding::same(theme::ROUND_CTRL),
-                        fill,
-                        Stroke::new(1.0, theme::BORDER),
-                    );
-                    let pad = 8.0;
-                    ui.painter().text(
-                        egui::pos2(rect.left() + pad, rect.top() + 6.0),
-                        egui::Align2::LEFT_TOP,
-                        format!(
-                            "{}  {:.1}h  [{}]",
-                            format_datetime_range(&t.date, t.start_hour, &t.end_date, t.end_hour),
-                            t.hours,
-                            t.status.short_label()
-                        ),
-                        egui::FontId::proportional(11.0),
-                        status_fg(t.status),
-                    );
-                    ui.painter().text(
-                        egui::pos2(rect.left() + pad, rect.top() + 22.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("{} · {}", t.title, name),
-                        egui::FontId::proportional(13.0),
-                        theme::TEXT,
-                    );
-                }
-                if resp.clicked() {
-                    cal.selected_task = Some(t.id.clone());
+                if show_task_row(ui, cal, persons, t) {
                     clicked = Some(t.id.clone());
                 }
-                ui.add_space(4.0);
             }
         });
 
     clicked
+}
+
+fn show_task_row(
+    ui: &mut egui::Ui,
+    cal: &mut CalUi,
+    persons: &[PersonView],
+    t: &TaskView,
+) -> bool {
+    let name = person_name(persons, &t.assignee_id);
+    let sel = cal.selected_task.as_deref() == Some(t.id.as_str());
+    let row_w = ui.available_width().max(40.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, 48.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let fill = theme::list_row_fill(sel, resp.hovered());
+        ui.painter().rect(
+            rect,
+            Rounding::same(theme::ROUND_CTRL),
+            fill,
+            Stroke::new(1.0, theme::BORDER),
+        );
+        let pad = 8.0;
+        let kind_c = kind_color(t.kind);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 2.0, rect.top() + 6.0),
+                Vec2::new(4.0, rect.height() - 12.0),
+            ),
+            Rounding::same(2.0),
+            kind_c,
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + pad + 4.0, rect.top() + 6.0),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "{}  {:.1}h  [{}·{}]",
+                format_datetime_range(&t.date, t.start_hour, &t.end_date, t.end_hour),
+                t.hours,
+                t.kind.label(),
+                t.status.short_label()
+            ),
+            egui::FontId::proportional(11.0),
+            status_fg(t.status),
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + pad + 4.0, rect.top() + 22.0),
+            egui::Align2::LEFT_TOP,
+            format!("{} · {}", t.title, name),
+            egui::FontId::proportional(13.0),
+            theme::TEXT,
+        );
+    }
+    if resp.clicked() {
+        cal.selected_task = Some(t.id.clone());
+        cal.selected_day = t.date.clone();
+        true
+    } else {
+        false
+    }
 }
 
 /// Wide central overview when no task is selected.
@@ -256,15 +452,26 @@ pub fn show_central_overview(
     cal: &mut CalUi,
     tasks: &[TaskView],
     persons: &[PersonView],
+    cycle: Option<&CycleConfig>,
 ) -> Option<String> {
+    let cal_tasks: Vec<TaskView> = calendar_tasks(tasks, cal.filter)
+        .into_iter()
+        .cloned()
+        .collect();
     match cal.mode {
-        CalMode::Month => show_day_agenda(ui, cal, tasks, persons),
-        CalMode::Week => show_week(ui, cal, tasks, persons, true),
-        CalMode::Gantt => show_gantt(ui, cal, tasks, persons, true),
+        CalMode::Month => show_day_agenda(ui, cal, &cal_tasks, persons, cycle),
+        CalMode::Week => show_week(ui, cal, &cal_tasks, persons, true, cycle),
+        CalMode::Gantt => show_gantt(ui, cal, &cal_tasks, persons, true),
     }
 }
 
-fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
+fn show_month_nav(
+    ui: &mut egui::Ui,
+    cal: &mut CalUi,
+    tasks: &[&TaskView],
+    cycle: Option<&CycleConfig>,
+    filter: CalFilter,
+) {
     ui.horizontal(|ui| {
         if ui.button("◀").clicked() {
             if cal.month == 1 {
@@ -298,10 +505,12 @@ fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.label(theme::muted_label("图例：").small());
-        ui.label(RichText::new("工作日").small().color(theme::TEXT));
-        ui.label(RichText::new("周末").small().color(Color32::from_rgb(0xDC, 0x26, 0x26)));
-        ui.label(RichText::new("休=法定假").small().color(Color32::from_rgb(0xDC, 0x26, 0x26)));
-        ui.label(RichText::new("班=调休上班").small().color(theme::ACCENT));
+        ui.label(RichText::new("会议").small().color(kind_color(TaskKind::Meeting)));
+        ui.label(RichText::new("报送").small().color(kind_color(TaskKind::Report)));
+        ui.label(RichText::new("工作").small().color(kind_color(TaskKind::Normal)));
+        if cycle.is_some() {
+            ui.label(RichText::new("经期").small().color(Color32::from_rgb(0xE1, 0x1D, 0x48)));
+        }
     });
     ui.add_space(4.0);
 
@@ -309,7 +518,6 @@ fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
         .unwrap_or_else(|| Local::now().date_naive());
     let start = monday_of(first);
 
-    // 表头与日期格共用同一列宽，避免 horizontal 内反复 available_width()/7 导致错位
     let cell_w = (ui.available_width() / 7.0).max(26.0);
     let col = cell_w - 2.0;
 
@@ -334,7 +542,7 @@ fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
         }
     });
 
-    let cell_h = 36.0_f32;
+    let cell_h = 40.0_f32;
     let mut day = start;
     for _row in 0..6 {
         let month_of_row_start = day.month();
@@ -343,16 +551,13 @@ fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
                 let ymd = day.format("%Y-%m-%d").to_string();
                 let in_month = day.month() == cal.month;
                 let info = china_calendar::classify(day);
-                let day_hours: f32 = tasks
-                    .iter()
-                    .filter(|t| t.spans_date(&ymd))
-                    .map(|t| t.hours)
-                    .sum();
+                let day_list: Vec<_> = tasks.iter().filter(|t| t.spans_date(&ymd)).collect();
+                let period = cycle.map(|c| c.is_period_day(&ymd)).unwrap_or(false);
                 let sel = cal.selected_day == ymd;
                 let (rect, resp) =
                     ui.allocate_exact_size(Vec2::new(col, cell_h), Sense::click());
                 if ui.is_rect_visible(rect) {
-                    let fill = if sel {
+                    let mut fill = if sel {
                         theme::ACCENT_SOFT
                     } else if info.kind == DayKind::Holiday {
                         Color32::from_rgb(0xFE, 0xE2, 0xE2)
@@ -365,6 +570,13 @@ fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
                     } else {
                         theme::CARD
                     };
+                    if period && (filter == CalFilter::All || filter == CalFilter::Cycle) {
+                        fill = if sel {
+                            Color32::from_rgb(0xFE, 0xCD, 0xD3)
+                        } else {
+                            PERIOD_TINT
+                        };
+                    }
                     ui.painter().rect(
                         rect,
                         Rounding::same(4.0),
@@ -401,12 +613,19 @@ fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
                             badge_color,
                         );
                     }
-                    if day_hours > 0.0 {
-                        ui.painter().circle_filled(
-                            egui::pos2(rect.center().x, rect.bottom() - 7.0),
-                            2.5,
-                            theme::ACCENT,
-                        );
+                    // 色块：最多 3 个类型点
+                    if filter != CalFilter::Cycle || !day_list.is_empty() {
+                        let mut x = rect.left() + 4.0;
+                        let y = rect.bottom() - 8.0;
+                        let r = if filter == CalFilter::Cycle { 1.8 } else { 2.5 };
+                        for t in day_list.iter().take(3) {
+                            ui.painter().circle_filled(
+                                egui::pos2(x + r, y),
+                                r,
+                                kind_color(t.kind),
+                            );
+                            x += r * 2.0 + 2.0;
+                        }
                     }
                 }
                 if resp.clicked() {
@@ -414,7 +633,11 @@ fn show_month_nav(ui: &mut egui::Ui, cal: &mut CalUi, tasks: &[TaskView]) {
                     cal.week_monday = monday_of(day).format("%Y-%m-%d").to_string();
                     cal.selected_task = None;
                 }
-                let tip = format!("{} · {}", ymd, info.describe());
+                let tip = if period {
+                    format!("{} · {} · 经期", ymd, info.describe())
+                } else {
+                    format!("{} · {}", ymd, info.describe())
+                };
                 let _ = resp.on_hover_text(tip);
                 day += days(1);
             }
@@ -489,6 +712,7 @@ fn show_day_agenda(
     cal: &mut CalUi,
     tasks: &[TaskView],
     persons: &[PersonView],
+    cycle: Option<&CycleConfig>,
 ) -> Option<String> {
     let mut clicked = None;
     let day_info = china_calendar::classify_ymd(&cal.selected_day)
@@ -496,6 +720,9 @@ fn show_day_agenda(
             kind: DayKind::Workday,
             name: None,
         });
+    let period = cycle
+        .map(|c| c.is_period_day(&cal.selected_day))
+        .unwrap_or(false);
     ui.horizontal(|ui| {
         ui.heading(
             RichText::new(format!("{} 工作安排", cal.selected_day))
@@ -513,6 +740,13 @@ fn show_day_agenda(
                     theme::TEXT_MUTED
                 }),
         );
+        if period {
+            ui.label(
+                RichText::new("经期")
+                    .size(13.0)
+                    .color(Color32::from_rgb(0xE1, 0x1D, 0x48)),
+            );
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let total: f32 = tasks
                 .iter()
@@ -549,7 +783,7 @@ fn show_day_agenda(
                 let name = person_name(persons, &t.assignee_id);
                 let sel = cal.selected_task.as_deref() == Some(t.id.as_str());
                 let stroke = if sel {
-                    Stroke::new(1.5, theme::ACCENT)
+                    Stroke::new(1.5, kind_color(t.kind))
                 } else {
                     Stroke::new(1.0, theme::BORDER)
                 };
@@ -561,6 +795,7 @@ fn show_day_agenda(
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
+                            ui.colored_label(kind_color(t.kind), "▌");
                             ui.label(
                                 RichText::new(format_datetime_range(
                                     &t.date,
@@ -570,7 +805,12 @@ fn show_day_agenda(
                                 ))
                                     .strong()
                                     .size(14.0)
-                                    .color(theme::ACCENT),
+                                    .color(kind_color(t.kind)),
+                            );
+                            ui.label(
+                                RichText::new(t.kind.label())
+                                    .size(12.0)
+                                    .color(kind_color(t.kind)),
                             );
                             ui.label(
                                 RichText::new(format!("{:.1}h", t.hours))
@@ -633,8 +873,9 @@ fn show_week(
     ui: &mut egui::Ui,
     cal: &mut CalUi,
     tasks: &[TaskView],
-    persons: &[PersonView],
+    _persons: &[PersonView],
     wide: bool,
+    cycle: Option<&CycleConfig>,
 ) -> Option<String> {
     let mut clicked = None;
     let monday =
@@ -681,7 +922,10 @@ fn show_week(
             let info = china_calendar::classify(d);
             let (rect, resp) =
                 ui.allocate_exact_size(Vec2::new(col_w - 2.0, header_h), Sense::click());
-            let fill = if sel {
+            let period = cycle.map(|c| c.is_period_day(&ymd)).unwrap_or(false);
+            let fill = if period {
+                PERIOD_TINT
+            } else if sel {
                 theme::ACCENT_SOFT
             } else if info.kind == DayKind::Holiday {
                 Color32::from_rgb(0xFE, 0xE2, 0xE2)
@@ -771,13 +1015,18 @@ fn show_week(
                 egui::pos2(col.left() + 2.0, col.top() + y),
                 Vec2::new((col.width() - 4.0).max(8.0), h),
             );
-            let color = person_color(person_index(persons, &t.assignee_id));
+            let color = kind_color(t.kind);
             ui.painter()
                 .rect_filled(r, Rounding::same(4.0), color.linear_multiply(0.9));
             let label = if wide {
-                format!("[{}] {} ({:.1}h)", t.status.short_label(), t.title, t.hours)
+                format!(
+                    "[{}] {} ({:.1}h)",
+                    t.kind.label(),
+                    t.title,
+                    t.hours
+                )
             } else {
-                format!("[{}]{}", t.status.short_label(), t.title)
+                format!("[{}]{}", t.kind.label(), t.title)
             };
             ui.painter().text(
                 egui::pos2(r.left() + 4.0, r.top() + 3.0),
@@ -900,17 +1149,21 @@ fn show_gantt(
                                 egui::pos2(rect.left() + 3.0, rect.center().y - 10.0),
                                 Vec2::new(bar_w.min(rect.width() - 6.0), 20.0),
                             );
-                            let color = person_color(pi);
+                            let color = if day_tasks.len() == 1 {
+                                kind_color(day_tasks[0].kind)
+                            } else {
+                                person_color(pi)
+                            };
                             ui.painter().rect_filled(bar, Rounding::same(4.0), color);
                             let bar_label = if wide && day_tasks.len() == 1 {
                                 format!(
                                     "[{}] {} {:.0}h",
-                                    day_tasks[0].status.short_label(),
+                                    day_tasks[0].kind.label(),
                                     day_tasks[0].title,
                                     day_h
                                 )
                             } else if day_tasks.len() == 1 {
-                                format!("[{}]{:.0}h", day_tasks[0].status.short_label(), day_h)
+                                format!("[{}]{:.0}h", day_tasks[0].kind.label(), day_h)
                             } else {
                                 format!("{:.0}h", day_h)
                             };

@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-//! 商用级视觉令牌与控件助手（石板深蓝体系）。
+//! 视觉令牌：主界面石板蓝 + 启动门 macOS 风格。
 
 use eframe::egui::{
     self, Color32, Frame, Margin, Rounding, Stroke, Style, TextStyle, Vec2, Visuals,
 };
 
-// —— 色板 ——
+// —— 色板（主界面） ——
 pub const NAVY: Color32 = Color32::from_rgb(0x0F, 0x27, 0x44);
 pub const NAVY_MID: Color32 = Color32::from_rgb(0x1B, 0x3A, 0x5C);
 pub const BG: Color32 = Color32::from_rgb(0xF7, 0xF8, 0xFA);
@@ -27,6 +27,23 @@ pub const WARN: Color32 = Color32::from_rgb(0xB4, 0x53, 0x09);
 
 pub const ROUND_CARD: f32 = 8.0;
 pub const ROUND_CTRL: f32 = 6.0;
+
+// —— macOS 启动门色板 ——
+pub const MAC_BG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xED);
+pub const MAC_BG_TOP: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF7);
+pub const MAC_CARD: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+pub const MAC_SEPARATOR: Color32 = Color32::from_rgb(0xD1, 0xD1, 0xD6);
+pub const MAC_FILL: Color32 = Color32::from_rgb(0xF2, 0xF2, 0xF7);
+pub const MAC_FILL_HOVER: Color32 = Color32::from_rgb(0xE5, 0xE5, 0xEA);
+pub const MAC_TEXT: Color32 = Color32::from_rgb(0x1D, 0x1D, 0x1F);
+pub const MAC_TEXT_SECONDARY: Color32 = Color32::from_rgb(0x6E, 0x6E, 0x73);
+pub const MAC_TEXT_TERTIARY: Color32 = Color32::from_rgb(0x8E, 0x8E, 0x93);
+pub const MAC_BLUE: Color32 = Color32::from_rgb(0x00, 0x7A, 0xFF);
+pub const MAC_BLUE_PRESSED: Color32 = Color32::from_rgb(0x00, 0x64, 0xD1);
+pub const MAC_RED: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x30);
+pub const MAC_ROUND_SHEET: f32 = 14.0;
+pub const MAC_ROUND_CTRL: f32 = 8.0;
+pub const MAC_ROUND_PILL: f32 = 10.0;
 
 pub fn apply(ctx: &egui::Context) {
     let mut visuals = Visuals::light();
@@ -107,6 +124,21 @@ pub fn card_frame() -> Frame {
         .inner_margin(Margin::same(16.0))
 }
 
+/// 启动门：大圆角白卡片（类似 macOS sheet）。
+pub fn mac_sheet_frame() -> Frame {
+    Frame::none()
+        .fill(MAC_CARD)
+        .stroke(Stroke::new(0.5, MAC_SEPARATOR))
+        .rounding(Rounding::same(MAC_ROUND_SHEET))
+        .inner_margin(Margin::symmetric(28.0, 26.0))
+        .shadow(egui::epaint::Shadow {
+            offset: Vec2::new(0.0, 8.0),
+            blur: 24.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(32),
+        })
+}
+
 pub fn panel_frame() -> Frame {
     Frame::none()
         .fill(PANEL)
@@ -137,7 +169,102 @@ pub fn list_row_fill(selected: bool, hovered: bool) -> Color32 {
 }
 
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(ACCENT))
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(ACCENT),
+    )
+}
+
+/// macOS 风格主按钮（系统蓝、大圆角）；宽度不超过当前列可用宽度。
+pub fn mac_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    let text = egui::RichText::new(label)
+        .color(Color32::WHITE)
+        .strong()
+        .size(15.0);
+    let w = ui.available_width().clamp(120.0, 400.0);
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(text)
+            .fill(MAC_BLUE)
+            .rounding(Rounding::same(MAC_ROUND_PILL))
+            .min_size(Vec2::new(w, 36.0)),
+    )
+}
+
+/// macOS 次要按钮（浅灰底）。
+pub fn mac_secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(MAC_TEXT).size(14.0))
+            .fill(MAC_FILL)
+            .rounding(Rounding::same(MAC_ROUND_CTRL))
+            .min_size(Vec2::new(0.0, 32.0)),
+    )
+}
+
+/// 两段式选择（类似 NSSegmentedControl）。
+pub fn mac_segmented(ui: &mut egui::Ui, left: &str, right: &str, right_selected: &mut bool) {
+    let full = ui.available_width().min(360.0);
+    let h = 32.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(full, h), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        Rounding::same(MAC_ROUND_CTRL),
+        MAC_FILL,
+        Stroke::NONE,
+    );
+    let mid = rect.center().x;
+    let left_rect = egui::Rect::from_min_max(rect.min, egui::pos2(mid, rect.max.y));
+    let right_rect = egui::Rect::from_min_max(egui::pos2(mid, rect.min.y), rect.max);
+
+    let paint_seg = |r: egui::Rect, selected: bool, label: &str| {
+        if selected {
+            painter.rect(
+                r.shrink(2.0),
+                Rounding::same(MAC_ROUND_CTRL - 1.0),
+                MAC_CARD,
+                Stroke::new(0.5, MAC_SEPARATOR),
+            );
+        }
+        painter.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(13.0),
+            if selected {
+                MAC_TEXT
+            } else {
+                MAC_TEXT_SECONDARY
+            },
+        );
+    };
+    paint_seg(left_rect, !*right_selected, left);
+    paint_seg(right_rect, *right_selected, right);
+
+    let id = ui.id().with("mac_seg");
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    if resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            *right_selected = pos.x >= mid;
+        }
+    }
+}
+
+/// 步骤圆点指示（1-based current）。
+pub fn mac_step_dots(ui: &mut egui::Ui, total: usize, current: usize) {
+    ui.horizontal(|ui| {
+        let w = (total as f32) * 14.0;
+        ui.add_space(((ui.available_width() - w) * 0.5).max(0.0));
+        for i in 1..=total {
+            let active = i == current;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+            ui.painter().circle_filled(
+                rect.center(),
+                if active { 4.0 } else { 3.0 },
+                if active { MAC_BLUE } else { MAC_SEPARATOR },
+            );
+            ui.add_space(6.0);
+        }
+    });
 }
 
 pub fn success_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
@@ -147,7 +274,9 @@ pub fn success_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 pub fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(DANGER))
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(DANGER),
+    )
 }
 
 pub fn ghost_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
@@ -155,7 +284,6 @@ pub fn ghost_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 /// HTML 风格密码框：文字与灰色提示均垂直居中、水平靠左。
-/// egui 内置 hint 固定画在左上角，故自行绘制提示。
 pub fn password_field(
     ui: &mut egui::Ui,
     password: &mut String,

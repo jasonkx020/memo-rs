@@ -1449,8 +1449,10 @@ dependencies = [
  "base64ct",
  "chrono",
  "eframe",
+ "fs2",
  "getrandom",
  "idna",
+ "image",
  "memo-core",
  "memo-sync",
  "parking_lot",
@@ -1519,6 +1521,7 @@ name = "memo-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hex",
  "memo-core",
  "parking_lot",

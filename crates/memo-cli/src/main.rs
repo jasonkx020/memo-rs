@@ -85,6 +85,7 @@ fn run_headless(cfg: Config, args: Args) -> anyhow::Result<()> {
     let _enter = rt.enter();
     let (svc, _) = memo_core::service::unlock_with_identity(cfg.clone(), &identity)?;
     let _ = svc.restore_from_hosted();
+    let _ = svc.purge_expired_trash();
 
     let engine = SyncEngine::new_with_identity(
         cfg.node_id.clone(),
@@ -95,6 +96,7 @@ fn run_headless(cfg: Config, args: Args) -> anyhow::Result<()> {
         svc.task_store(),
         cfg.cluster_salt_hex.clone(),
         cfg.lan_discovery,
+        cfg.node_role,
         cfg.node_visible,
         cfg.accept_foreign_backup,
         identity.fingerprint.clone(),

@@ -35,6 +35,46 @@ fn default_schema() -> u32 {
     SCHEMA_VERSION
 }
 
+fn default_node_role() -> NodeRole {
+    NodeRole::Slave
+}
+
+/// 节点角色：主机广播并受理登记；从机只收听并连主机。主机同时具备向其他主机备份/同步的出站能力。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeRole {
+    Master,
+    #[default]
+    Slave,
+}
+
+impl NodeRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NodeRole::Master => "master",
+            NodeRole::Slave => "slave",
+        }
+    }
+
+    pub fn from_announce(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "master" => NodeRole::Master,
+            _ => NodeRole::Slave,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NodeRole::Master => "主机",
+            NodeRole::Slave => "从机",
+        }
+    }
+
+    pub fn is_master(self) -> bool {
+        matches!(self, NodeRole::Master)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// 配置 schema；与数据目录 schema 对齐
@@ -56,7 +96,10 @@ pub struct Config {
     pub cluster_salt_hex: String,
     #[serde(default = "default_true")]
     pub lan_discovery: bool,
-    /// 是否对外 UDP 广播本节点
+    /// 主机 / 从机；默认从机（大规模更安全）
+    #[serde(default = "default_node_role")]
+    pub node_role: NodeRole,
+    /// 是否对外 UDP 广播本节点（仅主机有效；从机永不广播）
     #[serde(default = "default_true")]
     pub node_visible: bool,
     /// 是否接受他节点私人密文托管
@@ -65,6 +108,9 @@ pub struct Config {
     /// 是否推送本身份私人备份
     #[serde(default = "default_true")]
     pub backup_enabled: bool,
+    /// 左侧备忘列表是否显示备份状态标签
+    #[serde(default = "default_true")]
+    pub show_backup_status: bool,
     /// 备份目标 node_id；空 = 所有可见且 accept_backup 的在线节点
     #[serde(default)]
     pub backup_targets: Vec<String>,
@@ -163,9 +209,11 @@ pub fn default_config() -> anyhow::Result<Config> {
         salt_hex: random_hex(16),
         cluster_salt_hex: random_hex(16),
         lan_discovery: true,
+        node_role: NodeRole::Slave,
         node_visible: true,
         accept_foreign_backup: true,
         backup_enabled: true,
+        show_backup_status: true,
         backup_targets: vec![],
         argon2: Argon2Params::default(),
     })
@@ -233,6 +281,7 @@ pub fn needs_restart(before: &Config, after: &Config) -> bool {
         || before.listen_port != after.listen_port
         || before.cluster_salt_hex != after.cluster_salt_hex
         || before.lan_discovery != after.lan_discovery
+        || before.node_role != after.node_role
         || before.node_visible != after.node_visible
 }
 

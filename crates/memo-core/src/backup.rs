@@ -8,7 +8,11 @@ use crate::config::{Argon2Params, Config};
 use crate::crypto::{self, derive_key, resolve_salt};
 use crate::person::PersonView;
 use crate::service::MemoView;
-use crate::task::{end_from_duration, TaskStatus, TaskView};
+use crate::task::{end_from_duration, TaskKind, TaskStatus, TaskView};
+
+fn default_true() -> bool {
+    true
+}
 
 const FORMAT: &str = "memo-bak-v1";
 
@@ -51,6 +55,8 @@ struct BackupPerson {
     /// 备份不含人员密码哈希；导入后需重新设密
     #[serde(default)]
     needs_password_reset: bool,
+    #[serde(default)]
+    gender: crate::person::Gender,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,6 +75,12 @@ struct BackupTask {
     assignee_id: String,
     #[serde(default)]
     status: TaskStatus,
+    #[serde(default)]
+    kind: TaskKind,
+    #[serde(default = "default_true")]
+    on_calendar: bool,
+    #[serde(default)]
+    remind: bool,
     version: u64,
     node_id: String,
 }
@@ -127,6 +139,7 @@ pub fn export_encrypted(
                 version: p.version,
                 node_id: p.node_id.clone(),
                 needs_password_reset: true,
+                gender: p.gender,
             })
             .collect(),
         tasks: tasks
@@ -142,6 +155,9 @@ pub fn export_encrypted(
                 end_hour: Some(t.end_hour),
                 assignee_id: t.assignee_id.clone(),
                 status: t.status,
+                kind: t.kind,
+                on_calendar: t.on_calendar,
+                remind: t.remind,
                 version: t.version,
                 node_id: t.node_id.clone(),
             })
@@ -190,6 +206,9 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 node_id: m.node_id,
                 visibility: crate::store::MemoVisibility::Private,
                 owner_fp: String::new(),
+                modified_at: String::new(),
+                lifecycle: crate::store::MemoLifecycle::Permanent,
+                deleted_at: String::new(),
             })
             .collect(),
         persons: payload
@@ -201,6 +220,7 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 disabled: p.disabled,
                 version: p.version,
                 node_id: p.node_id,
+                gender: p.gender,
             })
             .collect(),
         tasks: payload
@@ -227,6 +247,9 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                     end_hour,
                     assignee_id: t.assignee_id,
                     status: t.status,
+                    kind: t.kind,
+                    on_calendar: t.on_calendar,
+                    remind: t.remind,
                     deleted: false,
                     version: t.version,
                     node_id: t.node_id,

@@ -43,3 +43,37 @@ pub fn save_vec<T: Serialize>(
     fs::write(file_path(data_dir, name), ct)?;
     Ok(())
 }
+
+pub fn load_json<T: DeserializeOwned>(
+    data_dir: &Path,
+    name: &str,
+    key: &[u8],
+) -> anyhow::Result<Option<T>> {
+    let p = file_path(data_dir, name);
+    if !p.exists() {
+        return Ok(None);
+    }
+    let ct = fs::read_to_string(&p)?;
+    if ct.trim().is_empty() {
+        return Ok(None);
+    }
+    let plain = crypto::decrypt_string(key, ct.trim())
+        .map_err(|_| anyhow::anyhow!("解密 {name} 失败（主密码或文件损坏）"))?;
+    if plain.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&plain)?))
+}
+
+pub fn save_json<T: Serialize>(
+    data_dir: &Path,
+    name: &str,
+    key: &[u8],
+    value: &T,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(data_dir)?;
+    let plain = serde_json::to_string(value)?;
+    let ct = crypto::encrypt_string(key, &plain)?;
+    fs::write(file_path(data_dir, name), ct)?;
+    Ok(())
+}

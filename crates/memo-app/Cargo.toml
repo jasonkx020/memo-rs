@@ -7,6 +7,7 @@ edition.workspace = true
 memo-core = { workspace = true }
 memo-sync = { workspace = true }
 eframe = { workspace = true }
+image = { version = "=0.24.9", default-features = false, features = ["png"] }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
@@ -18,9 +19,12 @@ idna = { workspace = true }
 base64ct = { workspace = true }
 password-hash = { workspace = true }
 getrandom = { workspace = true }
+fs2 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_Controls_Dialogs",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
 ] }

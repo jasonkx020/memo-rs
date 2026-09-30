@@ -18,6 +18,12 @@ fn main() {
         res.set_version_info(winres::VersionInfo::FILEVERSION, 0x0000_0001_0000_0000);
         res.set("ProductVersion", "0.1.0");
         res.set("FileVersion", "0.1.0.0");
+        let icon = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/app_icon.ico");
+        if icon.is_file() {
+            res.set_icon(icon.to_string_lossy().as_ref());
+        } else {
+            eprintln!("cargo:warning=missing {}", icon.display());
+        }
         if let Err(e) = res.compile() {
             eprintln!("cargo:warning=winres compile failed: {e}");
         }

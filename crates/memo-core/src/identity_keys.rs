@@ -3,7 +3,7 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 pub const SCHEMA_VERSION: u32 = 2;
-pub const MEMOKEY_MAGIC: &str = "MEMOKEY_V1";
+pub const MEMOKEY_MAGIC: &str = "MEMOKEY_V2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityMeta {
@@ -30,12 +30,29 @@ struct MemoKeyFile {
     magic: String,
     fingerprint: String,
     public_hex: String,
-    /// 明文或 AES 包装后的私钥 hex（见 encrypted）
+    /// 明文 hex 或 AES 包装后的 base64（见 encrypted）
     secret_hex: String,
     #[serde(default)]
     encrypted: bool,
-    #[serde(default)]
     alias: String,
+    /// Ed25519 签名（hex）；覆盖除自身外的稳定载荷
+    sig_hex: String,
+}
+
+impl MemoKeyFile {
+    fn sign_payload(&self) -> Vec<u8> {
+        let enc = if self.encrypted { "1" } else { "0" };
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            self.magic,
+            self.fingerprint,
+            self.public_hex,
+            self.secret_hex,
+            enc,
+            self.alias
+        )
+        .into_bytes()
+    }
 }
 
 #[derive(Clone)]
@@ -105,6 +122,11 @@ impl IdentityKeys {
 
     pub fn identity_dir(data_dir: &Path, fingerprint: &str) -> PathBuf {
         Self::identities_root(data_dir).join(fingerprint)
+    }
+
+    /// 每个身份独立的加密数据目录（备忘/人员/任务等）。
+    pub fn vault_dir(data_dir: &Path, fingerprint: &str) -> PathBuf {
+        data_dir.join("vaults").join(fingerprint)
     }
 
     pub fn list(data_dir: &Path) -> anyhow::Result<Vec<IdentityMeta>> {
@@ -195,22 +217,29 @@ impl IdentityKeys {
         self.save(data_dir)
     }
 
-    /// 导出 `.memokey`；`passphrase` 非空则 AES 包装私钥。
+    /// 导出 `.memokey`；`passphrase` 非空则 AES 包装私钥；含别名与完整性签名。
     pub fn export_file(&self, path: &Path, passphrase: &str) -> anyhow::Result<()> {
+        let alias = self.alias.trim();
+        if alias.is_empty() {
+            anyhow::bail!("导出前须设置显示名称");
+        }
         let (secret_hex, encrypted) = if passphrase.is_empty() {
             (self.secret_hex(), false)
         } else {
             let wrap = wrap_secret(passphrase.as_bytes(), &self.signing.to_bytes())?;
             (wrap, true)
         };
-        let file = MemoKeyFile {
+        let mut file = MemoKeyFile {
             magic: MEMOKEY_MAGIC.into(),
             fingerprint: self.fingerprint.clone(),
             public_hex: self.public_hex(),
             secret_hex,
             encrypted,
-            alias: self.alias.clone(),
+            alias: alias.to_string(),
+            sig_hex: String::new(),
         };
+        let sig = self.signing.sign(&file.sign_payload());
+        file.sig_hex = hex::encode(sig.to_bytes());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -218,12 +247,20 @@ impl IdentityKeys {
         Ok(())
     }
 
+    /// 导入 `.memokey`：验签 + 公私钥一致；别名取自包内。
     pub fn import_file(path: &Path, passphrase: &str) -> anyhow::Result<Self> {
         let raw = fs::read_to_string(path)?;
         let file: MemoKeyFile = serde_json::from_str(&raw)?;
         if file.magic != MEMOKEY_MAGIC {
-            anyhow::bail!("不是有效的 .memokey 文件");
+            anyhow::bail!("不是有效的 .memokey 文件（需要 MEMOKEY_V2）");
         }
+        if file.alias.trim().is_empty() {
+            anyhow::bail!("密钥包缺少显示名称");
+        }
+        if file.sig_hex.trim().is_empty() {
+            anyhow::bail!("密钥包缺少完整性签名");
+        }
+
         let secret_bytes = if file.encrypted {
             if passphrase.is_empty() {
                 anyhow::bail!("该密钥包需要保险口令");
@@ -238,14 +275,37 @@ impl IdentityKeys {
             arr.copy_from_slice(&b);
             arr
         };
-        let mut id = Self::from_secret(secret_bytes, &file.alias);
-        if id.fingerprint != file.fingerprint && !file.fingerprint.is_empty() {
-            // 以私钥为准
+
+        let id = Self::from_secret(secret_bytes, file.alias.trim());
+        if id.fingerprint != file.fingerprint {
+            anyhow::bail!("密钥包指纹与私钥不一致（可能被篡改）");
         }
-        if id.alias.is_empty() {
-            id.alias = IdentityKeys::short_fp(&id.fingerprint);
+        if id.public_hex() != file.public_hex {
+            anyhow::bail!("密钥包公钥与私钥不一致（可能被篡改）");
         }
+
+        let sig_bytes = hex::decode(file.sig_hex.trim())
+            .map_err(|_| anyhow::anyhow!("密钥包签名格式无效"))?;
+        let sig = Signature::from_slice(&sig_bytes)
+            .map_err(|_| anyhow::anyhow!("密钥包签名格式无效"))?;
+        id.signing
+            .verifying_key()
+            .verify(&file.sign_payload(), &sig)
+            .map_err(|_| anyhow::anyhow!("密钥包已损坏或被篡改"))?;
+
         Ok(id)
+    }
+
+    /// 只读预览包内别名（不验签也可用于选文件后展示；完整校验仍走 import_file）。
+    pub fn peek_alias(path: &Path) -> Option<String> {
+        let raw = fs::read_to_string(path).ok()?;
+        let file: MemoKeyFile = serde_json::from_str(&raw).ok()?;
+        let a = file.alias.trim();
+        if a.is_empty() {
+            None
+        } else {
+            Some(a.to_string())
+        }
     }
 }
 

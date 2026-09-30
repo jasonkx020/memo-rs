@@ -1,4 +1,5 @@
 use parking_lot::Mutex;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -11,9 +12,10 @@ use crate::crypto;
 use crate::export::export_txt;
 use crate::hosted::{HostedBlob, HostedStore};
 use crate::identity_keys::{self, IdentityKeys};
-use crate::person::{Person, PersonStore, PersonView};
-use crate::store::{Broadcaster, ConflictNotice, MemoItem, MemoStore, MemoVisibility};
-use crate::task::{TaskItem, TaskStatus, TaskStore, TaskView};
+use crate::cycle::{CycleConfig, CycleStore};
+use crate::person::{Gender, Person, PersonStore, PersonView};
+use crate::store::{Broadcaster, ConflictNotice, MemoItem, MemoLifecycle, MemoStore, MemoVisibility};
+use crate::task::{TaskItem, TaskKind, TaskStatus, TaskStore, TaskView};
 
 #[derive(Debug, Clone)]
 pub struct MemoView {
@@ -25,7 +27,13 @@ pub struct MemoView {
     pub node_id: String,
     pub visibility: MemoVisibility,
     pub owner_fp: String,
+    pub modified_at: String,
+    pub lifecycle: MemoLifecycle,
+    pub deleted_at: String,
 }
+
+/// 回收站宽限期（天）
+pub const TRASH_RETENTION_DAYS: i64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct HistorySnapshot {
@@ -61,6 +69,7 @@ pub struct MemoService {
     store: Arc<MemoStore>,
     person_store: Arc<PersonStore>,
     task_store: Arc<TaskStore>,
+    cycle_store: Arc<CycleStore>,
     hosted: Arc<HostedStore>,
     audit: Arc<AuditLog>,
     session_fp: String,
@@ -76,6 +85,7 @@ impl MemoService {
         store: Arc<MemoStore>,
         person_store: Arc<PersonStore>,
         task_store: Arc<TaskStore>,
+        cycle_store: Arc<CycleStore>,
         hosted: Arc<HostedStore>,
         audit: Arc<AuditLog>,
         session_fp: String,
@@ -87,6 +97,7 @@ impl MemoService {
             store,
             person_store,
             task_store,
+            cycle_store,
             hosted,
             audit,
             session_fp,
@@ -144,6 +155,14 @@ impl MemoService {
         self.current_person_id.lock().clone()
     }
 
+    /// 当前选用人员的性别（用于节点广播与后续生理期能力）。
+    pub fn current_person_gender(&self) -> crate::person::Gender {
+        self.current_person_id()
+            .and_then(|id| self.person_store.get(&id))
+            .map(|p| p.gender)
+            .unwrap_or_default()
+    }
+
     pub fn set_current_person(&self, id: Option<String>) {
         *self.current_person_id.lock() = id;
     }
@@ -158,12 +177,29 @@ impl MemoService {
         content: &str,
         visibility: MemoVisibility,
     ) -> anyhow::Result<String> {
+        self.add_with_lifecycle(title, content, visibility, MemoLifecycle::Permanent)
+    }
+
+    pub fn add_with_lifecycle(
+        &self,
+        title: &str,
+        content: &str,
+        visibility: MemoVisibility,
+        lifecycle: MemoLifecycle,
+    ) -> anyhow::Result<String> {
         let ct = crypto::encrypt_string(&self.key, content)?;
         let id = Uuid::new_v4().to_string().replace('-', "");
         let (aid, aname) = self.current_actor();
-        let item = self
-            .store
-            .put(&id, title, &ct, &aid, &aname, visibility, &self.session_fp)?;
+        let item = self.store.put(
+            &id,
+            title,
+            &ct,
+            &aid,
+            &aname,
+            visibility,
+            &self.session_fp,
+            lifecycle,
+        )?;
         if visibility == MemoVisibility::Private {
             self.push_private_backup(&item)?;
         }
@@ -197,6 +233,9 @@ impl MemoService {
                     node_id: it.node_id,
                     visibility: it.visibility,
                     owner_fp: it.owner_fp,
+                    modified_at: it.modified_at,
+                    lifecycle: it.lifecycle,
+                    deleted_at: it.deleted_at,
                 }
             })
             .collect()
@@ -207,9 +246,34 @@ impl MemoService {
             .store
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        self.edit_with_lifecycle(id, title, content, prev.visibility, prev.lifecycle)
+    }
+
+    pub fn edit_with_lifecycle(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        visibility: MemoVisibility,
+        lifecycle: MemoLifecycle,
+    ) -> anyhow::Result<()> {
+        let prev = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
         if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
             anyhow::bail!("无权编辑他人私密备忘");
         }
+        // 公开备忘改为私密时，归属本身份
+        let owner_fp = if visibility == MemoVisibility::Private {
+            if prev.owner_fp.is_empty() {
+                self.session_fp.as_str()
+            } else {
+                prev.owner_fp.as_str()
+            }
+        } else {
+            prev.owner_fp.as_str()
+        };
         let ct = crypto::encrypt_string(&self.key, content)?;
         let (aid, aname) = self.current_actor();
         let item = self.store.put(
@@ -218,8 +282,9 @@ impl MemoService {
             &ct,
             &aid,
             &aname,
-            prev.visibility,
-            &prev.owner_fp,
+            visibility,
+            owner_fp,
+            lifecycle,
         )?;
         if item.visibility == MemoVisibility::Private {
             self.push_private_backup(&item)?;
@@ -244,6 +309,7 @@ impl MemoService {
             &aname,
             view.visibility,
             owner,
+            view.lifecycle.clone(),
         )?;
         if item.visibility == MemoVisibility::Private {
             self.push_private_backup(&item)?;
@@ -256,16 +322,29 @@ impl MemoService {
         if !self.cfg.backup_enabled || item.visibility != MemoVisibility::Private {
             return Ok(());
         }
+        // 已彻底清除（无正文）不推托管密文
+        if item.deleted && item.content.is_empty() {
+            return Ok(());
+        }
+        let plain = crypto::decrypt_string(&self.key, &item.content)?;
+        let ciphertext =
+            crate::hosted::HostedMemoPayload::encode_ciphertext(&self.key, &item.title, &plain)?;
         let blob = HostedBlob {
             owner_fp: item.owner_fp.clone(),
             memo_id: item.id.clone(),
             version: item.version,
-            ciphertext: item.content.clone(),
-            title_hint: String::new(),
+            ciphertext,
+            title_hint: item.title.clone(),
             visibility: "private".into(),
+            content_modified_at: item.modified_at.clone(),
+            backed_up_at: String::new(),
             updated_at: chrono::Local::now().to_rfc3339(),
             source_node: self.cfg.node_id.clone(),
+            lifecycle: item.lifecycle.clone(),
+            deleted: item.deleted,
+            deleted_at: item.deleted_at.clone(),
         };
+        // 本机也留一份索引，便于无网络时对照
         let _ = self.hosted.upsert_blob(blob.clone());
         if let Some(bc) = self.store.broadcaster_opt() {
             bc.broadcast_hosted(&blob);
@@ -277,29 +356,60 @@ impl MemoService {
         let blobs = self.hosted.blobs_for_owner(&self.session_fp);
         let mut n = 0usize;
         for blob in blobs {
-            if crypto::decrypt_string(&self.key, &blob.ciphertext).is_err() {
-                continue;
-            }
+            let (title, content_ct) = match crate::hosted::HostedMemoPayload::decode_for_restore(
+                &self.key,
+                &blob.ciphertext,
+                &blob.title_hint,
+            ) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
             let existing = self.store.get(&blob.memo_id);
             if let Some(ex) = &existing {
-                if ex.version >= blob.version {
+                if ex.version > blob.version {
                     continue;
+                }
+                if ex.version == blob.version {
+                    // 同版本：允许用主机 tombstone 对齐删除态，或修正占位标题
+                    let align_deleted = blob.deleted && !ex.deleted;
+                    let can_fix_title = !blob.deleted
+                        && crate::hosted::is_restore_placeholder(&ex.title)
+                        && !crate::hosted::is_restore_placeholder(&title)
+                        && ex.title != title;
+                    if !align_deleted && !can_fix_title {
+                        continue;
+                    }
                 }
             }
             let (aid, aname) = self.current_actor();
             let item = MemoItem {
                 id: blob.memo_id.clone(),
-                title: format!("恢复 {}", &blob.memo_id[..8.min(blob.memo_id.len())]),
-                content: blob.ciphertext,
-                deleted: false,
+                title,
+                content: content_ct,
+                deleted: blob.deleted,
                 version: blob.version.max(1),
                 node_id: self.cfg.node_id.clone(),
                 modified_by_person_id: aid,
                 modified_by_name: aname,
                 visibility: MemoVisibility::Private,
                 owner_fp: self.session_fp.clone(),
+                modified_at: if blob.content_modified_at.is_empty() {
+                    blob.updated_at.clone()
+                } else {
+                    blob.content_modified_at.clone()
+                },
+                lifecycle: blob.lifecycle.clone(),
+                deleted_at: if blob.deleted {
+                    if blob.deleted_at.is_empty() {
+                        chrono::Local::now().to_rfc3339()
+                    } else {
+                        blob.deleted_at.clone()
+                    }
+                } else {
+                    String::new()
+                },
             };
-            self.store.merge(item, "hosted-restore")?;
+            self.store.force_put_restored(item)?;
             n += 1;
         }
         if n > 0 {
@@ -315,11 +425,59 @@ impl MemoService {
         self.hosted.upsert_blob(blob)
     }
 
+    /// 将本机私有备忘重新打成托管备份并广播（含回收站 tombstone）。
+    pub fn republish_private_backups(&self) -> anyhow::Result<usize> {
+        if !self.cfg.backup_enabled {
+            return Ok(0);
+        }
+        let mut n = 0usize;
+        let mut items = self.store.get_visible();
+        items.extend(self.store.get_deleted());
+        for item in items {
+            if item.visibility != MemoVisibility::Private {
+                continue;
+            }
+            if !item.owner_fp.is_empty() && item.owner_fp != self.session_fp {
+                continue;
+            }
+            if crate::hosted::is_restore_placeholder(&item.title) {
+                continue;
+            }
+            if item.content.is_empty() {
+                continue;
+            }
+            self.push_private_backup(&item)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    pub fn remove_hosted_blob(&self, owner_fp: &str, memo_id: &str) -> anyhow::Result<bool> {
+        self.hosted.remove_blob(owner_fp, memo_id)
+    }
+
+    pub fn hosted_meta_for(&self, owner_fp: &str) -> Vec<crate::hosted::BackupMetaItem> {
+        self.hosted.meta_for_owner(owner_fp)
+    }
+
+    pub fn hosted_blobs_for_ids(
+        &self,
+        owner_fp: &str,
+        memo_ids: &[String],
+    ) -> Vec<HostedBlob> {
+        self.hosted.blobs_for_ids(owner_fp, memo_ids)
+    }
+
+    pub fn purge_hosted_for_space(&self, need: u64) -> anyhow::Result<usize> {
+        self.hosted.purge_for_space(need)
+    }
+
     pub fn verify_password(&self, _password: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
-    pub fn delete(&self, id: &str, _password: &str) -> anyhow::Result<()> {
+    /// 软删：移入回收站；私有则推 tombstone（仍保留主机密文）
+    pub fn delete(&self, id: &str) -> anyhow::Result<()> {
         let prev = self
             .store
             .get(id)
@@ -328,9 +486,110 @@ impl MemoService {
             anyhow::bail!("无权删除他人私密备忘");
         }
         let (aid, aname) = self.current_actor();
-        self.store.delete(id, &aid, &aname)?;
+        let item = self.store.delete(id, &aid, &aname)?;
+        if item.visibility == MemoVisibility::Private {
+            let _ = self.push_private_backup(&item);
+        }
         self.fire();
         Ok(())
+    }
+
+    /// 从回收站恢复
+    pub fn undelete(&self, id: &str) -> anyhow::Result<()> {
+        let prev = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
+            anyhow::bail!("无权恢复他人私密备忘");
+        }
+        if prev.content.is_empty() {
+            anyhow::bail!("已彻底清除，无法恢复");
+        }
+        let (aid, aname) = self.current_actor();
+        let item = self.store.undelete(id, &aid, &aname)?;
+        if item.visibility == MemoVisibility::Private {
+            let _ = self.push_private_backup(&item);
+        }
+        self.fire();
+        Ok(())
+    }
+
+    /// 彻底清除：清空正文并从主机抹除备份
+    pub fn purge_deleted(&self, id: &str) -> anyhow::Result<()> {
+        let prev = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
+            anyhow::bail!("无权清除他人私密备忘");
+        }
+        let (aid, aname) = self.current_actor();
+        let item = self.store.purge(id, &aid, &aname)?;
+        if item.visibility == MemoVisibility::Private {
+            let owner = if item.owner_fp.is_empty() {
+                self.session_fp.as_str()
+            } else {
+                item.owner_fp.as_str()
+            };
+            let _ = self.hosted.remove_blob(owner, &item.id);
+            if let Some(bc) = self.store.broadcaster_opt() {
+                bc.broadcast_hosted_purge(owner, &item.id, item.version);
+            }
+        }
+        self.fire();
+        Ok(())
+    }
+
+    /// 回收站列表（仍可恢复的已删项）
+    pub fn list_trash(&self) -> Vec<MemoView> {
+        self.store
+            .get_deleted()
+            .into_iter()
+            .filter(|it| {
+                it.visibility == MemoVisibility::Public
+                    || it.owner_fp.is_empty()
+                    || it.owner_fp == self.session_fp
+            })
+            .map(|it| {
+                let plain = crypto::decrypt_string(&self.key, &it.content).unwrap_or_else(|_| {
+                    "[解密失败]".into()
+                });
+                MemoView {
+                    id: it.id,
+                    title: it.title,
+                    content: plain,
+                    deleted: it.deleted,
+                    version: it.version,
+                    node_id: it.node_id,
+                    visibility: it.visibility,
+                    owner_fp: it.owner_fp,
+                    modified_at: it.modified_at,
+                    lifecycle: it.lifecycle,
+                    deleted_at: it.deleted_at,
+                }
+            })
+            .collect()
+    }
+
+    /// 扫描超期回收站项并彻底清除
+    pub fn purge_expired_trash(&self) -> anyhow::Result<usize> {
+        let retention = chrono::Duration::try_days(TRASH_RETENTION_DAYS).unwrap_or_default();
+        let cutoff = chrono::Local::now() - retention;
+        let mut n = 0usize;
+        for it in self.store.get_deleted() {
+            if it.visibility == MemoVisibility::Private && it.owner_fp != self.session_fp {
+                continue;
+            }
+            let Some(at) = chrono::DateTime::parse_from_rfc3339(&it.deleted_at).ok() else {
+                continue;
+            };
+            if at < cutoff {
+                self.purge_deleted(&it.id)?;
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     pub fn verify_audit(&self) -> (bool, String) {
@@ -378,6 +637,7 @@ impl MemoService {
                 &p.name,
                 Some(&placeholder),
                 p.disabled,
+                p.gender,
                 None,
                 &aid,
                 &aname,
@@ -562,22 +822,38 @@ impl MemoService {
     }
 
     pub fn add_person(&self, name: &str, _password: &str) -> anyhow::Result<String> {
+        self.add_person_with_gender(name, Gender::Unknown)
+    }
+
+    pub fn add_person_with_gender(&self, name: &str, gender: Gender) -> anyhow::Result<String> {
         let name = name.trim();
         if name.is_empty() {
             anyhow::bail!("姓名不能为空");
         }
+        if matches!(gender, Gender::Unknown) {
+            anyhow::bail!("请选择性别");
+        }
         let id = Uuid::new_v4().to_string().replace('-', "");
         let (aid, aname) = self.current_actor();
         self.person_store
-            .put_local(&id, name, None, false, None, &aid, &aname)?;
+            .put_local(&id, name, None, false, gender, None, &aid, &aname)?;
         self.fire();
         Ok(id)
     }
 
-    pub fn update_person(&self, id: &str, name: &str, disabled: bool) -> anyhow::Result<()> {
+    pub fn update_person(
+        &self,
+        id: &str,
+        name: &str,
+        gender: Gender,
+        disabled: bool,
+    ) -> anyhow::Result<()> {
         let name = name.trim();
         if name.is_empty() {
             anyhow::bail!("姓名不能为空");
+        }
+        if matches!(gender, Gender::Unknown) {
+            anyhow::bail!("请选择性别");
         }
         let prev = self
             .person_store
@@ -589,6 +865,7 @@ impl MemoService {
             name,
             None,
             disabled,
+            gender,
             Some((prev.salt_hex, prev.password_verifier)),
             &aid,
             &aname,
@@ -608,6 +885,7 @@ impl MemoService {
             &prev.name,
             None,
             disabled,
+            prev.gender,
             Some((prev.salt_hex, prev.password_verifier)),
             &aid,
             &aname,
@@ -635,6 +913,52 @@ impl MemoService {
             anyhow::bail!("该人员已禁用");
         }
         self.set_current_person(Some(id.to_string()));
+        Ok(())
+    }
+
+    /// 解锁后对齐会话身份与人员目录：匹配姓名 / 唯一活跃人 / 自动建档。
+    pub fn ensure_session_person(&self) -> anyhow::Result<()> {
+        if let Some(id) = self.current_person_id() {
+            if let Some(p) = self.person_store.get(&id) {
+                if !p.deleted && !p.disabled {
+                    return Ok(());
+                }
+            }
+            self.set_current_person(None);
+        }
+
+        let active = self.list_active_persons();
+        let alias = self.session_alias.trim();
+        let alias_name = if alias.is_empty() {
+            crate::identity_keys::IdentityKeys::short_fp(&self.session_fp)
+        } else {
+            alias.to_string()
+        };
+
+        if let Some(p) = active.iter().find(|p| p.name.trim() == alias_name) {
+            return self.select_person(&p.id);
+        }
+        if active.len() == 1 {
+            return self.select_person(&active[0].id);
+        }
+        if active.is_empty() {
+            let id = Uuid::new_v4().to_string().replace('-', "");
+            let (aid, aname) = self.current_actor();
+            self.person_store.put_local(
+                &id,
+                &alias_name,
+                None,
+                false,
+                Gender::Unknown,
+                None,
+                &aid,
+                &aname,
+            )?;
+            self.set_current_person(Some(id));
+            self.fire();
+            return Ok(());
+        }
+        // 多名且无姓名匹配：留给用户在人员目录「设为当前」
         Ok(())
     }
 
@@ -676,6 +1000,9 @@ impl MemoService {
             end_hour,
             assignee_id: it.assignee_id,
             status: it.status,
+            kind: it.kind,
+            on_calendar: it.on_calendar,
+            remind: it.remind,
             deleted: it.deleted,
             version: it.version,
             node_id: it.node_id,
@@ -742,6 +1069,9 @@ impl MemoService {
         end_hour: f32,
         assignee_id: &str,
         status: TaskStatus,
+        kind: TaskKind,
+        on_calendar: bool,
+        remind: bool,
     ) -> anyhow::Result<String> {
         if title.trim().is_empty() {
             anyhow::bail!("任务标题不能为空");
@@ -762,6 +1092,9 @@ impl MemoService {
             end_hour,
             assignee_id,
             status,
+            kind,
+            on_calendar,
+            remind,
             &aid,
             &aname,
         )?;
@@ -780,6 +1113,9 @@ impl MemoService {
         end_hour: f32,
         assignee_id: &str,
         status: TaskStatus,
+        kind: TaskKind,
+        on_calendar: bool,
+        remind: bool,
     ) -> anyhow::Result<()> {
         if self.task_store.get(id).is_none() {
             anyhow::bail!("任务不存在");
@@ -802,6 +1138,9 @@ impl MemoService {
             end_hour,
             assignee_id,
             status,
+            kind,
+            on_calendar,
+            remind,
             &aid,
             &aname,
         )?;
@@ -822,10 +1161,67 @@ impl MemoService {
             view.end_hour,
             &view.assignee_id,
             view.status,
+            view.kind,
+            view.on_calendar,
+            view.remind,
             &aid,
             &aname,
         )?;
         Ok(())
+    }
+
+    /// 今日需提醒的会议/报送（remind && on_calendar，且日期覆盖今天）。
+    pub fn today_reminders(&self) -> Vec<TaskView> {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let mut v: Vec<_> = self
+            .list_tasks()
+            .into_iter()
+            .filter(|t| {
+                t.remind
+                    && t.on_calendar
+                    && !t.status.is_closed()
+                    && matches!(t.kind, TaskKind::Meeting | TaskKind::Report)
+                    && t.spans_date(&today)
+            })
+            .collect();
+        v.sort_by(|a, b| {
+            a.start_hour
+                .partial_cmp(&b.start_hour)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        v
+    }
+
+    pub fn get_cycle(&self, person_id: &str) -> Option<CycleConfig> {
+        self.cycle_store.get(person_id)
+    }
+
+    pub fn set_cycle(&self, person_id: &str, cfg: CycleConfig) -> anyhow::Result<()> {
+        let person = self
+            .person_store
+            .get(person_id)
+            .ok_or_else(|| anyhow::anyhow!("人员不存在"))?;
+        if !matches!(person.gender, Gender::Female) {
+            anyhow::bail!("仅女性人员可设置生理期");
+        }
+        self.cycle_store.set(person_id, cfg)?;
+        self.fire();
+        Ok(())
+    }
+
+    pub fn current_cycle(&self) -> Option<CycleConfig> {
+        let id = self.current_person_id()?;
+        if !matches!(self.current_person_gender(), Gender::Female) {
+            return None;
+        }
+        self.cycle_store.get(&id)
+    }
+
+    pub fn is_period_day(&self, ymd: &str) -> bool {
+        self.current_cycle()
+            .map(|c| c.is_period_day(ymd))
+            .unwrap_or(false)
     }
 
     pub fn delete_task(&self, id: &str, _password: &str) -> anyhow::Result<()> {
@@ -843,12 +1239,16 @@ impl MemoService {
         Ok(ok)
     }
 
-    /// 公开备忘同步用：返回带明文 content 的副本；私密返回 None。
+    /// 公开备忘同步用：活数据带明文；已删则发 tombstone（清空 content 减流量）。
     pub fn for_public_broadcast(&self, item: &MemoItem) -> Option<MemoItem> {
-        if item.visibility != MemoVisibility::Public || item.deleted {
+        if item.visibility != MemoVisibility::Public {
             return None;
         }
         let mut out = item.clone();
+        if item.deleted {
+            out.content.clear();
+            return Some(out);
+        }
         out.content = crypto::decrypt_string(&self.key, &item.content)
             .unwrap_or_else(|_| item.content.clone());
         Some(out)
@@ -860,8 +1260,13 @@ impl MemoService {
             // 忽略私人 mesh 更新
             return Ok(false);
         }
-        let plain = remote.content.clone();
-        remote.content = crypto::encrypt_string(&self.key, &plain)?;
+        if remote.deleted {
+            // tombstone：保留空 content
+            remote.content.clear();
+        } else {
+            let plain = remote.content.clone();
+            remote.content = crypto::encrypt_string(&self.key, &plain)?;
+        }
         let ok = self.store.merge(remote, source)?;
         if ok {
             self.fire();
@@ -872,6 +1277,7 @@ impl MemoService {
 
 
 /// 用身份密钥对打开库（无主密码）。
+/// 身份元数据在节点根 `data_dir`；加密业务数据在 `vaults/{fingerprint}/`。
 pub fn unlock_with_identity(
     cfg: Config,
     identity: &IdentityKeys,
@@ -886,27 +1292,31 @@ pub fn unlock_with_identity(
     identity_keys::write_schema_marker(&data_dir)?;
     identity.save(&data_dir)?;
 
+    let vault = IdentityKeys::vault_dir(&data_dir, &identity.fingerprint);
+    fs::create_dir_all(&vault)?;
+
     let key = identity.content_key();
-    let keys = crate::audit::KeyPair::load_or_create(&data_dir)?;
-    let audit_path = data_dir.join("audit.jsonl");
+    let keys = crate::audit::KeyPair::load_or_create(&vault)?;
+    let audit_path = vault.join("audit.jsonl");
     let audit = Arc::new(AuditLog::open(audit_path, keys)?);
     let store = Arc::new(MemoStore::new(cfg.node_id.clone(), audit.clone()));
     store.rebuild_from_audit()?;
 
     let person_store = Arc::new(PersonStore::open(
         cfg.node_id.clone(),
-        &data_dir,
+        &vault,
         &key,
         cfg.argon2.clone(),
         audit.clone(),
     )?);
     let task_store = Arc::new(TaskStore::open(
         cfg.node_id.clone(),
-        &data_dir,
+        &vault,
         &key,
         audit.clone(),
     )?);
-    let hosted = Arc::new(HostedStore::open(&data_dir)?);
+    let cycle_store = Arc::new(CycleStore::open(&vault, &key)?);
+    let hosted = Arc::new(HostedStore::open(&vault)?);
 
     let svc = MemoService::new(
         cfg,
@@ -914,6 +1324,7 @@ pub fn unlock_with_identity(
         store,
         person_store,
         task_store,
+        cycle_store,
         hosted,
         audit.clone(),
         identity.fingerprint.clone(),

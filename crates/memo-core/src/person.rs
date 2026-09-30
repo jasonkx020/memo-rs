@@ -14,6 +14,51 @@ use crate::store::{Broadcaster, ConflictNotice};
 
 const PERSON_FILE: &str = "persons.json.enc";
 
+/// 人员性别（生理期提醒等能力仅面向女性）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Gender {
+    #[default]
+    Unknown,
+    Male,
+    Female,
+}
+
+impl Gender {
+    pub fn label(self) -> &'static str {
+        match self {
+            Gender::Unknown => "未设置",
+            Gender::Male => "男",
+            Gender::Female => "女",
+        }
+    }
+
+    /// 发现广播 / 节点标签用短文案。
+    pub fn tag(self) -> &'static str {
+        match self {
+            Gender::Unknown => "",
+            Gender::Male => "男",
+            Gender::Female => "女",
+        }
+    }
+
+    pub fn from_announce(s: &str) -> Self {
+        match s.trim() {
+            "male" | "男" => Gender::Male,
+            "female" | "女" => Gender::Female,
+            _ => Gender::Unknown,
+        }
+    }
+
+    pub fn announce_code(self) -> &'static str {
+        match self {
+            Gender::Male => "male",
+            Gender::Female => "female",
+            Gender::Unknown => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Person {
     pub id: String,
@@ -27,6 +72,8 @@ pub struct Person {
     pub deleted: bool,
     pub version: u64,
     pub node_id: String,
+    #[serde(default)]
+    pub gender: Gender,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +83,7 @@ pub struct PersonView {
     pub disabled: bool,
     pub version: u64,
     pub node_id: String,
+    pub gender: Gender,
 }
 
 pub struct PersonStore {
@@ -78,7 +126,7 @@ impl PersonStore {
             audit,
             broadcaster: RwLock::new(None),
             conflicts: RwLock::new(Vec::new()),
-            })
+        })
     }
 
     pub fn set_broadcaster(&self, bc: Arc<dyn Broadcaster>) {
@@ -134,6 +182,7 @@ impl PersonStore {
         name: &str,
         _password: Option<&str>,
         disabled: bool,
+        gender: Gender,
         keep_verifier: Option<(String, String)>,
         actor_person_id: &str,
         actor_name: &str,
@@ -159,6 +208,7 @@ impl PersonStore {
             deleted: false,
             version: ver,
             node_id: self.node_id.clone(),
+            gender,
         };
         items.insert(id.to_string(), item.clone());
         drop(items);
@@ -290,6 +340,7 @@ impl PersonStore {
             disabled: p.disabled,
             version: p.version,
             node_id: p.node_id.clone(),
+            gender: p.gender,
         }
     }
 }

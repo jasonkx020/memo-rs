@@ -17,6 +17,10 @@ fn default_start_hour() -> f32 {
     9.0
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn parse_ymd(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
@@ -108,6 +112,33 @@ impl TaskStatus {
     }
 }
 
+/// 任务类型：普通工作 / 会议 / 报送材料。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    #[default]
+    Normal,
+    Meeting,
+    Report,
+}
+
+impl TaskKind {
+    pub const ALL: [TaskKind; 3] = [TaskKind::Normal, TaskKind::Meeting, TaskKind::Report];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskKind::Normal => "工作",
+            TaskKind::Meeting => "会议",
+            TaskKind::Report => "报送",
+        }
+    }
+
+    /// 会议/报送默认开启提醒；普通工作默认关闭。
+    pub fn default_remind(self) -> bool {
+        !matches!(self, TaskKind::Normal)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskItem {
     pub id: String,
@@ -129,6 +160,14 @@ pub struct TaskItem {
     pub assignee_id: String,
     #[serde(default)]
     pub status: TaskStatus,
+    #[serde(default)]
+    pub kind: TaskKind,
+    /// 是否出现在月历色块（默认 true）
+    #[serde(default = "default_true")]
+    pub on_calendar: bool,
+    /// 是否纳入今日提醒（默认 false；会议/报送创建时由上层置 true）
+    #[serde(default)]
+    pub remind: bool,
     pub deleted: bool,
     pub version: u64,
     pub node_id: String,
@@ -186,6 +225,9 @@ pub struct TaskView {
     pub end_hour: f32,
     pub assignee_id: String,
     pub status: TaskStatus,
+    pub kind: TaskKind,
+    pub on_calendar: bool,
+    pub remind: bool,
     pub deleted: bool,
     pub version: u64,
     pub node_id: String,
@@ -294,6 +336,9 @@ impl TaskStore {
         end_hour: f32,
         assignee_id: &str,
         status: TaskStatus,
+        kind: TaskKind,
+        on_calendar: bool,
+        remind: bool,
         actor_person_id: &str,
         actor_name: &str,
     ) -> anyhow::Result<TaskItem> {
@@ -312,6 +357,9 @@ impl TaskStore {
             end_hour: Some(end_hour),
             assignee_id: assignee_id.to_string(),
             status,
+            kind,
+            on_calendar,
+            remind,
             deleted: false,
             version: ver,
             node_id: self.node_id.clone(),
