@@ -40,6 +40,26 @@ fn default_node_role() -> NodeRole {
 }
 
 /// 节点角色：主机广播并受理登记；从机只收听并连主机。主机同时具备向其他主机备份/同步的出站能力。
+/// 外观主题偏好（对齐 Android Studio：浅色 / 深色 / 跟随系统）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePreference::System => "跟随系统",
+            ThemePreference::Light => "浅色",
+            ThemePreference::Dark => "深色",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRole {
@@ -111,6 +131,9 @@ pub struct Config {
     /// 左侧备忘列表是否显示备份状态标签
     #[serde(default = "default_true")]
     pub show_backup_status: bool,
+    /// 外观：浅色 / 深色 / 跟随系统
+    #[serde(default)]
+    pub theme: ThemePreference,
     /// 备份目标 node_id；空 = 所有可见且 accept_backup 的在线节点
     #[serde(default)]
     pub backup_targets: Vec<String>,
@@ -214,6 +237,7 @@ pub fn default_config() -> anyhow::Result<Config> {
         accept_foreign_backup: true,
         backup_enabled: true,
         show_backup_status: true,
+        theme: ThemePreference::System,
         backup_targets: vec![],
         argon2: Argon2Params::default(),
     })

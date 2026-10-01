@@ -1,4 +1,4 @@
-mod app_icon;
+﻿mod app_icon;
 mod calendar_view;
 mod china_calendar;
 mod doc_editor;
@@ -37,6 +37,59 @@ enum LeftTab {
     Calendar,
 }
 
+/// 设置项：字段名 + 可选说明 + 下方控件。
+fn settings_item_header(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(
+        RichText::new(title)
+            .size(13.5)
+            .strong()
+            .color(theme::text()),
+    );
+    if !description.is_empty() {
+        ui.add_space(3.0);
+        ui.label(
+            RichText::new(description)
+                .size(12.0)
+                .color(theme::text_muted()),
+        );
+    }
+    ui.add_space(6.0);
+}
+
+fn settings_item_gap(ui: &mut egui::Ui) {
+    ui.add_space(14.0);
+}
+
+fn settings_section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(title)
+            .size(16.0)
+            .strong()
+            .color(theme::text()),
+    );
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(10.0);
+}
+
+fn settings_text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> bool {
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .desired_width(width)
+            .hint_text(theme::hint(hint)),
+    )
+    .changed()
+}
+
+fn theme_pref_label(p: memo_core::ThemePreference) -> &'static str {
+    match p {
+        memo_core::ThemePreference::System => "跟随系统",
+        memo_core::ThemePreference::Light => "浅色",
+        memo_core::ThemePreference::Dark => "深色",
+    }
+}
+
 /// egui 0.27 在 Windows 中文 IME 下：CompositionUpdate 会写入临时字，
 /// CompositionEnd 又常因光标与 ime_cursor_range 不一致而丢弃上屏（表现为只能输入约 1～2 个汉字）。
 /// 将提交转为普通 Text，并忽略预编辑，交给系统候选框显示拼音过程。
@@ -73,8 +126,6 @@ enum BgMsg {
     Refresh,
     /// 删除成功后清除选中
     Deleted,
-    /// 主密码校验通过后进入编辑模式
-    EnterEdit,
     /// 模板新建完成：选中并直接进入编辑
     CreatedMemo {
         id: String,
@@ -113,8 +164,6 @@ enum Screen {
         show_trash: bool,
         /// 彻底删除二次确认的 memo id
         purge_confirm_id: Option<String>,
-        show_edit_auth: bool,
-        edit_pw: String,
         /// 导出确认（主密码 + 路径）
         show_export: bool,
         export_pw: String,
@@ -145,7 +194,7 @@ pub struct MemoApp {
     screen: Screen,
     tx: Sender<BgMsg>,
     rx: Receiver<BgMsg>,
-    theme_applied: bool,
+    last_theme_mode: Option<theme::ThemeMode>,
     last_peer_refresh: Instant,
     show_help: bool,
     show_about: bool,
@@ -168,8 +217,6 @@ pub struct MemoApp {
     show_new_task: bool,
     show_task_delete: bool,
     task_delete_pw: String,
-    show_task_edit_auth: bool,
-    task_edit_pw: String,
     pending_switch_person: bool,
     /// 右侧节点栏（默认收起，给详情更多宽度）
     show_nodes: bool,
@@ -191,7 +238,7 @@ impl MemoApp {
             screen: Screen::IdentityGate(gate),
             tx,
             rx,
-            theme_applied: false,
+            last_theme_mode: None,
             last_peer_refresh: Instant::now() - Duration::from_secs(10),
             show_help: false,
             show_about: false,
@@ -214,8 +261,6 @@ impl MemoApp {
             show_new_task: false,
             show_task_delete: false,
             task_delete_pw: String::new(),
-            show_task_edit_auth: false,
-            task_edit_pw: String::new(),
             pending_switch_person: false,
             show_nodes: false,
             memo_doc: doc_editor::Doc::empty(),
@@ -243,8 +288,6 @@ impl MemoApp {
             show_delete: false,
             show_trash: false,
             purge_confirm_id: None,
-            show_edit_auth: false,
-            edit_pw: String::new(),
             show_export: false,
             export_pw: String::new(),
             export_path: String::new(),
@@ -265,28 +308,26 @@ impl MemoApp {
     }
 
     fn help_about_menu(ui: &mut egui::Ui, show_help: &mut bool, show_about: &mut bool) {
-        app_icon::show(ui, 20.0);
-        ui.add_space(4.0);
-        ui.menu_button(RichText::new("帮助").color(Color32::WHITE), |ui| {
-            if ui.button("使用说明").clicked() {
-                *show_help = true;
-                ui.close_menu();
-            }
-            if ui.button("关于").clicked() {
-                *show_about = true;
-                ui.close_menu();
-            }
-        });
+        ui.menu_button(
+            RichText::new("帮助").color(theme::chrome_fg()).size(14.0),
+            |ui| {
+                if ui.button("使用说明").clicked() {
+                    *show_help = true;
+                    ui.close_menu();
+                }
+                if ui.button("关于").clicked() {
+                    *show_about = true;
+                    ui.close_menu();
+                }
+            },
+        );
     }
 
     fn draw_help_about_windows(ctx: &egui::Context, show_help: &mut bool, show_about: &mut bool) {
         if *show_help {
-            egui::Window::new("使用说明")
-                .collapsible(false)
-                .resizable(true)
-                .default_size([660.0, 540.0])
-                .min_width(440.0)
-                .min_height(340.0)
+            let modal = theme::begin_modal(ctx, "help_modal");
+            theme::modal_fixed(ctx, "使用说明", [660.0, 540.0])
+                .id(modal.window_id)
                 .open(show_help)
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
@@ -296,21 +337,27 @@ impl MemoApp {
                     ui.add_space(8.0);
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .max_height(440.0)
+                        .max_height((ui.available_height() - 8.0).max(120.0))
                         .show(ui, |ui| {
                             help_view::show(ui, HELP_DOC);
                         });
                 });
+            if modal.end(ctx, *show_help) {
+                *show_help = false;
+            }
         }
 
         if *show_about {
-            egui::Window::new("关于")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            let modal = theme::begin_modal(ctx, "about_modal");
+            theme::modal_fixed(ctx, "关于", [440.0, 320.0])
+                .id(modal.window_id)
                 .open(show_about)
                 .show(ctx, |ui| {
-                    ui.set_min_width(400.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height((ui.available_height() - 4.0).max(120.0))
+                        .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         app_icon::show(ui, 48.0);
@@ -320,7 +367,7 @@ impl MemoApp {
                             ui.add_space(4.0);
                             ui.label(
                                 RichText::new(theme::APP_DESCRIPTION)
-                                    .color(theme::TEXT_MUTED)
+                                    .color(theme::text_muted())
                                     .size(13.0),
                             );
                         });
@@ -349,13 +396,13 @@ impl MemoApp {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(10.0);
-                    ui.label(RichText::new("功能特性").strong().color(theme::TEXT));
+                    ui.label(RichText::new("功能特性").strong().color(theme::text()));
                     ui.add_space(4.0);
-                    ui.label(RichText::new("· 身份密钥对登录 · 强制导出备份").color(theme::TEXT));
-                    ui.label(RichText::new("· 私人密文异地托管 · 公开备忘局域网同步").color(theme::TEXT));
-                    ui.label(RichText::new("· Ed25519 审计链 · 变更时间线").color(theme::TEXT));
-                    ui.label(RichText::new("· 日历：月历 / 周视图 / 甘特与工时").color(theme::TEXT));
-                    ui.label(RichText::new("· 加密备份 (.memobak)").color(theme::TEXT));
+                    ui.label(RichText::new("· 身份密钥对登录 · 强制导出备份").color(theme::text()));
+                    ui.label(RichText::new("· 私人密文异地托管 · 公开备忘局域网同步").color(theme::text()));
+                    ui.label(RichText::new("· Ed25519 审计链 · 变更时间线").color(theme::text()));
+                    ui.label(RichText::new("· 日历：月历 / 周视图 / 甘特与工时").color(theme::text()));
+                    ui.label(RichText::new("· 加密备份 (.memobak)").color(theme::text()));
                     ui.add_space(10.0);
                     ui.label(
                         theme::muted_label(
@@ -368,11 +415,15 @@ impl MemoApp {
                         ui.label(
                             RichText::new(format!("配置目录: {}", p.display()))
                                 .small()
-                                .color(theme::TEXT_MUTED),
+                                .color(theme::text_muted()),
                         );
                     }
                     ui.add_space(4.0);
+                        });
                 });
+            if modal.end(ctx, *show_about) {
+                *show_about = false;
+            }
         }
     }
 
@@ -406,37 +457,12 @@ impl MemoApp {
                         *status_line = s;
                     }
                 }
-                BgMsg::EnterEdit => {
-                    if let Screen::Main {
-                        editing,
-                        show_edit_auth,
-                        edit_pw,
-                        status_line,
-                        ..
-                    } = &mut self.screen
-                    {
-                        *editing = true;
-                        *show_edit_auth = false;
-                        edit_pw.clear();
-                        *status_line = "已进入编辑模式，修改后请点「保存」".into();
-                    }
-                    if let Screen::Main {
-                        title_draft,
-                        body_draft,
-                        ..
-                    } = &self.screen
-                    {
-                        self.memo_doc =
-                            doc_editor::Doc::from_store(title_draft, body_draft);
-                    }
-                }
                 BgMsg::CreatedMemo { id, title, body } => {
                     if let Screen::Main {
                         selected,
                         title_draft,
                         body_draft,
                         editing,
-                        show_edit_auth,
                         status_line,
                         ..
                     } = &mut self.screen
@@ -445,7 +471,6 @@ impl MemoApp {
                         *title_draft = title;
                         *body_draft = body;
                         *editing = true;
-                        *show_edit_auth = false;
                         *status_line = "已创建，直接修改后保存即可".into();
                     }
                     if let Screen::Main {
@@ -552,10 +577,10 @@ fn about_kv(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{key}："))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(13.0),
         );
-        ui.label(RichText::new(value).color(theme::TEXT).size(13.0));
+        ui.label(RichText::new(value).color(theme::text()).size(13.0));
     });
 }
 
@@ -590,10 +615,7 @@ fn udp_pulse_row(pulse: &UdpPulse) -> (bool, &'static str, String) {
 
 impl eframe::App for MemoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if !self.theme_applied {
-            theme::apply(ctx);
-            self.theme_applied = true;
-        }
+        theme::sync(ctx, self.cfg.theme, &mut self.last_theme_mode);
         // 必须在绘制 TextEdit 之前修正 IME 事件
         sanitize_cjk_ime_events(ctx);
         self.pump(ctx);
@@ -665,8 +687,6 @@ impl eframe::App for MemoApp {
                 show_delete,
                 show_trash,
                 purge_confirm_id,
-                show_edit_auth,
-                edit_pw,
                 show_export,
                 export_pw,
                 export_path,
@@ -709,82 +729,35 @@ impl eframe::App for MemoApp {
                 }
 
                 egui::TopBottomPanel::top("top")
+                    .exact_height(44.0)
                     .frame(theme::top_bar_frame())
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
-                            app_icon::show(ui, 22.0);
-                            ui.add_space(6.0);
-                            ui.label(theme::brand_title_on_navy(17.0));
-                            ui.add_space(12.0);
+                            ui.spacing_mut().item_spacing.x = 14.0;
+                            app_icon::show(ui, 20.0);
+                            ui.label(theme::brand_title_on_navy(16.0));
+                            ui.add_space(8.0);
                             ui.label(
                                 RichText::new(format!(
-                                    "身份 {} ({})",
+                                    "{} · {}",
                                     rt.svc.session_alias(),
                                     IdentityKeys::short_fp(rt.svc.session_fp())
                                 ))
-                                .color(Color32::from_rgb(0xE2, 0xE8, 0xF0))
-                                .size(13.0),
+                                .color(theme::text_muted())
+                                .size(12.5),
                             );
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("退出")
-                                            .small()
-                                            .color(Color32::from_rgb(0xE2, 0xE8, 0xF0)),
-                                    )
-                                    .fill(theme::NAVY_MID),
-                                )
-                                .clicked()
-                            {
+                            if theme::menu_text_button(ui, "退出").clicked() {
                                 self.pending_switch_person = true;
                             }
-                            ui.add_space(10.0);
                             if self.left_tab == LeftTab::Memos {
                                 ui.add(
                                     egui::TextEdit::singleline(search)
-                                        .hint_text("搜索备忘…")
-                                        .desired_width(200.0),
+                                        .hint_text(theme::hint("搜索备忘…"))
+                                        .desired_width(180.0),
                                 );
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                Self::help_about_menu(ui, &mut show_help, &mut show_about);
-                                let secondary = |ui: &mut egui::Ui, label: &str| {
-                                    ui.add(
-                                        egui::Button::new(
-                                            RichText::new(label).color(Color32::from_rgb(0xE2, 0xE8, 0xF0)),
-                                        )
-                                        .fill(theme::NAVY_MID)
-                                        .stroke(Stroke::new(1.0, Color32::from_rgb(0x33, 0x55, 0x7A))),
-                                    )
-                                };
-                                if secondary(ui, "人员").clicked() {
-                                    self.people.show = true;
-                                }
-                                let nodes_label = if self.show_nodes {
-                                    "隐藏节点"
-                                } else {
-                                    "节点"
-                                };
-                                if secondary(ui, nodes_label).clicked() {
-                                    self.show_nodes = !self.show_nodes;
-                                }
-                                if secondary(ui, "设置").clicked() {
-                                    *settings_draft =
-                                        config::load_settings().unwrap_or(self.cfg.clone());
-                                    *show_settings = true;
-                                }
-                                if secondary(ui, "导出全部").clicked() {
-                                    let dir = std::path::PathBuf::from(&rt.cfg.data_dir)
-                                        .join("exports");
-                                    let path = dir.join(format!(
-                                        "memo-all-{}.txt",
-                                        chrono_like_stamp()
-                                    ));
-                                    *export_ids = None;
-                                    *export_path = path.display().to_string();
-                                    export_pw.clear();
-                                    *show_export = true;
-                                }
+                                ui.spacing_mut().item_spacing.x = 12.0;
                                 let new_label = if self.left_tab == LeftTab::Calendar {
                                     "新建任务"
                                 } else {
@@ -795,9 +768,12 @@ impl eframe::App for MemoApp {
                                         egui::Button::new(
                                             RichText::new(new_label)
                                                 .color(Color32::WHITE)
-                                                .strong(),
+                                                .strong()
+                                                .size(13.5),
                                         )
-                                        .fill(theme::ACCENT),
+                                        .fill(theme::accent())
+                                        .rounding(Rounding::same(theme::ROUND_CTRL))
+                                        .min_size(Vec2::new(64.0, 28.0)),
                                     )
                                     .clicked()
                                 {
@@ -852,6 +828,35 @@ impl eframe::App for MemoApp {
                                         });
                                     }
                                 }
+                                Self::help_about_menu(ui, &mut show_help, &mut show_about);
+                                if theme::menu_text_button(ui, "导出").clicked() {
+                                    let dir = std::path::PathBuf::from(&rt.cfg.data_dir)
+                                        .join("exports");
+                                    let path = dir.join(format!(
+                                        "memo-all-{}.txt",
+                                        chrono_like_stamp()
+                                    ));
+                                    *export_ids = None;
+                                    *export_path = path.display().to_string();
+                                    export_pw.clear();
+                                    *show_export = true;
+                                }
+                                if theme::menu_text_button(ui, "设置").clicked() {
+                                    *settings_draft =
+                                        config::load_settings().unwrap_or(self.cfg.clone());
+                                    *show_settings = true;
+                                }
+                                let nodes_label = if self.show_nodes {
+                                    "隐藏节点"
+                                } else {
+                                    "节点"
+                                };
+                                if theme::menu_text_button(ui, nodes_label).clicked() {
+                                    self.show_nodes = !self.show_nodes;
+                                }
+                                if theme::menu_text_button(ui, "人员").clicked() {
+                                    self.people.show = true;
+                                }
                             });
                         });
                     });
@@ -863,7 +868,7 @@ impl eframe::App for MemoApp {
                             ui.label(
                                 RichText::new(format!("节点 {}", rt.cfg.node_id))
                                     .small()
-                                    .color(theme::TEXT_MUTED),
+                                    .color(theme::text_muted()),
                             );
                             ui.separator();
                             {
@@ -880,18 +885,18 @@ impl eframe::App for MemoApp {
                                         ch_n
                                     ))
                                     .small()
-                                    .color(theme::TEXT_MUTED),
+                                    .color(theme::text_muted()),
                                 );
                             }
                             ui.separator();
                             {
                                 let disk = rt.engine.local_disk_space();
                                 let disk_color = if disk.is_low() {
-                                    theme::DANGER
+                                    theme::danger()
                                 } else if disk.free_bytes < 1024 * 1024 * 1024 {
-                                    theme::WARN
+                                    theme::warn()
                                 } else {
-                                    theme::TEXT_MUTED
+                                    theme::text_muted()
                                 };
                                 ui.label(
                                     RichText::new(format!("磁盘 {}", disk.format_pair()))
@@ -906,25 +911,25 @@ impl eframe::App for MemoApp {
                             ui.separator();
                             if *audit_ok {
                                 ui.label(
-                                    RichText::new("审计完整").small().color(theme::SUCCESS),
+                                    RichText::new("审计完整").small().color(theme::success()),
                                 );
                             } else {
                                 ui.label(
                                     RichText::new(format!("审计: {audit_detail}"))
                                         .small()
-                                        .color(theme::DANGER),
+                                        .color(theme::danger()),
                                 );
                             }
                             if let Some(err) = rt.engine.listen_error() {
                                 ui.separator();
-                                ui.label(RichText::new(err).small().color(theme::DANGER));
+                                ui.label(RichText::new(err).small().color(theme::danger()));
                             }
                             if !status_line.is_empty() {
                                 ui.separator();
                                 ui.label(
                                     RichText::new(status_line.as_str())
                                         .small()
-                                        .color(theme::TEXT_MUTED),
+                                        .color(theme::text_muted()),
                                 );
                             }
                         });
@@ -936,10 +941,10 @@ impl eframe::App for MemoApp {
                         .default_width(200.0)
                         .min_width(140.0)
                         .max_width(280.0)
-                        .frame(theme::panel_frame())
+                        .frame(theme::right_panel_frame())
                         .show(ctx, |ui| {
                             ui.label(
-                                RichText::new("节点").strong().size(15.0).color(theme::TEXT),
+                                RichText::new("节点").strong().size(15.0).color(theme::text()),
                             );
                             ui.label(
                                 theme::muted_label(if !rt.cfg.lan_discovery {
@@ -954,7 +959,7 @@ impl eframe::App for MemoApp {
                             ui.label(
                                 RichText::new(format!("本机角色：{}", rt.cfg.node_role.label()))
                                     .small()
-                                    .color(theme::TEXT_MUTED),
+                                    .color(theme::text_muted()),
                             );
                             {
                                 let pulse = rt.engine.udp_pulse();
@@ -968,24 +973,24 @@ impl eframe::App for MemoApp {
                                         rect.center(),
                                         3.5,
                                         if lit {
-                                            theme::SUCCESS
+                                            theme::success()
                                         } else {
-                                            theme::BORDER_STRONG
+                                            theme::border_strong()
                                         },
                                     );
                                     ui.label(
                                         RichText::new(label)
                                             .small()
                                             .color(if lit {
-                                                theme::SUCCESS
+                                                theme::success()
                                             } else {
-                                                theme::TEXT_MUTED
+                                                theme::text_muted()
                                             }),
                                     );
                                     ui.label(
                                         RichText::new(detail)
                                             .small()
-                                            .color(theme::TEXT_MUTED),
+                                            .color(theme::text_muted()),
                                     );
                                 });
                                 ctx.request_repaint_after(Duration::from_millis(100));
@@ -993,9 +998,9 @@ impl eframe::App for MemoApp {
                             {
                                 let disk = rt.engine.local_disk_space();
                                 let c = if disk.is_low() {
-                                    theme::DANGER
+                                    theme::danger()
                                 } else {
-                                    theme::TEXT_MUTED
+                                    theme::text_muted()
                                 };
                                 ui.label(
                                     RichText::new(format!("本机磁盘 {}", disk.format_pair()))
@@ -1004,7 +1009,7 @@ impl eframe::App for MemoApp {
                                 );
                             }
                             egui::CollapsingHeader::new(
-                                RichText::new("如何腾出空间").small().color(theme::TEXT_MUTED),
+                                RichText::new("如何腾出空间").small().color(theme::text_muted()),
                             )
                             .default_open(false)
                             .show(ui, |ui| {
@@ -1022,7 +1027,7 @@ impl eframe::App for MemoApp {
                                 ui.label(
                                     RichText::new("节点偏多，建议减少同 salt 设备")
                                         .small()
-                                        .color(theme::WARN),
+                                        .color(theme::warn()),
                                 );
                             }
                             ui.add_space(8.0);
@@ -1039,13 +1044,13 @@ impl eframe::App for MemoApp {
                                         ui.label(
                                             RichText::new("本机当前")
                                                 .small()
-                                                .color(theme::TEXT_MUTED),
+                                                .color(theme::text_muted()),
                                         );
                                         gender_chip(ui, g);
                                         ui.label(
                                             RichText::new(who)
                                                 .small()
-                                                .color(theme::TEXT),
+                                                .color(theme::text()),
                                         );
                                     });
                                 } else {
@@ -1068,11 +1073,11 @@ impl eframe::App for MemoApp {
                                 }
                                 for d in discovered.iter() {
                                     let (st_color, dot) = match d.status {
-                                        PeerStatus::Online => (theme::SUCCESS, theme::SUCCESS),
-                                        PeerStatus::Stale => (theme::WARN, theme::WARN),
-                                        PeerStatus::Offline => (theme::DANGER, theme::BORDER_STRONG),
+                                        PeerStatus::Online => (theme::success(), theme::success()),
+                                        PeerStatus::Stale => (theme::warn(), theme::warn()),
+                                        PeerStatus::Offline => (theme::danger(), theme::border_strong()),
                                         PeerStatus::Undiscovered => {
-                                            (theme::TEXT_MUTED, theme::BORDER_STRONG)
+                                            (theme::text_muted(), theme::border_strong())
                                         }
                                     };
                                     theme::card_frame()
@@ -1094,7 +1099,7 @@ impl eframe::App for MemoApp {
                                                     RichText::new(title)
                                                         .strong()
                                                         .small()
-                                                        .color(theme::TEXT),
+                                                        .color(theme::text()),
                                                 );
                                                 if d.gender.tag() != "" {
                                                     gender_chip(ui, d.gender);
@@ -1107,19 +1112,19 @@ impl eframe::App for MemoApp {
                                                         IdentityKeys::short_fp(&d.key_fingerprint)
                                                     ))
                                                     .small()
-                                                    .color(theme::TEXT_MUTED),
+                                                    .color(theme::text_muted()),
                                                 );
                                             }
                                             ui.label(
                                                 RichText::new(&d.addr)
                                                     .small()
-                                                    .color(theme::TEXT_MUTED),
+                                                    .color(theme::text_muted()),
                                             );
                                             ui.horizontal(|ui| {
                                                 ui.label(
                                                     RichText::new(d.role.label())
                                                         .small()
-                                                        .color(theme::ACCENT),
+                                                        .color(theme::accent()),
                                                 );
                                                 ui.label(
                                                     RichText::new(d.status.label())
@@ -1130,7 +1135,7 @@ impl eframe::App for MemoApp {
                                                     ui.label(
                                                         RichText::new("通道")
                                                             .small()
-                                                            .color(theme::SUCCESS),
+                                                            .color(theme::success()),
                                                     );
                                                 }
                                                 if d.status != PeerStatus::Undiscovered
@@ -1142,7 +1147,7 @@ impl eframe::App for MemoApp {
                                                             d.last_seen_secs
                                                         ))
                                                         .small()
-                                                        .color(theme::TEXT_MUTED),
+                                                        .color(theme::text_muted()),
                                                     );
                                                 }
                                             });
@@ -1187,7 +1192,7 @@ impl eframe::App for MemoApp {
                                             ui.label(
                                                 RichText::new(disk_line)
                                                     .small()
-                                                    .color(theme::TEXT_MUTED),
+                                                    .color(theme::text_muted()),
                                             );
                                         });
                                     ui.add_space(6.0);
@@ -1241,7 +1246,7 @@ impl eframe::App for MemoApp {
                     egui::TopBottomPanel::top("remind_banner")
                         .frame(
                             Frame::none()
-                                .fill(Color32::from_rgb(0xFE, 0xF3, 0xC7))
+                                .fill(theme::remind_bg())
                                 .inner_margin(Margin::symmetric(16.0, 6.0)),
                         )
                         .show(ctx, |ui| {
@@ -1250,7 +1255,7 @@ impl eframe::App for MemoApp {
                                     RichText::new("今日提醒")
                                         .strong()
                                         .size(13.0)
-                                        .color(Color32::from_rgb(0xB4, 0x53, 0x09)),
+                                        .color(theme::remind_fg()),
                                 );
                                 for t in &reminders {
                                     let label = format!("[{}] {}", t.kind.label(), t.title);
@@ -1304,7 +1309,7 @@ impl eframe::App for MemoApp {
                     .default_width(left_w)
                     .min_width(220.0)
                     .max_width(420.0)
-                    .frame(theme::panel_frame())
+                    .frame(theme::left_panel_frame())
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             if ui
@@ -1385,12 +1390,12 @@ impl eframe::App for MemoApp {
                                             None
                                         };
                                         let bak_color = bak.map(|b| match b {
-                                            BackupUiStatus::Synced => theme::SUCCESS,
+                                            BackupUiStatus::Synced => theme::success(),
                                             BackupUiStatus::Queued | BackupUiStatus::Pending => {
-                                                theme::WARN
+                                                theme::warn()
                                             }
                                             BackupUiStatus::Offline | BackupUiStatus::Public => {
-                                                theme::TEXT_MUTED
+                                                theme::text_muted()
                                             }
                                         });
 
@@ -1409,7 +1414,7 @@ impl eframe::App for MemoApp {
                                                 rect,
                                                 Rounding::same(theme::ROUND_CTRL),
                                                 fill,
-                                                Stroke::new(1.0, theme::BORDER),
+                                                Stroke::new(1.0, theme::border()),
                                             );
 
                                             let pad_x = 10.0;
@@ -1454,7 +1459,7 @@ impl eframe::App for MemoApp {
                                                 egui::Align2::LEFT_TOP,
                                                 &title,
                                                 title_font,
-                                                theme::TEXT,
+                                                theme::text(),
                                             );
                                             if let (Some(galley), Some(c)) =
                                                 (badge_galley, bak_color)
@@ -1477,7 +1482,7 @@ impl eframe::App for MemoApp {
                                                 egui::Align2::LEFT_TOP,
                                                 &summary,
                                                 summary_font,
-                                                theme::TEXT_MUTED,
+                                                theme::text_muted(),
                                             );
                                         }
 
@@ -1509,7 +1514,7 @@ impl eframe::App for MemoApp {
                                             ui.separator();
                                             if ui
                                                 .add(egui::Button::new(
-                                                    RichText::new("移入回收站…").color(theme::DANGER),
+                                                    RichText::new("移入回收站…").color(theme::danger()),
                                                 ))
                                                 .clicked()
                                             {
@@ -1577,7 +1582,7 @@ impl eframe::App for MemoApp {
                 }
 
                 egui::CentralPanel::default()
-                    .frame(Frame::none().inner_margin(Margin::same(16.0)).fill(theme::BG))
+                    .frame(theme::content_frame())
                     .show(ctx, |ui| {
                         if self.left_tab == LeftTab::Calendar {
                             if self.cal.selected_task.is_some() {
@@ -1610,8 +1615,6 @@ impl eframe::App for MemoApp {
                                     &mut self.task_on_calendar,
                                     &mut self.task_remind,
                                     &mut self.task_editing,
-                                    &mut self.show_task_edit_auth,
-                                    &mut self.task_edit_pw,
                                     &mut self.show_task_delete,
                                     &mut self.task_delete_pw,
                                     status_line,
@@ -1668,7 +1671,7 @@ impl eframe::App for MemoApp {
                         let meta = filtered.iter().find(|m| m.id == id);
 
                         let avail_h = ui.available_height();
-                        theme::card_frame().show(ui, |ui| {
+                        Frame::none().show(ui, |ui| {
                                 ui.set_min_height(avail_h - 8.0);
                                 ui.set_min_width(ui.available_width());
                                 let title_show = if title_draft.is_empty() {
@@ -1678,13 +1681,13 @@ impl eframe::App for MemoApp {
                                 };
                                 ui.horizontal(|ui| {
                                     ui.heading(
-                                        RichText::new(title_show).size(24.0).color(theme::TEXT),
+                                        RichText::new(title_show).size(24.0).color(theme::text()),
                                     );
                                     if *editing {
                                         ui.label(
                                             RichText::new("编辑中")
                                                 .small()
-                                                .color(theme::WARN),
+                                                .color(theme::warn()),
                                         );
                                     } else {
                                         ui.label(theme::muted_label("只读").small());
@@ -1702,7 +1705,7 @@ impl eframe::App for MemoApp {
                                             m.lifecycle.label()
                                         ))
                                         .small()
-                                        .color(theme::TEXT_MUTED),
+                                        .color(theme::text_muted()),
                                     );
                                 }
                                 if *editing {
@@ -1710,7 +1713,7 @@ impl eframe::App for MemoApp {
                                         ui.label(
                                             RichText::new("可见性")
                                                 .small()
-                                                .color(theme::TEXT_MUTED),
+                                                .color(theme::text_muted()),
                                         );
                                         ui.radio_value(
                                             visibility_draft,
@@ -1726,7 +1729,7 @@ impl eframe::App for MemoApp {
                                         ui.label(
                                             RichText::new("生命周期")
                                                 .small()
-                                                .color(theme::TEXT_MUTED),
+                                                .color(theme::text_muted()),
                                         );
                                         egui::ComboBox::from_id_source("memo_lifecycle")
                                             .selected_text(match *lifecycle_days {
@@ -1748,8 +1751,13 @@ impl eframe::App for MemoApp {
                                 ui.horizontal_wrapped(|ui| {
                                     if !*editing {
                                         if theme::primary_button(ui, "编辑").clicked() {
-                                            *show_edit_auth = true;
-                                            edit_pw.clear();
+                                            *editing = true;
+                                            self.memo_doc = doc_editor::Doc::from_store(
+                                                title_draft,
+                                                body_draft,
+                                            );
+                                            *status_line =
+                                                "已进入编辑模式，修改后请点「保存」".into();
                                         }
                                     } else {
                                         if theme::success_button(ui, "保存").clicked() {
@@ -1919,225 +1927,216 @@ impl eframe::App for MemoApp {
                             });
                     });
 
-                if *show_edit_auth {
-                    egui::Window::new("确认编辑")
-                        .collapsible(false)
-                        .resizable(false)
-                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                if self.show_new_task {
+                    let modal = theme::begin_modal(ctx, "new_task_modal");
+                    let mut open = true;
+                    theme::modal_fixed(ctx, "新建任务", [560.0, 520.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
                         .show(ctx, |ui| {
-                            ui.label("为防止误改，编辑前请输入主密码确认");
-                            ui.add_space(8.0);
-                            theme::password_field(ui, edit_pw, "主密码", 280.0, 34.0);
-                            ui.add_space(10.0);
-                            ui.horizontal(|ui| {
-                                    if theme::primary_button(ui, "确认并编辑").clicked() {
-                                    let svc = rt.svc.clone();
-                                    let pw = edit_pw.clone();
-                                    let tx = self.tx.clone();
-                                    std::thread::spawn(move || match svc.verify_password(&pw) {
-                                        Ok(()) => {
-                                            let _ = tx.send(BgMsg::EnterEdit);
+                            let footer_h = 48.0;
+                            let body_h = (ui.available_height() - footer_h).max(160.0);
+                            // 给编辑器固定视口高度，避免 ScrollArea 内 ∞ 高度撑窗
+                            let editor_h = (body_h * 0.42).clamp(160.0, 240.0);
+                            egui::ScrollArea::vertical()
+                                .id_source("new_task_scroll")
+                                .max_height(body_h)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label(
+                                        RichText::new("第一行是标题，下面写计划")
+                                            .small()
+                                            .color(theme::text_muted()),
+                                    );
+                                    ui.add_space(4.0);
+                                    {
+                                        let (t, p) = self.task_doc.to_store("未命名任务");
+                                        self.task_title = t;
+                                        self.task_plan = p;
+                                    }
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(ui.available_width(), editor_h),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            doc_editor::show_editor(
+                                                ui,
+                                                &mut self.task_doc,
+                                                "new_task",
+                                            );
+                                        },
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label("开始日期");
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut self.task_date)
+                                                    .desired_width(110.0)
+                                                    .hint_text(theme::hint("YYYY-MM-DD")),
+                                            )
+                                            .changed()
+                                        {
+                                            calendar_view::ensure_end_after_start(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &mut self.task_end_date,
+                                                &mut self.task_end_hour,
+                                            );
+                                            if let Ok(h) = memo_core::task::duration_hours(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &self.task_end_date,
+                                                self.task_end_hour,
+                                            ) {
+                                                self.task_hours = h;
+                                            }
                                         }
-                                        Err(e) => {
-                                            let _ = tx.send(BgMsg::Error(e.to_string()));
+                                        ui.label("开始时");
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut self.task_start)
+                                                    .speed(0.25)
+                                                    .clamp_range(0.0..=23.75),
+                                            )
+                                            .changed()
+                                        {
+                                            calendar_view::ensure_end_after_start(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &mut self.task_end_date,
+                                                &mut self.task_end_hour,
+                                            );
+                                            if let Ok(h) = memo_core::task::duration_hours(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &self.task_end_date,
+                                                self.task_end_hour,
+                                            ) {
+                                                self.task_hours = h;
+                                            }
                                         }
                                     });
-                                }
-                                if ui.button("取消").clicked() {
-                                    *show_edit_auth = false;
-                                    edit_pw.clear();
-                                }
-                            });
-                        });
-                }
-
-                if self.show_new_task {
-                    egui::Window::new("新建任务")
-                        .collapsible(false)
-                        .resizable(true)
-                        .default_size([560.0, 560.0])
-                        .show(ctx, |ui| {
-                            ui.label(
-                                RichText::new("第一行是标题，下面写计划")
-                                    .small()
-                                    .color(theme::TEXT_MUTED),
-                            );
-                            ui.add_space(4.0);
-                            {
-                                let (t, p) = self.task_doc.to_store("未命名任务");
-                                self.task_title = t;
-                                self.task_plan = p;
-                            }
-                            doc_editor::show_editor(ui, &mut self.task_doc, "new_task");
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                ui.label("开始日期");
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut self.task_date)
-                                            .desired_width(110.0)
-                                            .hint_text("YYYY-MM-DD"),
-                                    )
-                                    .changed()
-                                {
-                                    calendar_view::ensure_end_after_start(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &mut self.task_end_date,
-                                        &mut self.task_end_hour,
-                                    );
-                                    if let Ok(h) = memo_core::task::duration_hours(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &self.task_end_date,
-                                        self.task_end_hour,
-                                    ) {
-                                        self.task_hours = h;
-                                    }
-                                }
-                                ui.label("开始时");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut self.task_start)
-                                            .speed(0.25)
-                                            .clamp_range(0.0..=23.75),
-                                    )
-                                    .changed()
-                                {
-                                    calendar_view::ensure_end_after_start(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &mut self.task_end_date,
-                                        &mut self.task_end_hour,
-                                    );
-                                    if let Ok(h) = memo_core::task::duration_hours(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &self.task_end_date,
-                                        self.task_end_hour,
-                                    ) {
-                                        self.task_hours = h;
-                                    }
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("结束日期");
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut self.task_end_date)
-                                            .desired_width(110.0)
-                                            .hint_text("YYYY-MM-DD"),
-                                    )
-                                    .changed()
-                                {
-                                    calendar_view::ensure_end_after_start(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &mut self.task_end_date,
-                                        &mut self.task_end_hour,
-                                    );
-                                    if let Ok(h) = memo_core::task::duration_hours(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &self.task_end_date,
-                                        self.task_end_hour,
-                                    ) {
-                                        self.task_hours = h;
-                                    }
-                                }
-                                ui.label("结束时");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut self.task_end_hour)
-                                            .speed(0.25)
-                                            .clamp_range(0.0..=24.0),
-                                    )
-                                    .changed()
-                                {
-                                    calendar_view::ensure_end_after_start(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &mut self.task_end_date,
-                                        &mut self.task_end_hour,
-                                    );
-                                    if let Ok(h) = memo_core::task::duration_hours(
-                                        &self.task_date,
-                                        self.task_start,
-                                        &self.task_end_date,
-                                        self.task_end_hour,
-                                    ) {
-                                        self.task_hours = h;
-                                    }
-                                }
-                                ui.label("工时");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut self.task_hours)
-                                            .speed(0.25)
-                                            .clamp_range(0.25..=240.0),
-                                    )
-                                    .changed()
-                                {
-                                    calendar_view::sync_end_from_hours(
-                                        &self.task_date,
-                                        self.task_start,
-                                        self.task_hours,
-                                        &mut self.task_end_date,
-                                        &mut self.task_end_hour,
-                                    );
-                                }
-                            });
-                            ui.label("负责人");
-                            egui::ComboBox::from_id_source("new_task_assignee")
-                                .selected_text(
-                                    persons_all
-                                        .iter()
-                                        .find(|p| p.id == self.task_assignee)
-                                        .map(|p| p.name.as_str())
-                                        .unwrap_or("(选择)"),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for p in &persons_all {
-                                        ui.selectable_value(
-                                            &mut self.task_assignee,
-                                            p.id.clone(),
-                                            &p.name,
-                                        );
-                                    }
-                                });
-                            ui.label("状态");
-                            egui::ComboBox::from_id_source("new_task_status")
-                                .selected_text(self.task_status.label())
-                                .show_ui(ui, |ui| {
-                                    for s in TaskStatus::ALL {
-                                        ui.selectable_value(
-                                            &mut self.task_status,
-                                            s,
-                                            s.label(),
-                                        );
-                                    }
-                                });
-                            ui.horizontal(|ui| {
-                                ui.label("类型");
-                                let prev = self.task_kind;
-                                egui::ComboBox::from_id_source("new_task_kind")
-                                    .selected_text(self.task_kind.label())
-                                    .show_ui(ui, |ui| {
-                                        for k in TaskKind::ALL {
-                                            ui.selectable_value(
-                                                &mut self.task_kind,
-                                                k,
-                                                k.label(),
+                                    ui.horizontal(|ui| {
+                                        ui.label("结束日期");
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut self.task_end_date)
+                                                    .desired_width(110.0)
+                                                    .hint_text(theme::hint("YYYY-MM-DD")),
+                                            )
+                                            .changed()
+                                        {
+                                            calendar_view::ensure_end_after_start(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &mut self.task_end_date,
+                                                &mut self.task_end_hour,
+                                            );
+                                            if let Ok(h) = memo_core::task::duration_hours(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &self.task_end_date,
+                                                self.task_end_hour,
+                                            ) {
+                                                self.task_hours = h;
+                                            }
+                                        }
+                                        ui.label("结束时");
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut self.task_end_hour)
+                                                    .speed(0.25)
+                                                    .clamp_range(0.0..=24.0),
+                                            )
+                                            .changed()
+                                        {
+                                            calendar_view::ensure_end_after_start(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &mut self.task_end_date,
+                                                &mut self.task_end_hour,
+                                            );
+                                            if let Ok(h) = memo_core::task::duration_hours(
+                                                &self.task_date,
+                                                self.task_start,
+                                                &self.task_end_date,
+                                                self.task_end_hour,
+                                            ) {
+                                                self.task_hours = h;
+                                            }
+                                        }
+                                        ui.label("工时");
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut self.task_hours)
+                                                    .speed(0.25)
+                                                    .clamp_range(0.25..=240.0),
+                                            )
+                                            .changed()
+                                        {
+                                            calendar_view::sync_end_from_hours(
+                                                &self.task_date,
+                                                self.task_start,
+                                                self.task_hours,
+                                                &mut self.task_end_date,
+                                                &mut self.task_end_hour,
                                             );
                                         }
                                     });
-                                if self.task_kind != prev {
-                                    self.task_on_calendar = true;
-                                    self.task_remind = self.task_kind.default_remind();
-                                }
-                                ui.checkbox(&mut self.task_on_calendar, "加入日历");
-                                ui.checkbox(&mut self.task_remind, "提醒我");
-                            });
+                                    ui.label("负责人");
+                                    egui::ComboBox::from_id_source("new_task_assignee")
+                                        .selected_text(
+                                            persons_all
+                                                .iter()
+                                                .find(|p| p.id == self.task_assignee)
+                                                .map(|p| p.name.as_str())
+                                                .unwrap_or("(选择)"),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for p in &persons_all {
+                                                ui.selectable_value(
+                                                    &mut self.task_assignee,
+                                                    p.id.clone(),
+                                                    &p.name,
+                                                );
+                                            }
+                                        });
+                                    ui.label("状态");
+                                    egui::ComboBox::from_id_source("new_task_status")
+                                        .selected_text(self.task_status.label())
+                                        .show_ui(ui, |ui| {
+                                            for s in TaskStatus::ALL {
+                                                ui.selectable_value(
+                                                    &mut self.task_status,
+                                                    s,
+                                                    s.label(),
+                                                );
+                                            }
+                                        });
+                                    ui.horizontal(|ui| {
+                                        ui.label("类型");
+                                        let prev = self.task_kind;
+                                        egui::ComboBox::from_id_source("new_task_kind")
+                                            .selected_text(self.task_kind.label())
+                                            .show_ui(ui, |ui| {
+                                                for k in TaskKind::ALL {
+                                                    ui.selectable_value(
+                                                        &mut self.task_kind,
+                                                        k,
+                                                        k.label(),
+                                                    );
+                                                }
+                                            });
+                                        if self.task_kind != prev {
+                                            self.task_on_calendar = true;
+                                            self.task_remind = self.task_kind.default_remind();
+                                        }
+                                        ui.checkbox(&mut self.task_on_calendar, "加入日历");
+                                        ui.checkbox(&mut self.task_remind, "提醒我");
+                                    });
+                                });
+                            ui.separator();
                             ui.horizontal(|ui| {
                                 if theme::success_button(ui, "添加").clicked() {
                                     let (t, p) = self.task_doc.to_store("未命名任务");
@@ -2170,51 +2169,23 @@ impl eframe::App for MemoApp {
                                 }
                             });
                         });
-                }
-
-                if self.show_task_edit_auth {
-                    egui::Window::new("验证主密码以编辑任务")
-                        .collapsible(false)
-                        .show(ctx, |ui| {
-                            theme::password_field(
-                                ui,
-                                &mut self.task_edit_pw,
-                                "主密码",
-                                280.0,
-                                34.0,
-                            );
-                            ui.horizontal(|ui| {
-                                if theme::primary_button(ui, "确认").clicked() {
-                                    match rt.svc.verify_password(&self.task_edit_pw) {
-                                        Ok(()) => {
-                                            self.task_editing = true;
-                                            self.show_task_edit_auth = false;
-                                            self.task_edit_pw.clear();
-                                            self.task_doc = doc_editor::Doc::from_store(
-                                                &self.task_title,
-                                                &self.task_plan,
-                                            );
-                                        }
-                                        Err(e) => *status_line = e.to_string(),
-                                    }
-                                }
-                                if ui.button("取消").clicked() {
-                                    self.show_task_edit_auth = false;
-                                }
-                            });
-                        });
+                    if modal.end(ctx, open) {
+                        self.show_new_task = false;
+                    }
                 }
 
                 if self.show_task_delete {
-                    egui::Window::new("删除任务")
-                        .collapsible(false)
+                    let modal = theme::begin_modal(ctx, "task_delete_modal");
+                    theme::modal_confirm(ctx, "删除任务")
+                        .id(modal.window_id)
                         .show(ctx, |ui| {
                             ui.label("删除任务需要主密码确认。");
+                            let pw_w = (ui.available_width() - 8.0).clamp(200.0, 400.0);
                             theme::password_field(
                                 ui,
                                 &mut self.task_delete_pw,
                                 "主密码",
-                                280.0,
+                                pw_w,
                                 34.0,
                             );
                             ui.horizontal(|ui| {
@@ -2237,6 +2208,10 @@ impl eframe::App for MemoApp {
                                 }
                             });
                         });
+                    if modal.end(ctx, true) {
+                        self.show_task_delete = false;
+                        self.task_delete_pw.clear();
+                    }
                 }
 
                 if *show_delete {
@@ -2249,10 +2224,9 @@ impl eframe::App for MemoApp {
                     if delete_id.is_empty() {
                         *show_delete = false;
                     } else {
-                        egui::Window::new("移入回收站")
-                            .collapsible(false)
-                            .resizable(false)
-                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                        let modal = theme::begin_modal(ctx, "memo_trash_modal");
+                        theme::modal_confirm(ctx, "移入回收站")
+                            .id(modal.window_id)
                             .show(ctx, |ui| {
                                 ui.label(
                                     RichText::new(format!("将「{delete_title}」移入回收站？"))
@@ -2274,7 +2248,7 @@ impl eframe::App for MemoApp {
                                                     .color(Color32::WHITE)
                                                     .strong(),
                                             )
-                                            .fill(theme::DANGER)
+                                            .fill(theme::danger())
                                         })
                                         .clicked()
                                     {
@@ -2297,16 +2271,19 @@ impl eframe::App for MemoApp {
                                     }
                                 });
                             });
+                        if modal.end(ctx, true) {
+                            *show_delete = false;
+                        }
                     }
                 }
 
                 if *show_trash {
+                    let modal = theme::begin_modal(ctx, "trash_modal");
+                    let mut open = true;
                     let mut close_trash = false;
-                    egui::Window::new("回收站")
-                        .collapsible(false)
-                        .resizable(true)
-                        .default_size([480.0, 420.0])
-                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    theme::modal_fixed(ctx, "回收站", [480.0, 420.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
                         .show(ctx, |ui| {
                             ui.label(
                                 theme::muted_label(format!(
@@ -2319,9 +2296,10 @@ impl eframe::App for MemoApp {
                             if trash.is_empty() {
                                 ui.label(theme::muted_label("回收站为空"));
                             } else {
+                                let list_h = (ui.available_height() - 48.0).max(120.0);
                                 egui::ScrollArea::vertical()
                                     .auto_shrink([false, false])
-                                    .max_height(300.0)
+                                    .max_height(list_h)
                                     .show(ui, |ui| {
                                         for m in &trash {
                                             ui.group(|ui| {
@@ -2393,7 +2371,7 @@ impl eframe::App for MemoApp {
                                 close_trash = true;
                             }
                         });
-                    if close_trash {
+                    if close_trash || modal.end(ctx, open) {
                         *show_trash = false;
                         *purge_confirm_id = None;
                     }
@@ -2413,17 +2391,16 @@ impl eframe::App for MemoApp {
                             }
                         })
                         .unwrap_or_else(|| "(未知)".into());
-                    egui::Window::new("彻底清除")
-                        .collapsible(false)
-                        .resizable(false)
-                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    let modal = theme::begin_modal(ctx, "purge_confirm_modal");
+                    theme::modal_confirm(ctx, "彻底清除")
+                        .id(modal.window_id)
                         .show(ctx, |ui| {
                             ui.label(
                                 RichText::new(format!(
                                     "彻底清除「{purge_title}」？此操作不可恢复，并将从主机删除备份。"
                                 ))
                                 .strong()
-                                .color(theme::DANGER),
+                                .color(theme::danger()),
                             );
                             ui.add_space(10.0);
                             ui.horizontal(|ui| {
@@ -2434,7 +2411,7 @@ impl eframe::App for MemoApp {
                                                 .color(Color32::WHITE)
                                                 .strong(),
                                         )
-                                        .fill(theme::DANGER)
+                                        .fill(theme::danger())
                                     })
                                     .clicked()
                                 {
@@ -2456,6 +2433,9 @@ impl eframe::App for MemoApp {
                                 }
                             });
                         });
+                    if modal.end(ctx, true) {
+                        *purge_confirm_id = None;
+                    }
                 }
 
                 if *show_export {
@@ -2464,28 +2444,40 @@ impl eframe::App for MemoApp {
                     } else {
                         "导出全部备忘"
                     };
-                    egui::Window::new(scope)
-                        .collapsible(false)
-                        .resizable(true)
-                        .default_width(520.0)
-                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    let modal = theme::begin_modal(ctx, "export_memo_modal");
+                    let mut open = true;
+                    theme::modal_fixed(ctx, scope, [480.0, 248.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
                         .show(ctx, |ui| {
+                            ui.set_width(ui.available_width());
                             ui.label(
                                 RichText::new("导出为明文 TXT，请输入主密码确认，并选择保存位置。")
                                     .strong(),
                             );
                             ui.add_space(8.0);
                             ui.label("主密码");
-                            theme::password_field(ui, export_pw, "输入主密码", 400.0, 34.0);
+                            let pw_w = ui.available_width().max(120.0);
+                            theme::password_field(ui, export_pw, "输入主密码", pw_w, 34.0);
                             ui.add_space(8.0);
                             ui.label("保存路径");
                             ui.horizontal(|ui| {
+                                let browse_w = 64.0;
+                                let gap = ui.spacing().item_spacing.x;
+                                let path_w =
+                                    (ui.available_width() - browse_w - gap).max(80.0);
                                 ui.add(
                                     egui::TextEdit::singleline(export_path)
-                                        .desired_width(360.0)
-                                        .hint_text("例如 C:\\Users\\…\\memo.txt"),
+                                        .desired_width(path_w)
+                                        .hint_text(theme::hint("例如 C:\\Users\\…\\memo.txt")),
                                 );
-                                if ui.button("浏览…").clicked() {
+                                if ui
+                                    .add_sized(
+                                        [browse_w, 24.0],
+                                        egui::Button::new("浏览…"),
+                                    )
+                                    .clicked()
+                                {
                                     if let Some(p) =
                                         save_dialog::save_txt_dialog(export_path.as_str())
                                     {
@@ -2503,7 +2495,7 @@ impl eframe::App for MemoApp {
                                                 .color(Color32::WHITE)
                                                 .strong(),
                                         )
-                                        .fill(theme::SUCCESS)
+                                        .fill(theme::success())
                                     })
                                     .clicked()
                                 {
@@ -2539,13 +2531,22 @@ impl eframe::App for MemoApp {
                                 }
                             });
                         });
+                    if modal.end(ctx, open) {
+                        *show_export = false;
+                        export_pw.clear();
+                    }
                 }
 
                 if *show_history {
-                    egui::Window::new(history_view::entity_window_title(history_entity))
-                        .collapsible(false)
-                        .resizable(true)
-                        .default_size([560.0, 520.0])
+                    let modal = theme::begin_modal(ctx, "history_modal");
+                    let mut open = true;
+                    theme::modal_fixed(
+                        ctx,
+                        history_view::entity_window_title(history_entity),
+                        [560.0, 520.0],
+                    )
+                        .id(modal.window_id)
+                        .open(&mut open)
                         .show(ctx, |ui| {
                             let svc = rt.svc.clone();
                             let dn = move |nid: &str| svc.display_name_for(nid);
@@ -2567,6 +2568,9 @@ impl eframe::App for MemoApp {
                                 *show_history = false;
                             }
                         });
+                    if modal.end(ctx, open) {
+                        *show_history = false;
+                    }
                 }
 
                 if *show_backup {
@@ -2575,11 +2579,13 @@ impl eframe::App for MemoApp {
                     } else {
                         "导出加密备份"
                     };
-                    egui::Window::new(title)
-                        .collapsible(false)
-                        .resizable(false)
+                    let modal = theme::begin_modal(ctx, "backup_modal");
+                    let mut open = true;
+                    theme::modal_fixed(ctx, title, [480.0, 280.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
                         .show(ctx, |ui| {
-                            ui.set_min_width(420.0);
+                            ui.set_width(ui.available_width());
                             ui.label(
                                 RichText::new(if *backup_import {
                                     "选择 .memobak 文件并输入备份时使用的密码。"
@@ -2590,16 +2596,27 @@ impl eframe::App for MemoApp {
                             );
                             ui.add_space(8.0);
                             ui.label("备份密码");
-                            theme::password_field(ui, backup_pw, "备份密码", 400.0, 34.0);
+                            let pw_w = ui.available_width().max(120.0);
+                            theme::password_field(ui, backup_pw, "备份密码", pw_w, 34.0);
                             ui.add_space(6.0);
                             ui.label("文件路径");
                             ui.horizontal(|ui| {
+                                let browse_w = 64.0;
+                                let gap = ui.spacing().item_spacing.x;
+                                let path_w =
+                                    (ui.available_width() - browse_w - gap).max(80.0);
                                 ui.add(
                                     egui::TextEdit::singleline(backup_path)
-                                        .desired_width(300.0)
-                                        .hint_text("*.memobak"),
+                                        .desired_width(path_w)
+                                        .hint_text(theme::hint("*.memobak")),
                                 );
-                                if ui.button("浏览…").clicked() {
+                                if ui
+                                    .add_sized(
+                                        [browse_w, 24.0],
+                                        egui::Button::new("浏览…"),
+                                    )
+                                    .clicked()
+                                {
                                     if *backup_import {
                                         // 仍用保存对话框风格；用户可改扩展名路径
                                         if let Some(p) =
@@ -2631,7 +2648,7 @@ impl eframe::App for MemoApp {
                                         egui::Button::new(
                                             RichText::new(btn).color(Color32::WHITE).strong(),
                                         )
-                                        .fill(theme::ACCENT),
+                                        .fill(theme::accent()),
                                     )
                                     .clicked()
                                 {
@@ -2670,107 +2687,203 @@ impl eframe::App for MemoApp {
                                 }
                             });
                         });
+                    if modal.end(ctx, open) {
+                        *show_backup = false;
+                        backup_pw.clear();
+                    }
                 }
 
                 if *show_settings {
-                    let screen = ctx.screen_rect();
-                    // 半透明遮罩（拦截底层点击）
-                    egui::Area::new(egui::Id::new("settings_modal_bg"))
-                        .order(egui::Order::Foreground)
-                        .fixed_pos(screen.min)
-                        .interactable(true)
+                    let modal = theme::begin_modal(ctx, "settings_modal");
+                    let mut open = true;
+                    theme::modal_fixed(ctx, "设置", [640.0, 520.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
                         .show(ctx, |ui| {
-                            ui.painter().rect_filled(
-                                screen,
-                                0.0,
-                                Color32::from_rgba_unmultiplied(0, 0, 0, 110),
-                            );
-                            let _ = ui.allocate_response(screen.size(), egui::Sense::click());
-                        });
+                            let footer_reserve = 52.0;
+                            let body_h = (ui.available_height() - footer_reserve).max(120.0);
+                            let field_w = 360.0_f32;
 
-                    let panel_w = (screen.width() - 48.0).clamp(320.0, 520.0);
-                    let panel_h = (screen.height() * 0.88).clamp(360.0, 680.0);
-                    let panel_pos = egui::pos2(
-                        screen.center().x - panel_w * 0.5,
-                        screen.center().y - panel_h * 0.5,
-                    );
-
-                    egui::Area::new(egui::Id::new("settings_modal"))
-                        .order(egui::Order::Foreground)
-                        .fixed_pos(panel_pos)
-                        .movable(false)
-                        .interactable(true)
-                        .show(ctx, |ui| {
-                            theme::card_frame()
-                                .inner_margin(Margin::symmetric(18.0, 14.0))
+                            Frame::none()
+                                .fill(theme::card())
+                                .inner_margin(Margin::symmetric(20.0, 12.0))
                                 .show(ui, |ui| {
-                                    ui.set_width(panel_w - 8.0);
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new("设置")
-                                                .strong()
-                                                .size(17.0)
-                                                .color(theme::TEXT),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(
-                                                            RichText::new("关闭")
-                                                                .small()
-                                                                .color(theme::TEXT_MUTED),
-                                                        )
-                                                        .frame(false),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    *show_settings = false;
-                                                }
-                                            },
-                                        );
-                                    });
-                                    ui.label(
-                                        RichText::new(
-                                            "设置保存在系统用户配置目录。更改节点/端口/数据目录/盐后需重启。",
-                                        )
-                                        .small()
-                                        .color(theme::TEXT_MUTED),
-                                    );
-                                    ui.add_space(6.0);
-                                    ui.separator();
-                                    ui.add_space(4.0);
-
-                                    let scroll_h = (panel_h - 120.0).max(200.0);
+                                    ui.set_width(ui.available_width().max(1.0));
                                     egui::ScrollArea::vertical()
                                         .id_source("settings_scroll")
-                                        .max_height(scroll_h)
+                                        .max_height(body_h)
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             ui.set_width(ui.available_width());
-                                            ui.label("节点 ID");
-                                            ui.text_edit_singleline(
+
+                                            // —— 外观 ——
+                                            settings_section(ui, "外观");
+                                            settings_item_header(
+                                                ui,
+                                                "主题",
+                                                "控制应用配色。切换后立即生效并自动保存。",
+                                            );
+                                            egui::ComboBox::from_id_source("settings_theme")
+                                                .selected_text(theme_pref_label(
+                                                    settings_draft.theme,
+                                                ))
+                                                .width(field_w)
+                                                .show_ui(ui, |ui| {
+                                                    for p in [
+                                                        memo_core::ThemePreference::System,
+                                                        memo_core::ThemePreference::Light,
+                                                        memo_core::ThemePreference::Dark,
+                                                    ] {
+                                                        ui.selectable_value(
+                                                            &mut settings_draft.theme,
+                                                            p,
+                                                            theme_pref_label(p),
+                                                        );
+                                                    }
+                                                });
+                                            if settings_draft.theme != self.cfg.theme {
+                                                self.cfg.theme = settings_draft.theme;
+                                                self.last_theme_mode = None;
+                                                let mut persist = self.cfg.clone();
+                                                persist.theme = settings_draft.theme;
+                                                let _ = config::save_settings(&persist);
+                                                ctx.request_repaint();
+                                            }
+
+                                            settings_item_gap(ui);
+                                            // —— 本机 ——
+                                            settings_section(ui, "本机");
+                                            settings_item_header(
+                                                ui,
+                                                "节点 ID",
+                                                "本机在局域网中的唯一标识。更改后需重启。",
+                                            );
+                                            settings_text_field(
+                                                ui,
                                                 &mut settings_draft.node_id,
+                                                "例如 memo-pc",
+                                                field_w,
                                             );
-                                            ui.label("本机显示名（可选，仅本地展示）");
-                                            ui.text_edit_singleline(
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "显示名",
+                                                "仅在本机界面展示，不影响同步身份。",
+                                            );
+                                            settings_text_field(
+                                                ui,
                                                 &mut settings_draft.node_display_name,
+                                                "可选",
+                                                field_w,
                                             );
-                                            ui.label("数据目录");
-                                            ui.text_edit_singleline(
-                                                &mut settings_draft.data_dir,
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "数据目录",
+                                                "备忘、密钥与本地库的存储路径。更改后需重启。",
                                             );
-                                            ui.label("监听端口");
+                                            ui.horizontal(|ui| {
+                                                let browse_w = 64.0;
+                                                let gap = ui.spacing().item_spacing.x;
+                                                let path_w = (ui.available_width()
+                                                    - browse_w
+                                                    - gap)
+                                                    .clamp(80.0, field_w.max(480.0));
+                                                let te = ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut settings_draft.data_dir,
+                                                    )
+                                                    .desired_width(path_w)
+                                                    .hint_text(theme::hint("绝对路径")),
+                                                );
+                                                if ui
+                                                    .add_sized(
+                                                        [browse_w, te.rect.height()],
+                                                        egui::Button::new("浏览…"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    if let Some(p) =
+                                                        save_dialog::pick_folder_dialog(
+                                                            &settings_draft.data_dir,
+                                                        )
+                                                    {
+                                                        settings_draft.data_dir =
+                                                            p.display().to_string();
+                                                    }
+                                                }
+                                            });
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "监听端口",
+                                                "TCP 同步监听端口。更改后需重启。",
+                                            );
                                             let mut port =
                                                 settings_draft.listen_port.to_string();
-                                            if ui.text_edit_singleline(&mut port).changed() {
+                                            if settings_text_field(
+                                                ui, &mut port, "例如 17890", 120.0,
+                                            ) {
                                                 if let Ok(p) = port.parse() {
                                                     settings_draft.listen_port = p;
                                                 }
                                             }
-                                            ui.label(
-                                                "对端列表（每行 host:port，可选；同网段可依赖自动发现）",
+
+                                            settings_item_gap(ui);
+                                            // —— 网络 ——
+                                            settings_section(ui, "网络");
+                                            settings_item_header(
+                                                ui,
+                                                "节点角色",
+                                                "主机每 10s 广播并受理登记；从机不广播，发现主机后主动连接。更改后需重启。",
+                                            );
+                                            egui::ComboBox::from_id_source("settings_node_role")
+                                                .selected_text(
+                                                    settings_draft.node_role.label(),
+                                                )
+                                                .width(field_w)
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut settings_draft.node_role,
+                                                        NodeRole::Master,
+                                                        "主机",
+                                                    );
+                                                    ui.selectable_value(
+                                                        &mut settings_draft.node_role,
+                                                        NodeRole::Slave,
+                                                        "从机",
+                                                    );
+                                                });
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "主机对外广播",
+                                                "仅主机角色有效。关闭后本机不再发送 UDP 发现广播。",
+                                            );
+                                            ui.add_enabled_ui(
+                                                settings_draft.node_role.is_master(),
+                                                |ui| {
+                                                    ui.checkbox(
+                                                        &mut settings_draft.node_visible,
+                                                        "主机对外广播",
+                                                    );
+                                                },
+                                            );
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "局域网自动发现",
+                                                "通过 UDP 17000 在同网段发现对端节点。",
+                                            );
+                                            ui.checkbox(
+                                                &mut settings_draft.lan_discovery,
+                                                "启用局域网自动发现",
+                                            );
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "对端列表",
+                                                "手动指定对端，每行一个 host:port。同网段通常可依赖自动发现。",
                                             );
                                             let mut peers_text =
                                                 settings_draft.peers.join("\n");
@@ -2778,7 +2891,8 @@ impl eframe::App for MemoApp {
                                                 .add(
                                                     egui::TextEdit::multiline(&mut peers_text)
                                                         .desired_rows(4)
-                                                        .desired_width(f32::INFINITY),
+                                                        .desired_width(field_w.max(480.0))
+                                                        .hint_text(theme::hint("host:port")),
                                                 )
                                                 .changed()
                                             {
@@ -2788,81 +2902,64 @@ impl eframe::App for MemoApp {
                                                     .filter(|l| !l.is_empty())
                                                     .collect();
                                             }
-                                            ui.checkbox(
-                                                &mut settings_draft.lan_discovery,
-                                                "局域网自动发现 (UDP 17000)",
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "集群盐",
+                                                "同局域网互通须一致。修改后需重启，且各节点使用相同值。",
                                             );
-                                            ui.label(
-                                                RichText::new("节点角色（更改后需重启）")
-                                                    .small()
-                                                    .color(theme::TEXT_MUTED),
+                                            settings_text_field(
+                                                ui,
+                                                &mut settings_draft.cluster_salt_hex,
+                                                "十六进制盐值",
+                                                field_w.max(480.0),
                                             );
-                                            ui.horizontal(|ui| {
-                                                ui.radio_value(
-                                                    &mut settings_draft.node_role,
-                                                    NodeRole::Master,
-                                                    "主机",
-                                                );
-                                                ui.radio_value(
-                                                    &mut settings_draft.node_role,
-                                                    NodeRole::Slave,
-                                                    "从机",
-                                                );
-                                            });
-                                            ui.label(
-                                                RichText::new(
-                                                    "主机：每 10s 广播并受理从机登记，也可向其他主机远程备份私有/公开数据。\n\
-                                                     从机：不广播，收到主机广播后主动连接登记。",
-                                                )
-                                                .small()
-                                                .color(theme::TEXT_MUTED),
-                                            );
-                                            ui.add_enabled_ui(
-                                                settings_draft.node_role.is_master(),
-                                                |ui| {
-                                                    ui.checkbox(
-                                                        &mut settings_draft.node_visible,
-                                                        "主机对外广播（关闭则本机不发 UDP）",
-                                                    );
-                                                },
+
+                                            settings_item_gap(ui);
+                                            // —— 备份 ——
+                                            settings_section(ui, "备份");
+                                            settings_item_header(
+                                                ui,
+                                                "接受他节点托管",
+                                                "允许本机接收其他节点推送的私人密文备份。也可在节点面板按节点关闭。",
                                             );
                                             ui.checkbox(
                                                 &mut settings_draft.accept_foreign_backup,
-                                                "接受他节点私人密文托管（全局；逐节点还可在节点面板关闭）",
+                                                "接受他节点私人密文托管",
+                                            );
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "推送到网络",
+                                                "将本身份的私人备份推送到网络中可托管的节点。",
                                             );
                                             ui.checkbox(
                                                 &mut settings_draft.backup_enabled,
                                                 "推送本身份私人备份到网络",
                                             );
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "列表状态标签",
+                                                "在左侧备忘列表中显示备份状态标记。",
+                                            );
                                             ui.checkbox(
                                                 &mut settings_draft.show_backup_status,
-                                                "左侧列表显示备份状态标签",
+                                                "显示备份状态标签",
                                             );
-                                            ui.label(
-                                                RichText::new(
-                                                    "集群盐 cluster_salt_hex（同局域网互通须一致）",
-                                                )
-                                                .small()
-                                                .color(theme::TEXT_MUTED),
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "加密备份文件",
+                                                "导出或导入本地 .memobak 加密备份。设置保存在系统用户配置目录。",
                                             );
-                                            ui.text_edit_singleline(
-                                                &mut settings_draft.cluster_salt_hex,
-                                            );
-                                            ui.label(
-                                                RichText::new(
-                                                    "主密码仅用于本机解锁；各机主密码可不同。改集群盐后需重启。",
-                                                )
-                                                .small()
-                                                .color(theme::TEXT_MUTED),
-                                            );
-                                            ui.add_space(8.0);
-                                            ui.separator();
-                                            ui.label(RichText::new("加密备份").strong());
                                             ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 8.0;
                                                 if ui.button("导出加密备份…").clicked() {
-                                                    let dir =
-                                                        std::path::PathBuf::from(&rt.cfg.data_dir)
-                                                            .join("exports");
+                                                    let dir = std::path::PathBuf::from(
+                                                        &rt.cfg.data_dir,
+                                                    )
+                                                    .join("exports");
                                                     let path = dir.join(format!(
                                                         "backup-{}.memobak",
                                                         chrono_like_stamp()
@@ -2881,46 +2978,56 @@ impl eframe::App for MemoApp {
                                                     *show_settings = false;
                                                 }
                                             });
+
                                             ui.add_space(12.0);
                                         });
+                                });
 
-                                    ui.separator();
-                                    ui.add_space(4.0);
-                                    ui.horizontal(|ui| {
-                                        if theme::success_button(ui, "保存").clicked() {
-                                            let before = self.cfg.clone();
-                                            match config::save_settings(settings_draft) {
-                                                Ok(()) => {
-                                                    // UI 开关立即生效
-                                                    self.cfg.show_backup_status =
-                                                        settings_draft.show_backup_status;
-                                                    self.cfg.backup_enabled =
-                                                        settings_draft.backup_enabled;
-                                                    self.cfg.accept_foreign_backup =
-                                                        settings_draft.accept_foreign_backup;
-                                                    let msg = if config::needs_restart(
-                                                        &before,
-                                                        settings_draft,
-                                                    ) {
-                                                        "已保存，请重启程序使关键设置生效"
-                                                    } else {
-                                                        "已保存"
-                                                    };
-                                                    let _ = self.tx.send(BgMsg::Info(msg.into()));
-                                                    *show_settings = false;
-                                                }
-                                                Err(e) => {
-                                                    let _ =
-                                                        self.tx.send(BgMsg::Error(e.to_string()));
-                                                }
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = 10.0;
+                                    if theme::success_button(ui, "保存").clicked() {
+                                        let before = self.cfg.clone();
+                                        match config::save_settings(settings_draft) {
+                                            Ok(()) => {
+                                                self.cfg.show_backup_status =
+                                                    settings_draft.show_backup_status;
+                                                self.cfg.backup_enabled =
+                                                    settings_draft.backup_enabled;
+                                                self.cfg.accept_foreign_backup =
+                                                    settings_draft.accept_foreign_backup;
+                                                self.cfg.theme = settings_draft.theme;
+                                                self.last_theme_mode = None;
+                                                let msg = if config::needs_restart(
+                                                    &before,
+                                                    settings_draft,
+                                                ) {
+                                                    "已保存，请重启程序使关键设置生效"
+                                                } else {
+                                                    "已保存"
+                                                };
+                                                let _ = self.tx.send(BgMsg::Info(msg.into()));
+                                                *show_settings = false;
+                                            }
+                                            Err(e) => {
+                                                let _ =
+                                                    self.tx.send(BgMsg::Error(e.to_string()));
                                             }
                                         }
-                                        if theme::ghost_button(ui, "取消").clicked() {
-                                            *show_settings = false;
-                                        }
-                                    });
-                                });
+                                    }
+                                    if theme::ghost_button(ui, "取消").clicked() {
+                                        *show_settings = false;
+                                    }
+                                },
+                            );
                         });
+                    if modal.end(ctx, open) {
+                        *show_settings = false;
+                    }
                 }
             }
         }
@@ -2986,8 +3093,6 @@ fn draw_task_central(
     task_on_calendar: &mut bool,
     task_remind: &mut bool,
     task_editing: &mut bool,
-    show_task_edit_auth: &mut bool,
-    _task_edit_pw: &mut String,
     show_task_delete: &mut bool,
     _task_delete_pw: &mut String,
     status_line: &mut String,
@@ -3004,7 +3109,7 @@ fn draw_task_central(
     let meta = rt.svc.get_task(&tid);
     let avail_h = ui.available_height();
 
-    theme::card_frame().show(ui, |ui| {
+    Frame::none().show(ui, |ui| {
         ui.set_min_height(avail_h - 8.0);
         ui.set_min_width(ui.available_width());
 
@@ -3014,10 +3119,10 @@ fn draw_task_central(
             task_title.as_str()
         };
         ui.horizontal(|ui| {
-            ui.heading(RichText::new(title_show).size(24.0).color(theme::TEXT));
+            ui.heading(RichText::new(title_show).size(24.0).color(theme::text()));
             status_badge(ui, *task_status);
             if *task_editing {
-                ui.label(RichText::new("编辑中").small().color(theme::WARN));
+                ui.label(RichText::new("编辑中").small().color(theme::warn()));
             } else {
                 ui.label(theme::muted_label("只读").small());
             }
@@ -3043,14 +3148,15 @@ fn draw_task_central(
                     t.version
                 ))
                 .size(13.0)
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
             );
         }
         ui.add_space(10.0);
         ui.horizontal_wrapped(|ui| {
             if !*task_editing {
                 if theme::primary_button(ui, "编辑").clicked() {
-                    *show_task_edit_auth = true;
+                    *task_editing = true;
+                    *task_doc = doc_editor::Doc::from_store(task_title, task_plan);
                 }
             } else {
                 if theme::success_button(ui, "保存").clicked() {
@@ -3132,12 +3238,12 @@ fn draw_task_central(
             }
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("开始日期").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("开始日期").small().color(theme::text_muted()));
                     if ui
                         .add(
                             egui::TextEdit::singleline(task_date)
                                 .desired_width(110.0)
-                                .hint_text("YYYY-MM-DD"),
+                                .hint_text(theme::hint("YYYY-MM-DD")),
                         )
                         .changed()
                     {
@@ -3158,7 +3264,7 @@ fn draw_task_central(
                     }
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("开始时").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("开始时").small().color(theme::text_muted()));
                     if ui
                         .add(
                             egui::DragValue::new(task_start)
@@ -3184,12 +3290,12 @@ fn draw_task_central(
                     }
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("结束日期").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("结束日期").small().color(theme::text_muted()));
                     if ui
                         .add(
                             egui::TextEdit::singleline(task_end_date)
                                 .desired_width(110.0)
-                                .hint_text("YYYY-MM-DD"),
+                                .hint_text(theme::hint("YYYY-MM-DD")),
                         )
                         .changed()
                     {
@@ -3210,7 +3316,7 @@ fn draw_task_central(
                     }
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("结束时").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("结束时").small().color(theme::text_muted()));
                     if ui
                         .add(
                             egui::DragValue::new(task_end_hour)
@@ -3236,7 +3342,7 @@ fn draw_task_central(
                     }
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("工时").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("工时").small().color(theme::text_muted()));
                     if ui
                         .add(
                             egui::DragValue::new(task_hours)
@@ -3255,7 +3361,7 @@ fn draw_task_central(
                     }
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("负责人").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("负责人").small().color(theme::text_muted()));
                     let label = persons
                         .iter()
                         .find(|p| p.id == *task_assignee)
@@ -3270,7 +3376,7 @@ fn draw_task_central(
                         });
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("状态").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("状态").small().color(theme::text_muted()));
                     egui::ComboBox::from_id_source("task_status")
                         .selected_text(task_status.label())
                         .show_ui(ui, |ui| {
@@ -3280,7 +3386,7 @@ fn draw_task_central(
                         });
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("类型").small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("类型").small().color(theme::text_muted()));
                     let prev = *task_kind;
                     egui::ComboBox::from_id_source("task_kind")
                         .selected_text(task_kind.label())
@@ -3306,7 +3412,7 @@ fn draw_task_central(
         } else {
             // meta chips
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("时段").small().color(theme::TEXT_MUTED));
+                ui.label(RichText::new("时段").small().color(theme::text_muted()));
                 ui.label(
                     RichText::new(calendar_view::format_datetime_range(
                         task_date,
@@ -3315,28 +3421,28 @@ fn draw_task_central(
                         *task_end_hour,
                     ))
                     .size(14.0)
-                    .color(theme::TEXT),
+                    .color(theme::text()),
                 );
                 ui.add_space(12.0);
-                ui.label(RichText::new("工时").small().color(theme::TEXT_MUTED));
+                ui.label(RichText::new("工时").small().color(theme::text_muted()));
                 ui.label(
                     RichText::new(format!("{:.1} h", *task_hours))
                         .size(14.0)
-                        .color(theme::TEXT),
+                        .color(theme::text()),
                 );
                 ui.add_space(12.0);
-                ui.label(RichText::new("负责人").small().color(theme::TEXT_MUTED));
+                ui.label(RichText::new("负责人").small().color(theme::text_muted()));
                 let name = persons
                     .iter()
                     .find(|p| p.id == *task_assignee)
                     .map(|p| p.name.as_str())
                     .unwrap_or("?");
-                ui.label(RichText::new(name).size(14.0).color(theme::TEXT));
+                ui.label(RichText::new(name).size(14.0).color(theme::text()));
                 ui.add_space(12.0);
-                ui.label(RichText::new("状态").small().color(theme::TEXT_MUTED));
+                ui.label(RichText::new("状态").small().color(theme::text_muted()));
                 status_badge(ui, *task_status);
                 ui.add_space(12.0);
-                ui.label(RichText::new("类型").small().color(theme::TEXT_MUTED));
+                ui.label(RichText::new("类型").small().color(theme::text_muted()));
                 ui.label(
                     RichText::new(task_kind.label())
                         .size(14.0)
@@ -3350,13 +3456,13 @@ fn draw_task_central(
                         "未入日历"
                     })
                     .size(13.0)
-                    .color(theme::TEXT_MUTED),
+                    .color(theme::text_muted()),
                 );
                 if *task_remind {
                     ui.label(
                         RichText::new("提醒")
                             .size(13.0)
-                            .color(theme::WARN),
+                            .color(theme::warn()),
                     );
                 }
             });
@@ -3376,12 +3482,12 @@ fn draw_task_central(
 
 fn gender_chip(ui: &mut egui::Ui, g: Gender) {
     let (label, color) = match g {
-        Gender::Male => ("男", theme::ACCENT),
+        Gender::Male => ("男", theme::accent()),
         Gender::Female => ("女", Color32::from_rgb(0xDB, 0x27, 0x77)),
         Gender::Unknown => return,
     };
     egui::Frame::none()
-        .fill(theme::PANEL)
+        .fill(theme::panel())
         .rounding(Rounding::same(4.0))
         .inner_margin(Margin::symmetric(6.0, 2.0))
         .show(ui, |ui| {
@@ -3402,15 +3508,15 @@ fn status_badge(ui: &mut egui::Ui, status: TaskStatus) {
 
 fn status_colors(status: TaskStatus) -> (Color32, Color32) {
     match status {
-        TaskStatus::NotStarted => (theme::TEXT_MUTED, theme::PANEL),
-        TaskStatus::InProgress => (theme::ACCENT, theme::ACCENT_SOFT),
-        TaskStatus::Paused => (theme::WARN, Color32::from_rgb(0xFE, 0xF3, 0xC7)),
+        TaskStatus::NotStarted => (theme::text_muted(), theme::panel()),
+        TaskStatus::InProgress => (theme::accent(), theme::accent_soft()),
+        TaskStatus::Paused => (theme::warn(), Color32::from_rgb(0xFE, 0xF3, 0xC7)),
         TaskStatus::Blocked => (
             Color32::from_rgb(0xC2, 0x41, 0x0C),
             Color32::from_rgb(0xFF, 0xED, 0xD5),
         ),
-        TaskStatus::Cancelled => (theme::TEXT_MUTED, Color32::from_rgb(0xF1, 0xF5, 0xF9)),
-        TaskStatus::Done => (theme::SUCCESS, theme::SUCCESS_SOFT),
+        TaskStatus::Cancelled => (theme::text_muted(), Color32::from_rgb(0xF1, 0xF5, 0xF9)),
+        TaskStatus::Done => (theme::success(), theme::success_soft()),
     }
 }
 

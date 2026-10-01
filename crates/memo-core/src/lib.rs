@@ -18,7 +18,9 @@ pub mod store;
 pub mod task;
 pub mod verifier;
 
-pub use config::{load_settings, needs_restart, save_settings, Config, NodeRole};
+pub use config::{
+    load_settings, needs_restart, save_settings, Config, NodeRole, ThemePreference,
+};
 pub use peer_acl::{PeerAclEntry, PeerAclStore};
 pub use cycle::{CycleConfig, CycleStore};
 pub use disk::{format_bytes, DiskSpace};

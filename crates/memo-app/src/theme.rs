@@ -1,85 +1,397 @@
 #![allow(dead_code)]
 
-//! 视觉令牌：主界面石板蓝 + 启动门 macOS 风格。
+//! 视觉令牌：Lumen 风浅灰 chrome + 深色变体；启动门 mac 灰阶对齐主 UI。
 
 use eframe::egui::{
     self, Color32, Frame, Margin, Rounding, Stroke, Style, TextStyle, Vec2, Visuals,
 };
+use memo_core::ThemePreference;
+use parking_lot::RwLock;
+use std::sync::OnceLock;
 
-// —— 色板（主界面） ——
-pub const NAVY: Color32 = Color32::from_rgb(0x0F, 0x27, 0x44);
-pub const NAVY_MID: Color32 = Color32::from_rgb(0x1B, 0x3A, 0x5C);
-pub const BG: Color32 = Color32::from_rgb(0xF7, 0xF8, 0xFA);
-pub const PANEL: Color32 = Color32::from_rgb(0xEE, 0xF1, 0xF5);
-pub const CARD: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
-pub const BORDER: Color32 = Color32::from_rgb(0xE2, 0xE8, 0xF0);
-pub const BORDER_STRONG: Color32 = Color32::from_rgb(0xCB, 0xD5, 0xE1);
-pub const TEXT: Color32 = Color32::from_rgb(0x0F, 0x17, 0x2A);
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x64, 0x74, 0x8B);
-pub const ACCENT: Color32 = Color32::from_rgb(0x25, 0x63, 0xEB);
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x1D, 0x4E, 0xD8);
-pub const ACCENT_SOFT: Color32 = Color32::from_rgb(0xDB, 0xEA, 0xFE);
-pub const SUCCESS: Color32 = Color32::from_rgb(0x05, 0x96, 0x69);
-pub const SUCCESS_SOFT: Color32 = Color32::from_rgb(0xD1, 0xFA, 0xE5);
-pub const DANGER: Color32 = Color32::from_rgb(0xDC, 0x26, 0x26);
-pub const DANGER_SOFT: Color32 = Color32::from_rgb(0xFE, 0xE2, 0xE2);
-pub const WARN: Color32 = Color32::from_rgb(0xB4, 0x53, 0x09);
+/// 解析后的明暗模式（非用户偏好）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    Light,
+    Dark,
+}
 
-pub const ROUND_CARD: f32 = 8.0;
-pub const ROUND_CTRL: f32 = 6.0;
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    pub navy: Color32,
+    pub navy_mid: Color32,
+    pub bg: Color32,
+    pub panel: Color32,
+    pub card: Color32,
+    pub border: Color32,
+    pub border_strong: Color32,
+    pub text: Color32,
+    pub text_muted: Color32,
+    pub accent: Color32,
+    pub accent_hover: Color32,
+    pub accent_soft: Color32,
+    pub success: Color32,
+    pub success_soft: Color32,
+    pub danger: Color32,
+    pub danger_soft: Color32,
+    pub warn: Color32,
+    pub list_hover: Color32,
+    pub widget_active: Color32,
+    pub code_bg: Color32,
+    pub mac_bg: Color32,
+    pub mac_bg_top: Color32,
+    pub mac_card: Color32,
+    pub mac_separator: Color32,
+    pub mac_fill: Color32,
+    pub mac_fill_hover: Color32,
+    pub mac_text: Color32,
+    pub mac_text_secondary: Color32,
+    pub mac_text_tertiary: Color32,
+    pub mac_blue: Color32,
+    pub mac_blue_pressed: Color32,
+    pub mac_red: Color32,
+    /// 顶栏/菜单文字色（浅色主题为深字）
+    pub chrome_fg: Color32,
+    pub chrome_stroke: Color32,
+    pub remind_bg: Color32,
+    pub remind_fg: Color32,
+}
 
-// —— macOS 启动门色板 ——
-pub const MAC_BG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xED);
-pub const MAC_BG_TOP: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF7);
-pub const MAC_CARD: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
-pub const MAC_SEPARATOR: Color32 = Color32::from_rgb(0xD1, 0xD1, 0xD6);
-pub const MAC_FILL: Color32 = Color32::from_rgb(0xF2, 0xF2, 0xF7);
-pub const MAC_FILL_HOVER: Color32 = Color32::from_rgb(0xE5, 0xE5, 0xEA);
-pub const MAC_TEXT: Color32 = Color32::from_rgb(0x1D, 0x1D, 0x1F);
-pub const MAC_TEXT_SECONDARY: Color32 = Color32::from_rgb(0x6E, 0x6E, 0x73);
-pub const MAC_TEXT_TERTIARY: Color32 = Color32::from_rgb(0x8E, 0x8E, 0x93);
-pub const MAC_BLUE: Color32 = Color32::from_rgb(0x00, 0x7A, 0xFF);
-pub const MAC_BLUE_PRESSED: Color32 = Color32::from_rgb(0x00, 0x64, 0xD1);
-pub const MAC_RED: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x30);
-pub const MAC_ROUND_SHEET: f32 = 14.0;
-pub const MAC_ROUND_CTRL: f32 = 8.0;
-pub const MAC_ROUND_PILL: f32 = 10.0;
+pub const ROUND_CARD: f32 = 4.0;
+pub const ROUND_CTRL: f32 = 4.0;
+pub const MAC_ROUND_SHEET: f32 = 10.0;
+pub const MAC_ROUND_CTRL: f32 = 6.0;
+pub const MAC_ROUND_PILL: f32 = 8.0;
 
-pub fn apply(ctx: &egui::Context) {
-    let mut visuals = Visuals::light();
-    visuals.window_fill = CARD;
-    visuals.panel_fill = PANEL;
-    visuals.extreme_bg_color = BG;
-    visuals.faint_bg_color = PANEL;
-    visuals.code_bg_color = Color32::from_rgb(0xF1, 0xF5, 0xF9);
-    visuals.override_text_color = Some(TEXT);
-    visuals.hyperlink_color = ACCENT;
-    visuals.warn_fg_color = WARN;
-    visuals.error_fg_color = DANGER;
+fn light_palette() -> Palette {
+    Palette {
+        // chrome：浅灰顶栏（不再用海军蓝块）
+        navy: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+        navy_mid: Color32::from_rgb(0xEB, 0xEB, 0xEF),
+        bg: Color32::from_rgb(0xF7, 0xF7, 0xF8),
+        panel: Color32::from_rgb(0xF0, 0xF0, 0xF2),
+        card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        border: Color32::from_rgb(0xE5, 0xE5, 0xEA),
+        border_strong: Color32::from_rgb(0xD2, 0xD2, 0xD7),
+        text: Color32::from_rgb(0x1D, 0x1D, 0x1F),
+        text_muted: Color32::from_rgb(0x6E, 0x6E, 0x73),
+        accent: Color32::from_rgb(0x00, 0x7A, 0xFF),
+        accent_hover: Color32::from_rgb(0x00, 0x64, 0xD1),
+        accent_soft: Color32::from_rgb(0xE8, 0xF1, 0xFF),
+        success: Color32::from_rgb(0x05, 0x96, 0x69),
+        success_soft: Color32::from_rgb(0xD1, 0xFA, 0xE5),
+        danger: Color32::from_rgb(0xDC, 0x26, 0x26),
+        danger_soft: Color32::from_rgb(0xFE, 0xE2, 0xE2),
+        warn: Color32::from_rgb(0xB4, 0x53, 0x09),
+        list_hover: Color32::from_rgb(0xE8, 0xE8, 0xED),
+        widget_active: Color32::from_rgb(0xD6, 0xE8, 0xFF),
+        code_bg: Color32::from_rgb(0xF2, 0xF2, 0xF7),
+        mac_bg: Color32::from_rgb(0xF0, 0xF0, 0xF2),
+        mac_bg_top: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+        mac_card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        mac_separator: Color32::from_rgb(0xE5, 0xE5, 0xEA),
+        mac_fill: Color32::from_rgb(0xF2, 0xF2, 0xF7),
+        mac_fill_hover: Color32::from_rgb(0xE5, 0xE5, 0xEA),
+        mac_text: Color32::from_rgb(0x1D, 0x1D, 0x1F),
+        mac_text_secondary: Color32::from_rgb(0x6E, 0x6E, 0x73),
+        mac_text_tertiary: Color32::from_rgb(0x8E, 0x8E, 0x93),
+        mac_blue: Color32::from_rgb(0x00, 0x7A, 0xFF),
+        mac_blue_pressed: Color32::from_rgb(0x00, 0x64, 0xD1),
+        mac_red: Color32::from_rgb(0xFF, 0x3B, 0x30),
+        chrome_fg: Color32::from_rgb(0x1D, 0x1D, 0x1F),
+        chrome_stroke: Color32::from_rgb(0xE5, 0xE5, 0xEA),
+        remind_bg: Color32::from_rgb(0xFE, 0xF3, 0xC7),
+        remind_fg: Color32::from_rgb(0xB4, 0x53, 0x09),
+    }
+}
+
+/// 深色：浅灰顶栏条（略亮于 bg），避免旧海军蓝块。
+fn dark_palette() -> Palette {
+    Palette {
+        navy: Color32::from_rgb(0x32, 0x32, 0x36),
+        navy_mid: Color32::from_rgb(0x3A, 0x3A, 0x3E),
+        bg: Color32::from_rgb(0x28, 0x28, 0x2C),
+        panel: Color32::from_rgb(0x2E, 0x2E, 0x32),
+        card: Color32::from_rgb(0x36, 0x36, 0x3A),
+        border: Color32::from_rgb(0x48, 0x48, 0x4C),
+        border_strong: Color32::from_rgb(0x5A, 0x5A, 0x5E),
+        text: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+        text_muted: Color32::from_rgb(0xA1, 0xA1, 0xA6),
+        accent: Color32::from_rgb(0x0A, 0x84, 0xFF),
+        accent_hover: Color32::from_rgb(0x40, 0x9C, 0xFF),
+        accent_soft: Color32::from_rgb(0x1C, 0x3A, 0x5C),
+        success: Color32::from_rgb(0x3D, 0xA8, 0x7C),
+        success_soft: Color32::from_rgb(0x1F, 0x3A, 0x30),
+        danger: Color32::from_rgb(0xE0, 0x5C, 0x5C),
+        danger_soft: Color32::from_rgb(0x4A, 0x2A, 0x2A),
+        warn: Color32::from_rgb(0xD4, 0xA0, 0x3C),
+        list_hover: Color32::from_rgb(0x3E, 0x3E, 0x42),
+        widget_active: Color32::from_rgb(0x2F, 0x4A, 0x6E),
+        code_bg: Color32::from_rgb(0x2A, 0x2A, 0x2E),
+        mac_bg: Color32::from_rgb(0x2E, 0x2E, 0x32),
+        mac_bg_top: Color32::from_rgb(0x32, 0x32, 0x36),
+        mac_card: Color32::from_rgb(0x3A, 0x3A, 0x3E),
+        mac_separator: Color32::from_rgb(0x48, 0x48, 0x4C),
+        mac_fill: Color32::from_rgb(0x3A, 0x3A, 0x3E),
+        mac_fill_hover: Color32::from_rgb(0x48, 0x48, 0x4C),
+        mac_text: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+        mac_text_secondary: Color32::from_rgb(0xA1, 0xA1, 0xA6),
+        mac_text_tertiary: Color32::from_rgb(0x8E, 0x8E, 0x93),
+        mac_blue: Color32::from_rgb(0x0A, 0x84, 0xFF),
+        mac_blue_pressed: Color32::from_rgb(0x00, 0x6E, 0xD8),
+        mac_red: Color32::from_rgb(0xFF, 0x45, 0x3A),
+        chrome_fg: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+        chrome_stroke: Color32::from_rgb(0x48, 0x48, 0x4C),
+        remind_bg: Color32::from_rgb(0x4A, 0x3C, 0x1A),
+        remind_fg: Color32::from_rgb(0xE8, 0xC4, 0x6A),
+    }
+}
+
+fn current_lock() -> &'static RwLock<Palette> {
+    static LOCK: OnceLock<RwLock<Palette>> = OnceLock::new();
+    LOCK.get_or_init(|| RwLock::new(light_palette()))
+}
+
+pub fn c() -> Palette {
+    *current_lock().read()
+}
+
+pub fn set_current(p: Palette) {
+    *current_lock().write() = p;
+}
+
+pub fn palette_for(mode: ThemeMode) -> Palette {
+    match mode {
+        ThemeMode::Light => light_palette(),
+        ThemeMode::Dark => dark_palette(),
+    }
+}
+
+/// 将用户偏好解析为明暗。`system_dark=None` 时按浅色回退。
+pub fn resolve(pref: ThemePreference, system_dark: Option<bool>) -> ThemeMode {
+    match pref {
+        ThemePreference::Light => ThemeMode::Light,
+        ThemePreference::Dark => ThemeMode::Dark,
+        ThemePreference::System => {
+            if system_dark.unwrap_or(false) {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            }
+        }
+    }
+}
+
+/// 读取操作系统是否偏好深色（egui 0.27 无 system_theme，自检）。
+pub fn system_prefers_dark() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        system_prefers_dark_windows()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn system_prefers_dark_windows() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
+    };
+
+    // Software\Microsoft\Windows\CurrentVersion\Themes\Personalize
+    const KEY: &[u16] = &[
+        b'S' as u16, b'o' as u16, b'f' as u16, b't' as u16, b'w' as u16, b'a' as u16, b'r' as u16,
+        b'e' as u16, b'\\' as u16, b'M' as u16, b'i' as u16, b'c' as u16, b'r' as u16, b'o' as u16,
+        b's' as u16, b'o' as u16, b'f' as u16, b't' as u16, b'\\' as u16, b'W' as u16, b'i' as u16,
+        b'n' as u16, b'd' as u16, b'o' as u16, b'w' as u16, b's' as u16, b'\\' as u16, b'C' as u16,
+        b'u' as u16, b'r' as u16, b'r' as u16, b'e' as u16, b'n' as u16, b't' as u16, b'V' as u16,
+        b'e' as u16, b'r' as u16, b's' as u16, b'i' as u16, b'o' as u16, b'n' as u16, b'\\' as u16,
+        b'T' as u16, b'h' as u16, b'e' as u16, b'm' as u16, b'e' as u16, b's' as u16, b'\\' as u16,
+        b'P' as u16, b'e' as u16, b'r' as u16, b's' as u16, b'o' as u16, b'n' as u16, b'a' as u16,
+        b'l' as u16, b'i' as u16, b'z' as u16, b'e' as u16, 0,
+    ];
+    const VAL: &[u16] = &[
+        b'A' as u16, b'p' as u16, b'p' as u16, b's' as u16, b'U' as u16, b's' as u16, b'e' as u16,
+        b'L' as u16, b'i' as u16, b'g' as u16, b'h' as u16, b't' as u16, b'T' as u16, b'h' as u16,
+        b'e' as u16, b'm' as u16, b'e' as u16, 0,
+    ];
+
+    unsafe {
+        let mut hkey = 0;
+        if RegOpenKeyExW(HKEY_CURRENT_USER, KEY.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return None;
+        }
+        let mut typ = 0u32;
+        let mut data = 0u32;
+        let mut data_bytes = 4u32;
+        let rc = RegQueryValueExW(
+            hkey,
+            VAL.as_ptr(),
+            std::ptr::null_mut(),
+            &mut typ,
+            &mut data as *mut u32 as *mut u8,
+            &mut data_bytes,
+        );
+        RegCloseKey(hkey);
+        if rc != 0 || typ != REG_DWORD {
+            return None;
+        }
+        // AppsUseLightTheme: 1 = 浅色, 0 = 深色
+        Some(data == 0)
+    }
+}
+
+pub fn navy() -> Color32 {
+    c().navy
+}
+pub fn navy_mid() -> Color32 {
+    c().navy_mid
+}
+pub fn bg() -> Color32 {
+    c().bg
+}
+pub fn panel() -> Color32 {
+    c().panel
+}
+pub fn card() -> Color32 {
+    c().card
+}
+pub fn border() -> Color32 {
+    c().border
+}
+pub fn border_strong() -> Color32 {
+    c().border_strong
+}
+pub fn text() -> Color32 {
+    c().text
+}
+pub fn text_muted() -> Color32 {
+    c().text_muted
+}
+pub fn accent() -> Color32 {
+    c().accent
+}
+pub fn accent_hover() -> Color32 {
+    c().accent_hover
+}
+pub fn accent_soft() -> Color32 {
+    c().accent_soft
+}
+pub fn success() -> Color32 {
+    c().success
+}
+pub fn success_soft() -> Color32 {
+    c().success_soft
+}
+pub fn danger() -> Color32 {
+    c().danger
+}
+pub fn danger_soft() -> Color32 {
+    c().danger_soft
+}
+pub fn warn() -> Color32 {
+    c().warn
+}
+pub fn mac_bg() -> Color32 {
+    c().mac_bg
+}
+pub fn mac_bg_top() -> Color32 {
+    c().mac_bg_top
+}
+pub fn mac_card() -> Color32 {
+    c().mac_card
+}
+pub fn mac_separator() -> Color32 {
+    c().mac_separator
+}
+pub fn mac_fill() -> Color32 {
+    c().mac_fill
+}
+pub fn mac_fill_hover() -> Color32 {
+    c().mac_fill_hover
+}
+pub fn mac_text() -> Color32 {
+    c().mac_text
+}
+pub fn mac_text_secondary() -> Color32 {
+    c().mac_text_secondary
+}
+pub fn mac_text_tertiary() -> Color32 {
+    c().mac_text_tertiary
+}
+pub fn mac_blue() -> Color32 {
+    c().mac_blue
+}
+pub fn mac_blue_pressed() -> Color32 {
+    c().mac_blue_pressed
+}
+pub fn mac_red() -> Color32 {
+    c().mac_red
+}
+pub fn chrome_fg() -> Color32 {
+    c().chrome_fg
+}
+pub fn chrome_stroke() -> Color32 {
+    c().chrome_stroke
+}
+pub fn remind_bg() -> Color32 {
+    c().remind_bg
+}
+pub fn remind_fg() -> Color32 {
+    c().remind_fg
+}
+
+pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
+    let p = palette_for(mode);
+    set_current(p);
+
+    let mut visuals = match mode {
+        ThemeMode::Light => Visuals::light(),
+        ThemeMode::Dark => Visuals::dark(),
+    };
+    visuals.dark_mode = matches!(mode, ThemeMode::Dark);
+    visuals.window_fill = p.card;
+    visuals.panel_fill = p.panel;
+    visuals.extreme_bg_color = p.bg;
+    visuals.faint_bg_color = p.panel;
+    visuals.code_bg_color = p.code_bg;
+    // 勿设 override_text_color：否则 TextEdit hint 会在 layout 时被烘焙成正文字色，
+    // painter 的 weak_text_color 无法生效。正文色走 widgets.*.fg_stroke。
+    visuals.override_text_color = None;
+    visuals.hyperlink_color = p.accent;
+    visuals.warn_fg_color = p.warn;
+    visuals.error_fg_color = p.danger;
     visuals.window_rounding = Rounding::same(ROUND_CARD);
     visuals.menu_rounding = Rounding::same(ROUND_CTRL);
-    visuals.window_stroke = Stroke::new(1.0, BORDER);
-    visuals.widgets.noninteractive.bg_fill = CARD;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_MUTED);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    visuals.window_stroke = Stroke::new(1.0, p.border);
+    visuals.widgets.noninteractive.bg_fill = p.card;
+    visuals.widgets.noninteractive.weak_bg_fill = p.panel;
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     visuals.widgets.noninteractive.rounding = Rounding::same(ROUND_CTRL);
-    visuals.widgets.inactive.bg_fill = CARD;
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
+    visuals.widgets.inactive.bg_fill = p.card;
+    visuals.widgets.inactive.weak_bg_fill = p.panel;
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border_strong);
     visuals.widgets.inactive.rounding = Rounding::same(ROUND_CTRL);
-    visuals.widgets.hovered.bg_fill = ACCENT_SOFT;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+    visuals.widgets.hovered.bg_fill = p.accent_soft;
+    visuals.widgets.hovered.weak_bg_fill = p.panel;
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
     visuals.widgets.hovered.rounding = Rounding::same(ROUND_CTRL);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(0xBF, 0xDB, 0xFE);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.active.bg_stroke = Stroke::new(1.5, ACCENT);
+    visuals.widgets.active.bg_fill = p.widget_active;
+    visuals.widgets.active.weak_bg_fill = p.panel;
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, p.text);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.5, p.accent);
     visuals.widgets.active.rounding = Rounding::same(ROUND_CTRL);
-    visuals.widgets.open.bg_fill = ACCENT_SOFT;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, ACCENT);
+    visuals.widgets.open.bg_fill = p.accent_soft;
+    visuals.widgets.open.weak_bg_fill = p.panel;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, p.accent);
     visuals.widgets.open.rounding = Rounding::same(ROUND_CTRL);
-    visuals.selection.bg_fill = ACCENT;
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT_HOVER);
+    visuals.selection.bg_fill = p.accent;
+    visuals.selection.stroke = Stroke::new(1.0, p.accent_hover);
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
@@ -90,6 +402,15 @@ pub fn apply(ctx: &egui::Context) {
     style.interaction.tooltip_delay = 0.35;
     polish_text_styles(&mut style);
     ctx.set_style(style);
+}
+
+/// 若模式变化则应用并返回新模式。
+pub fn sync(ctx: &egui::Context, pref: ThemePreference, last: &mut Option<ThemeMode>) {
+    let mode = resolve(pref, system_prefers_dark());
+    if last.map(|m| m != mode).unwrap_or(true) {
+        apply(ctx, mode);
+        *last = Some(mode);
+    }
 }
 
 fn polish_text_styles(style: &mut Style) {
@@ -118,17 +439,24 @@ fn polish_text_styles(style: &mut Style) {
 
 pub fn card_frame() -> Frame {
     Frame::none()
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(card())
+        .stroke(Stroke::new(1.0, border()))
         .rounding(Rounding::same(ROUND_CARD))
+        .inner_margin(Margin::same(16.0))
+}
+
+/// 中央内容区：白底、极淡边或无边，贴近「白纸」。
+pub fn content_frame() -> Frame {
+    Frame::none()
+        .fill(card())
         .inner_margin(Margin::same(16.0))
 }
 
 /// 启动门：大圆角白卡片（类似 macOS sheet）。
 pub fn mac_sheet_frame() -> Frame {
     Frame::none()
-        .fill(MAC_CARD)
-        .stroke(Stroke::new(0.5, MAC_SEPARATOR))
+        .fill(mac_card())
+        .stroke(Stroke::new(0.5, mac_separator()))
         .rounding(Rounding::same(MAC_ROUND_SHEET))
         .inner_margin(Margin::symmetric(28.0, 26.0))
         .shadow(egui::epaint::Shadow {
@@ -141,36 +469,62 @@ pub fn mac_sheet_frame() -> Frame {
 
 pub fn panel_frame() -> Frame {
     Frame::none()
-        .fill(PANEL)
+        .fill(panel())
+        .inner_margin(Margin::same(12.0))
+}
+
+/// 左侧栏：浅灰 + 右侧细分割线。
+pub fn left_panel_frame() -> Frame {
+    Frame::none()
+        .fill(panel())
+        .stroke(Stroke::new(1.0, border()))
+        .inner_margin(Margin::same(12.0))
+}
+
+/// 右侧栏：浅灰 + 左侧细分割线（用 stroke 整框，视觉足够）。
+pub fn right_panel_frame() -> Frame {
+    Frame::none()
+        .fill(panel())
+        .stroke(Stroke::new(1.0, border()))
         .inner_margin(Margin::same(12.0))
 }
 
 pub fn top_bar_frame() -> Frame {
     Frame::none()
-        .fill(NAVY)
-        .inner_margin(Margin::symmetric(16.0, 11.0))
+        .fill(navy())
+        .stroke(Stroke::new(1.0, border()))
+        .inner_margin(Margin::symmetric(16.0, 10.0))
 }
 
 pub fn bottom_bar_frame() -> Frame {
     Frame::none()
-        .fill(PANEL)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(navy())
+        .stroke(Stroke::new(1.0, border()))
         .inner_margin(Margin::symmetric(14.0, 7.0))
 }
 
 pub fn list_row_fill(selected: bool, hovered: bool) -> Color32 {
     if selected {
-        ACCENT_SOFT
+        accent_soft()
     } else if hovered {
-        Color32::from_rgb(0xF1, 0xF5, 0xF9)
+        c().list_hover
     } else {
-        CARD
+        panel()
     }
+}
+
+/// 顶栏文字菜单项（无填充，疏朗）。
+pub fn menu_text_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(14.0).color(chrome_fg()))
+            .frame(false)
+            .min_size(Vec2::new(0.0, 26.0)),
+    )
 }
 
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(ACCENT),
+        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(accent()),
     )
 }
 
@@ -184,7 +538,7 @@ pub fn mac_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui
     ui.add_enabled(
         enabled,
         egui::Button::new(text)
-            .fill(MAC_BLUE)
+            .fill(mac_blue())
             .rounding(Rounding::same(MAC_ROUND_PILL))
             .min_size(Vec2::new(w, 36.0)),
     )
@@ -193,8 +547,8 @@ pub fn mac_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui
 /// macOS 次要按钮（浅灰底）。
 pub fn mac_secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).color(MAC_TEXT).size(14.0))
-            .fill(MAC_FILL)
+        egui::Button::new(egui::RichText::new(label).color(mac_text()).size(14.0))
+            .fill(mac_fill())
             .rounding(Rounding::same(MAC_ROUND_CTRL))
             .min_size(Vec2::new(0.0, 32.0)),
     )
@@ -209,7 +563,7 @@ pub fn mac_segmented(ui: &mut egui::Ui, left: &str, right: &str, right_selected:
     painter.rect(
         rect,
         Rounding::same(MAC_ROUND_CTRL),
-        MAC_FILL,
+        mac_fill(),
         Stroke::NONE,
     );
     let mid = rect.center().x;
@@ -221,8 +575,8 @@ pub fn mac_segmented(ui: &mut egui::Ui, left: &str, right: &str, right_selected:
             painter.rect(
                 r.shrink(2.0),
                 Rounding::same(MAC_ROUND_CTRL - 1.0),
-                MAC_CARD,
-                Stroke::new(0.5, MAC_SEPARATOR),
+                mac_card(),
+                Stroke::new(0.5, mac_separator()),
             );
         }
         painter.text(
@@ -231,9 +585,9 @@ pub fn mac_segmented(ui: &mut egui::Ui, left: &str, right: &str, right_selected:
             label,
             egui::FontId::proportional(13.0),
             if selected {
-                MAC_TEXT
+                mac_text()
             } else {
-                MAC_TEXT_SECONDARY
+                mac_text_secondary()
             },
         );
     };
@@ -260,7 +614,7 @@ pub fn mac_step_dots(ui: &mut egui::Ui, total: usize, current: usize) {
             ui.painter().circle_filled(
                 rect.center(),
                 if active { 4.0 } else { 3.0 },
-                if active { MAC_BLUE } else { MAC_SEPARATOR },
+                if active { mac_blue() } else { mac_separator() },
             );
             ui.add_space(6.0);
         }
@@ -269,18 +623,18 @@ pub fn mac_step_dots(ui: &mut egui::Ui, total: usize, current: usize) {
 
 pub fn success_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(SUCCESS),
+        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(success()),
     )
 }
 
 pub fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(DANGER),
+        egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(danger()),
     )
 }
 
 pub fn ghost_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(egui::Button::new(egui::RichText::new(label).color(TEXT)))
+    ui.add(egui::Button::new(egui::RichText::new(label).color(text())))
 }
 
 /// HTML 风格密码框：文字与灰色提示均垂直居中、水平靠左。
@@ -311,7 +665,8 @@ pub fn password_field(
 
     if password.is_empty() && !hint.is_empty() {
         let font = FontId::proportional(14.5);
-        let galley = ui.fonts(|f| f.layout_no_wrap(hint.to_owned(), font, TEXT_MUTED));
+        let muted = text_muted();
+        let galley = ui.fonts(|f| f.layout_no_wrap(hint.to_owned(), font, muted));
         let text_rect = egui::Rect::from_min_size(
             egui::pos2(rect.left() + pad_x, rect.top()),
             Vec2::new((rect.width() - pad_x * 2.0).max(1.0), rect.height()),
@@ -319,7 +674,7 @@ pub fn password_field(
         let pos = Align2::LEFT_CENTER
             .align_size_within_rect(galley.size(), text_rect)
             .min;
-        ui.painter().galley(pos, galley, TEXT_MUTED);
+        ui.painter().galley(pos, galley, muted);
     }
 
     response
@@ -331,19 +686,126 @@ pub const APP_FILE_VERSION: &str = "0.3.0.0";
 pub const APP_DESCRIPTION: &str = "本地加密 · 局域网同步 · 绿色单文件分布式备忘录";
 
 pub fn muted_label(text: impl Into<String>) -> egui::RichText {
-    egui::RichText::new(text.into()).color(TEXT_MUTED)
+    egui::RichText::new(text.into()).color(text_muted())
+}
+
+/// 输入框占位提示：淡色，随当前主题 `text_muted` 变化。
+pub fn hint(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text.into()).color(text_muted())
 }
 
 pub fn brand_title(size: f32) -> egui::RichText {
     egui::RichText::new("分布式备忘录")
         .strong()
         .size(size)
-        .color(TEXT)
+        .color(text())
 }
 
 pub fn brand_title_on_navy(size: f32) -> egui::RichText {
     egui::RichText::new("分布式备忘录")
         .strong()
         .size(size)
-        .color(Color32::WHITE)
+        .color(chrome_fg())
+}
+
+/// 贴屏约束的模态窗：居中、可缩放、不超过屏幕。
+pub fn modal_window<'a>(
+    ctx: &egui::Context,
+    title: impl Into<egui::WidgetText>,
+) -> egui::Window<'a> {
+    let screen = ctx.screen_rect();
+    let max = Vec2::new(
+        (screen.width() - 24.0).max(320.0),
+        (screen.height() - 24.0).max(240.0),
+    );
+    // 默认尺寸适中，避免仅改 width 时仍继承「接近全屏高」导致内容反向撑窗
+    let default_h = 420.0_f32.min(max.y);
+    let default_w = 520.0_f32.min(max.x);
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(true)
+        .constrain(true)
+        .constrain_to(screen)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(screen.center())
+        .default_size([default_w, default_h])
+        .min_size([320.0, 200.0])
+        .max_size(max)
+}
+
+/// 固定尺寸表单弹窗：禁止内容反向撑开（每帧缓慢延伸）。
+pub fn modal_fixed<'a>(
+    ctx: &egui::Context,
+    title: impl Into<egui::WidgetText>,
+    size: [f32; 2],
+) -> egui::Window<'a> {
+    let screen = ctx.screen_rect();
+    let w = size[0].min((screen.width() - 24.0).max(280.0));
+    let h = size[1].min((screen.height() - 24.0).max(180.0));
+    modal_window(ctx, title)
+        .fixed_size([w, h])
+        .resizable(false)
+}
+
+/// 短确认框：不可缩放、居中贴屏。
+pub fn modal_confirm<'a>(
+    ctx: &egui::Context,
+    title: impl Into<egui::WidgetText>,
+) -> egui::Window<'a> {
+    modal_fixed(ctx, title, [420.0, 180.0])
+}
+
+/// 一次模态会话：遮罩 + 窗口 Id。用法：
+/// ```ignore
+/// let modal = theme::begin_modal(ctx, "settings");
+/// let mut open = true;
+/// theme::modal_fixed(...).id(modal.window_id).open(&mut open).show(...);
+/// if modal.end(ctx, open) { /* 仅标题栏 X 关闭；点遮罩不关 */ }
+/// ```
+pub struct ModalSession {
+    pub window_id: egui::Id,
+}
+
+/// 绘制遮罩并分配窗口 Id（请用于 `.id(modal.window_id)`）。
+pub fn begin_modal(ctx: &egui::Context, key: &'static str) -> ModalSession {
+    let window_id = egui::Id::new(key);
+    modal_dimmer(ctx, egui::Id::new((key, "dimmer")));
+    ModalSession { window_id }
+}
+
+impl ModalSession {
+    /// 窗体绘完后调用：抬升窗口；仅当标题栏 X 关掉时返回 `true`。
+    /// `still_open`：标题栏关闭按钮对应的 `open`；无关闭按钮时传 `true`。
+    /// 点遮罩**不会**关闭（遮罩只拦截底层交互）。
+    pub fn end(self, ctx: &egui::Context, still_open: bool) -> bool {
+        raise_modal(ctx, self.window_id);
+        !still_open
+    }
+}
+
+/// 半透明遮罩：拦截底层点击，**不**用于关闭弹窗。须在对应 Window **之前**调用。
+///
+/// egui 0.27 的 Window 与 Area 同属 `Order::Middle`：点击遮罩会 `move_to_top`，
+/// 若不再把窗口抬回顶层，遮罩会盖住窗口并吞掉所有点击（界面假死）。
+/// 因此 Window 绘制后务必调用 [`raise_modal`]（或 [`ModalSession::end`]）。
+pub fn modal_dimmer(ctx: &egui::Context, id: impl Into<egui::Id>) {
+    let screen = ctx.screen_rect();
+    egui::Area::new(id.into())
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            // 先占位再绘制，避免 painter 裁剪到 Area 初始空矩形导致遮罩不可见
+            let response = ui.allocate_response(screen.size(), egui::Sense::click());
+            ui.painter().rect_filled(
+                response.rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(0, 0, 0, 110),
+            );
+        });
+}
+
+/// 将模态 Window 抬到同层最顶（须与 Window 的 `.id(...)` 一致）。
+pub fn raise_modal(ctx: &egui::Context, id: egui::Id) {
+    ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
 }

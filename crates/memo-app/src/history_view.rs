@@ -1,4 +1,4 @@
-//! 变更时间线与简易 diff（备忘 / 任务 / 人员）。
+﻿//! 变更时间线与简易 diff（备忘 / 任务 / 人员）。
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use memo_core::service::HistoryEvent;
@@ -48,7 +48,7 @@ pub fn show_list(
     );
     ui.add_space(6.0);
     ScrollArea::vertical()
-        .max_height(220.0)
+        .max_height((ui.available_height() * 0.5).clamp(120.0, 320.0))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (i, ev) in events.iter().enumerate() {
@@ -145,7 +145,7 @@ pub fn show_diff(ui: &mut egui::Ui, events: &[HistoryEvent], a: Option<usize>, b
     ui.label(
         RichText::new(format!("对比 #{} → #{}", older.seq, newer.seq))
             .strong()
-            .color(theme::TEXT),
+            .color(theme::text()),
     );
     ui.add_space(4.0);
     ui.label(
@@ -169,7 +169,7 @@ pub fn show_diff(ui: &mut egui::Ui, events: &[HistoryEvent], a: Option<usize>, b
     ui.add_space(8.0);
     ui.label(RichText::new("详情").strong().size(13.0));
     ScrollArea::vertical()
-        .max_height(180.0)
+        .max_height((ui.available_height() - 8.0).clamp(80.0, 280.0))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             text_diff_lines(ui, oc, nc);
@@ -180,24 +180,24 @@ fn field_diff(ui: &mut egui::Ui, name: &str, old: &str, new: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(name).strong().size(13.0));
         if old == new {
-            ui.label(RichText::new("无变化").small().color(theme::TEXT_MUTED));
+            ui.label(RichText::new("无变化").small().color(theme::text_muted()));
         } else {
-            ui.label(RichText::new("已变更").small().color(theme::WARN));
+            ui.label(RichText::new("已变更").small().color(theme::warn()));
         }
     });
     if old != new {
         ui.label(
             RichText::new(format!("− {old}"))
-                .color(theme::DANGER)
+                .color(theme::danger())
                 .size(13.0),
         );
         ui.label(
             RichText::new(format!("+ {new}"))
-                .color(theme::SUCCESS)
+                .color(theme::success())
                 .size(13.0),
         );
     } else {
-        ui.label(RichText::new(old).size(13.0).color(theme::TEXT));
+        ui.label(RichText::new(old).size(13.0).color(theme::text()));
     }
 }
 
@@ -218,14 +218,14 @@ fn text_diff_lines(ui: &mut egui::Ui, old: &str, new: &str) {
         let n = new_lines.get(i).copied().unwrap_or("");
         if o == n {
             if !o.is_empty() {
-                ui.label(RichText::new(format!("  {o}")).size(12.5).color(theme::TEXT));
+                ui.label(RichText::new(format!("  {o}")).size(12.5).color(theme::text()));
             }
         } else {
             if !o.is_empty() {
                 ui.label(
                     RichText::new(format!("− {o}"))
                         .size(12.5)
-                        .color(theme::DANGER)
+                        .color(theme::danger())
                         .background_color(Color32::from_rgb(255, 236, 236)),
                 );
             }
@@ -233,7 +233,7 @@ fn text_diff_lines(ui: &mut egui::Ui, old: &str, new: &str) {
                 ui.label(
                     RichText::new(format!("+ {n}"))
                         .size(12.5)
-                        .color(theme::SUCCESS)
+                        .color(theme::success())
                         .background_color(Color32::from_rgb(232, 248, 237)),
                 );
             }

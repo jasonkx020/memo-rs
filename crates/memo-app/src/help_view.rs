@@ -1,4 +1,4 @@
-//! 轻量 Markdown 子集渲染（使用说明与备忘预览共用；无图片）。
+﻿//! 轻量 Markdown 子集渲染（使用说明与备忘预览共用；无图片）。
 
 use crate::theme;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Stroke, Vec2};
@@ -38,7 +38,7 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
                 RichText::new(text)
                     .strong()
                     .size(size)
-                    .color(theme::TEXT),
+                    .color(theme::text()),
             );
             if level == 1 {
                 ui.add_space(2.0);
@@ -50,16 +50,16 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
         if line.trim_start().starts_with('>') {
             let body = line.trim_start().trim_start_matches('>').trim();
             Frame::none()
-                .fill(theme::ACCENT_SOFT)
+                .fill(theme::accent_soft())
                 .rounding(Rounding::same(6.0))
                 .inner_margin(Margin::symmetric(10.0, 8.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let (bar, _) =
                             ui.allocate_exact_size(Vec2::new(3.0, 18.0), egui::Sense::hover());
-                        ui.painter().rect_filled(bar, Rounding::same(1.0), theme::ACCENT);
+                        ui.painter().rect_filled(bar, Rounding::same(1.0), theme::accent());
                         ui.add_space(8.0);
-                        rich_line(ui, body, 13.5, theme::TEXT);
+                        rich_line(ui, body, 13.5, theme::text());
                     });
                 });
             ui.add_space(4.0);
@@ -86,8 +86,8 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
             table_seq += 1;
             let table_id = table_seq;
             Frame::none()
-                .fill(theme::CARD)
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .fill(theme::card())
+                .stroke(Stroke::new(1.0, theme::border()))
                 .rounding(Rounding::same(6.0))
                 .inner_margin(Margin::same(8.0))
                 .show(ui, |ui| {
@@ -101,14 +101,14 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
                             for c in 0..ncols {
                                 let h = headers.get(c).map(|s| s.as_str()).unwrap_or("");
                                 ui.label(
-                                    RichText::new(h).strong().size(13.0).color(theme::TEXT),
+                                    RichText::new(h).strong().size(13.0).color(theme::text()),
                                 );
                             }
                             ui.end_row();
                             for row in &rows {
                                 for c in 0..ncols {
                                     let cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
-                                    rich_line(ui, cell, 13.0, theme::TEXT);
+                                    rich_line(ui, cell, 13.0, theme::text());
                                 }
                                 ui.end_row();
                             }
@@ -133,8 +133,8 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
                 i += 1;
             }
             Frame::none()
-                .fill(theme::PANEL)
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .fill(theme::panel())
+                .stroke(Stroke::new(1.0, theme::border()))
                 .rounding(Rounding::same(6.0))
                 .inner_margin(Margin::symmetric(10.0, 8.0))
                 .show(ui, |ui| {
@@ -143,7 +143,7 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
                         RichText::new(if code.is_empty() { " " } else { &code })
                             .monospace()
                             .size(13.0)
-                            .color(theme::NAVY_MID),
+                            .color(theme::navy_mid()),
                     );
                 });
             ui.add_space(4.0);
@@ -163,7 +163,7 @@ pub fn show(ui: &mut egui::Ui, md: &str) {
         }
 
         // 普通段落（可含行末两个空格换行的续行，本说明较少见，按单行处理）
-        rich_line(ui, line.trim(), 14.0, theme::TEXT);
+        rich_line(ui, line.trim(), 14.0, theme::text());
         i += 1;
     }
 }
@@ -235,7 +235,7 @@ fn list_item(ui: &mut egui::Ui, bullet: &str, text: &str) {
             RichText::new(bullet)
                 .strong()
                 .size(14.0)
-                .color(theme::ACCENT),
+                .color(theme::accent()),
         );
         ui.add_space(6.0);
         // 列表正文可换行
@@ -243,7 +243,7 @@ fn list_item(ui: &mut egui::Ui, bullet: &str, text: &str) {
             Vec2::new((ui.available_width() - 4.0).max(40.0), 0.0),
             egui::Layout::top_down(egui::Align::LEFT),
             |ui| {
-                rich_line(ui, text, 14.0, theme::TEXT);
+                rich_line(ui, text, 14.0, theme::text());
             },
         );
     });
@@ -280,8 +280,8 @@ fn rich_line(ui: &mut egui::Ui, text: &str, size: f32, color: Color32) {
                         RichText::new(code)
                             .monospace()
                             .size(size * 0.95)
-                            .color(theme::NAVY_MID)
-                            .background_color(theme::PANEL),
+                            .color(theme::navy_mid())
+                            .background_color(theme::panel()),
                     );
                     rest = &tail[1..];
                     continue;

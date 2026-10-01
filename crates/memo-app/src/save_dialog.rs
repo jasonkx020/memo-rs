@@ -1,4 +1,4 @@
-//! Windows 原生「打开 / 另存为」对话框；其它平台返回 None（由 UI 文本框填路径）。
+//! Windows 原生「打开 / 另存为 / 选文件夹」对话框；其它平台返回 None（由 UI 文本框填路径）。
 
 use std::path::PathBuf;
 
@@ -63,6 +63,19 @@ pub fn open_memokey_dialog() -> Option<PathBuf> {
     }
 }
 
+/// 选择文件夹。`initial` 为初始路径提示（可为空）。用户取消返回 `None`。
+pub fn pick_folder_dialog(initial: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows_pick_folder(initial)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = initial;
+        None
+    }
+}
+
 #[cfg(windows)]
 fn encode_filter(pairs: &[(&str, &str)]) -> Vec<u16> {
     let mut v = Vec::new();
@@ -74,6 +87,78 @@ fn encode_filter(pairs: &[(&str, &str)]) -> Vec<u16> {
     }
     v.push(0);
     v
+}
+
+#[cfg(windows)]
+fn windows_pick_folder(_initial: &str) -> Option<PathBuf> {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    const BIF_RETURNONLYFSDIRS: u32 = 0x0001;
+    const BIF_NEWDIALOGSTYLE: u32 = 0x0040;
+
+    #[repr(C)]
+    struct BrowseInfoW {
+        hwnd_owner: isize,
+        pidl_root: *mut c_void,
+        psz_display_name: *mut u16,
+        lpsz_title: *const u16,
+        ul_flags: u32,
+        lpfn: Option<unsafe extern "system" fn(*mut c_void, u32, isize, isize) -> i32>,
+        l_param: isize,
+        i_image: i32,
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHBrowseForFolderW(lpbi: *const BrowseInfoW) -> *mut c_void;
+        fn SHGetPathFromIDListW(pidl: *const c_void, psz_path: *mut u16) -> i32;
+    }
+
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoTaskMemFree(pv: *const c_void);
+    }
+
+    let title: Vec<u16> = "选择数据目录"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut display_name = vec![0u16; 260];
+
+    let bi = BrowseInfoW {
+        hwnd_owner: 0,
+        pidl_root: ptr::null_mut(),
+        psz_display_name: display_name.as_mut_ptr(),
+        lpsz_title: title.as_ptr(),
+        ul_flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        lpfn: None,
+        l_param: 0,
+        i_image: 0,
+    };
+
+    let pidl = unsafe { SHBrowseForFolderW(&bi) };
+    if pidl.is_null() {
+        return None;
+    }
+
+    let mut path_buf = vec![0u16; 1024];
+    let ok = unsafe { SHGetPathFromIDListW(pidl, path_buf.as_mut_ptr()) };
+    unsafe { CoTaskMemFree(pidl) };
+    if ok == 0 {
+        return None;
+    }
+
+    let len = path_buf
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(path_buf.len());
+    let path = String::from_utf16_lossy(&path_buf[..len]);
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
 }
 
 #[cfg(windows)]

@@ -1,4 +1,4 @@
-//! 启动身份门：选择/生成/导入密钥对（macOS 风格设置助手）。
+﻿//! 启动身份门：选择/生成/导入密钥对（macOS 风格设置助手）。
 
 use crate::app_icon;
 use crate::save_dialog;
@@ -76,14 +76,14 @@ pub enum GateAction {
 
 fn paint_flat_bg(ui: &egui::Ui) {
     let rect = ui.ctx().screen_rect();
-    ui.painter().rect_filled(rect, 0.0, theme::MAC_BG_TOP);
+    ui.painter().rect_filled(rect, 0.0, theme::mac_bg_top());
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
             .size(12.0)
-            .color(theme::MAC_TEXT_SECONDARY)
+            .color(theme::mac_text_secondary())
             .strong(),
     );
     ui.add_space(4.0);
@@ -98,9 +98,9 @@ fn mac_status(ui: &mut egui::Ui, status: &str, busy: bool) {
         RichText::new(status)
             .size(12.5)
             .color(if busy {
-                theme::MAC_TEXT_SECONDARY
+                theme::mac_text_secondary()
             } else {
-                theme::MAC_RED
+                theme::mac_red()
             }),
     );
 }
@@ -115,15 +115,15 @@ fn path_picker_row(ui: &mut egui::Ui, path: &mut String, hint: &str, btn: &str) 
         ui.add(
             egui::TextEdit::singleline(path)
                 .desired_width(path_w)
-                .hint_text(hint)
+                .hint_text(theme::hint(hint))
                 .margin(egui::Margin::symmetric(10.0, 8.0)),
         );
         ui.add_space(GAP);
         if ui
             .add_sized(
                 [BTN_W, 32.0],
-                egui::Button::new(RichText::new(btn).size(13.0).color(theme::MAC_TEXT))
-                    .fill(theme::MAC_FILL)
+                egui::Button::new(RichText::new(btn).size(13.0).color(theme::mac_text()))
+                    .fill(theme::mac_fill())
                     .rounding(egui::Rounding::same(theme::MAC_ROUND_CTRL)),
             )
             .clicked()
@@ -144,7 +144,7 @@ pub fn show(
     let mut show_help = false;
 
     egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(theme::MAC_BG_TOP))
+        .frame(egui::Frame::none().fill(theme::mac_bg_top()))
         .show(ui_ctx, |ui| {
             paint_flat_bg(ui);
 
@@ -163,13 +163,13 @@ pub fn show(
                             RichText::new(theme::APP_NAME)
                                 .size(22.0)
                                 .strong()
-                                .color(theme::MAC_TEXT),
+                                .color(theme::mac_text()),
                         );
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new("每个身份独立数据 · 退出后可切换")
                                 .size(13.0)
-                                .color(theme::MAC_TEXT_SECONDARY),
+                                .color(theme::mac_text_secondary()),
                         );
                         ui.add_space(20.0);
 
@@ -194,7 +194,7 @@ pub fn show(
                                         .link(
                                             RichText::new("选择已有身份")
                                                 .size(13.0)
-                                                .color(theme::MAC_BLUE),
+                                                .color(theme::mac_blue()),
                                         )
                                         .clicked()
                                     {
@@ -214,14 +214,14 @@ pub fn show(
                                 ui.label(
                                     RichText::new(theme::APP_FILE_VERSION)
                                         .size(11.5)
-                                        .color(theme::MAC_TEXT_TERTIARY),
+                                        .color(theme::mac_text_tertiary()),
                                 );
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if ui
                                         .link(
                                             RichText::new("使用说明")
                                                 .size(12.5)
-                                                .color(theme::MAC_BLUE),
+                                                .color(theme::mac_blue()),
                                         )
                                         .clicked()
                                     {
@@ -247,13 +247,13 @@ fn draw_legacy(ui: &mut egui::Ui, cfg: &mut Config, st: &mut IdentityGateState) 
         RichText::new("需要重新初始化")
             .size(17.0)
             .strong()
-            .color(theme::MAC_TEXT),
+            .color(theme::mac_text()),
     );
     ui.add_space(6.0);
     ui.label(
         RichText::new("检测到旧版数据目录，与当前身份模型不兼容。请先自行备份，再清空并继续。")
             .size(13.0)
-            .color(theme::MAC_TEXT_SECONDARY),
+            .color(theme::mac_text_secondary()),
     );
     ui.add_space(18.0);
     if theme::mac_primary_button(ui, "我已备份，清空并继续", !st.busy).clicked() {
@@ -278,7 +278,7 @@ fn draw_init_create(
         RichText::new("创建身份")
             .size(17.0)
             .strong()
-            .color(theme::MAC_TEXT),
+            .color(theme::mac_text()),
     );
     ui.add_space(4.0);
     ui.label(
@@ -288,7 +288,7 @@ fn draw_init_create(
             "生成新密钥对。新身份须导出备份后再进入。"
         })
         .size(13.0)
-        .color(theme::MAC_TEXT_SECONDARY),
+        .color(theme::mac_text_secondary()),
     );
     ui.add_space(14.0);
 
@@ -300,7 +300,7 @@ fn draw_init_create(
         ui.add(
             egui::TextEdit::singleline(&mut st.init_alias)
                 .desired_width(ui.available_width())
-                .hint_text("例如：张三")
+                .hint_text(theme::hint("例如：张三"))
                 .margin(egui::Margin::symmetric(12.0, 8.0)),
         );
         ui.add_space(12.0);
@@ -339,17 +339,20 @@ fn draw_init_create(
             ui.label(
                 RichText::new(format!("将使用包内名称：{name}"))
                     .size(12.5)
-                    .color(theme::MAC_TEXT_SECONDARY),
+                    .color(theme::mac_text_secondary()),
             );
         }
         ui.add_space(10.0);
-        field_label(ui, "保险口令（可选）");
-        theme::password_field(
-            ui,
-            &mut st.init_import_pass,
-            "若导出时设置过口令请填写",
-            ui.available_width(),
-            34.0,
+        field_label(ui, "保险口令（可选，明文便于核对）");
+        ui.add(
+            egui::TextEdit::singleline(&mut st.init_import_pass)
+                .desired_width(ui.available_width())
+                .hint_text(theme::hint("若导出时设置过请填写；可留空")),
+        );
+        ui.label(
+            RichText::new("明文显示便于确认；公共场合请勿久留屏幕。")
+                .size(11.5)
+                .color(theme::mac_text_secondary()),
         );
         ui.add_space(8.0);
     }
@@ -411,7 +414,7 @@ fn draw_init_export(
         RichText::new("备份密钥（必做）")
             .size(17.0)
             .strong()
-            .color(theme::MAC_TEXT),
+            .color(theme::mac_text()),
     );
     ui.add_space(4.0);
     let name = st
@@ -424,7 +427,7 @@ fn draw_init_export(
             "新身份「{name}」须先导出密钥包到安全位置。丢失后无法恢复私人数据。"
         ))
         .size(13.0)
-        .color(theme::MAC_TEXT_SECONDARY),
+        .color(theme::mac_text_secondary()),
     );
     ui.add_space(16.0);
 
@@ -442,13 +445,16 @@ fn draw_init_export(
         }
     }
     ui.add_space(10.0);
-    field_label(ui, "导出保险口令（可选）");
-    theme::password_field(
-        ui,
-        &mut st.init_export_pass,
-        "建议设置，用于保护备份文件",
-        ui.available_width(),
-        34.0,
+    field_label(ui, "导出保险口令（可选，明文便于核对）");
+    ui.add(
+        egui::TextEdit::singleline(&mut st.init_export_pass)
+            .desired_width(ui.available_width())
+            .hint_text(theme::hint("可留空；建议设置并自行抄写保存")),
+    );
+    ui.label(
+        RichText::new("明文显示便于核对，无需二次输入；公共场合请勿久留屏幕。")
+            .size(11.5)
+            .color(theme::mac_text_secondary()),
     );
     ui.add_space(16.0);
 
@@ -545,13 +551,13 @@ fn draw_select(
         RichText::new("选择身份")
             .size(17.0)
             .strong()
-            .color(theme::MAC_TEXT),
+            .color(theme::mac_text()),
     );
     ui.add_space(4.0);
     ui.label(
         RichText::new("每个身份独立数据。选定后进入；退出可再切换其他身份。")
             .size(13.0)
-            .color(theme::MAC_TEXT_SECONDARY),
+            .color(theme::mac_text_secondary()),
     );
     ui.add_space(12.0);
 
@@ -563,7 +569,7 @@ fn draw_select(
                 ui.add_space(16.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("暂无已保存的身份").color(theme::MAC_TEXT_TERTIARY),
+                        RichText::new("暂无已保存的身份").color(theme::mac_text_tertiary()),
                     );
                 });
                 ui.add_space(16.0);
@@ -574,12 +580,12 @@ fn draw_select(
                 let fill = if sel {
                     Color32::from_rgb(0xE5, 0xF1, 0xFF)
                 } else {
-                    theme::MAC_FILL
+                    theme::mac_fill()
                 };
                 let stroke = if sel {
-                    egui::Stroke::new(1.0, theme::MAC_BLUE)
+                    egui::Stroke::new(1.0, theme::mac_blue())
                 } else {
-                    egui::Stroke::new(0.5, theme::MAC_SEPARATOR)
+                    egui::Stroke::new(0.5, theme::mac_separator())
                 };
                 egui::Frame::none()
                     .fill(fill)
@@ -597,9 +603,9 @@ fn draw_select(
                             egui::pos2(r.left() + 10.0, r.center().y),
                             6.0,
                             if sel {
-                                theme::MAC_BLUE
+                                theme::mac_blue()
                             } else {
-                                theme::MAC_SEPARATOR
+                                theme::mac_separator()
                             },
                         );
                         painter.text(
@@ -611,14 +617,14 @@ fn draw_select(
                                 m.alias.as_str()
                             },
                             egui::FontId::proportional(14.5),
-                            theme::MAC_TEXT,
+                            theme::mac_text(),
                         );
                         painter.text(
                             egui::pos2(r.left() + 28.0, r.center().y + 9.0),
                             egui::Align2::LEFT_CENTER,
                             IdentityKeys::short_fp(&m.fingerprint),
                             egui::FontId::proportional(11.5),
-                            theme::MAC_TEXT_TERTIARY,
+                            theme::mac_text_tertiary(),
                         );
                         if resp.clicked() {
                             st.selected = Some(m.fingerprint.clone());

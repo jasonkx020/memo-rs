@@ -1,4 +1,4 @@
-//! 公文风所见即所得文档编辑器（备忘 / 任务计划共用）。
+﻿//! 公文风所见即所得文档编辑器（备忘 / 任务计划共用）。
 //! 始终第一行（标题块）为标题；保存时 split 写入 store。不向用户暴露 Markdown。
 
 use crate::theme;
@@ -253,7 +253,13 @@ fn pad_row(mut row: Vec<String>, ncols: usize) -> Vec<String> {
 
 fn unordered_item(line: &str) -> Option<&str> {
     let t = line.trim_start();
-    t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))
+    let rest = t.strip_prefix('-').or_else(|| t.strip_prefix('*'))?;
+    // 允许 "-"/ "*" 或 "- "/"* "；trim_end 后空事项会变成 "-"。
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(rest.trim_start())
+    } else {
+        None
+    }
 }
 
 fn ordered_item(line: &str) -> Option<(u32, &str)> {
@@ -263,9 +269,15 @@ fn ordered_item(line: &str) -> Option<(u32, &str)> {
         return None;
     }
     let (num_s, rest) = t.split_at(digits);
-    let rest = rest.strip_prefix(". ")?;
+    // 允许 "1. item" / "1."；parse_blocks 的 trim_end 会把空事项 "1. " 收成 "1."。
+    let item = match rest.strip_prefix('.') {
+        Some(after) if after.is_empty() || after.starts_with(char::is_whitespace) => {
+            after.trim_start()
+        }
+        _ => return None,
+    };
     let num: u32 = num_s.parse().ok()?;
-    Some((num, rest))
+    Some((num, item))
 }
 
 fn looks_like_table_header(line: &str) -> bool {
@@ -309,7 +321,7 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Doc) {
         ui.label(
             RichText::new("第一行是标题 · 保存时自动识别")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     });
 }
@@ -322,8 +334,8 @@ fn block_chrome(
 ) -> bool {
     let mut delete = false;
     Frame::none()
-        .fill(theme::CARD)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+        .fill(theme::card())
+        .stroke(Stroke::new(1.0, theme::border()))
         .rounding(Rounding::same(6.0))
         .inner_margin(Margin::symmetric(8.0, 6.0))
         .show(ui, |ui| {
@@ -332,7 +344,7 @@ fn block_chrome(
                     RichText::new(label)
                         .small()
                         .strong()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if can_delete
@@ -356,15 +368,21 @@ fn block_chrome(
 pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
     toolbar(ui, doc);
     ui.add_space(4.0);
-    let body_h = (ui.available_height() - 4.0).max(180.0);
-    let body_w = ui.available_width();
+    // ScrollArea 内容区 available_height 常为 ∞，需封顶以免撑爆外层 Window。
+    let avail_h = ui.available_height();
+    let body_h = if avail_h.is_finite() {
+        (avail_h - 4.0).clamp(180.0, 720.0)
+    } else {
+        220.0
+    };
+    let body_w = ui.available_width().min(1200.0);
     Frame::none()
-        .fill(theme::PANEL)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::border()))
         .rounding(Rounding::same(8.0))
         .inner_margin(Margin::symmetric(8.0, 6.0))
         .show(ui, |ui| {
-            ui.set_min_size(Vec2::new(body_w - 2.0, body_h));
+            ui.set_min_size(Vec2::new((body_w - 2.0).max(80.0), body_h));
             ui.set_max_height(body_h);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -374,8 +392,8 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
 
                     // 标题（第一行，不可删除）
                     Frame::none()
-                        .fill(theme::CARD)
-                        .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+                        .fill(theme::card())
+                        .stroke(Stroke::new(1.0, theme::border_strong()))
                         .rounding(Rounding::same(6.0))
                         .inner_margin(Margin::symmetric(10.0, 8.0))
                         .show(ui, |ui| {
@@ -383,14 +401,14 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
                                 RichText::new("标题（第一行）")
                                     .small()
                                     .strong()
-                                    .color(theme::TEXT_MUTED),
+                                    .color(theme::text_muted()),
                             );
                             ui.add_space(4.0);
                             ui.add(
                                 egui::TextEdit::singleline(&mut doc.title)
                                     .desired_width(f32::INFINITY)
                                     .font(egui::TextStyle::Heading)
-                                    .hint_text("输入标题…"),
+                                    .hint_text(theme::hint("输入标题…")),
                             );
                         });
                     ui.add_space(8.0);
@@ -413,7 +431,7 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
                                         egui::TextEdit::multiline(text)
                                             .desired_width(f32::INFINITY)
                                             .desired_rows(3)
-                                            .hint_text("情况说明、意见…"),
+                                            .hint_text(theme::hint("情况说明、意见…")),
                                     );
                                 },
                             ),
@@ -429,14 +447,14 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
                                             ui.label(
                                                 RichText::new(format!("{}.", ii + 1))
                                                     .strong()
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                             );
                                             ui.add(
                                                 egui::TextEdit::singleline(item)
                                                     .desired_width(
                                                         (ui.available_width() - 70.0).max(80.0),
                                                     )
-                                                    .hint_text("落实要点"),
+                                                    .hint_text(theme::hint("落实要点")),
                                             );
                                             if n_items > 1 && ui.small_button("×").clicked() {
                                                 drop_item = Some(ii);
@@ -533,7 +551,7 @@ fn render_blocks_readonly(ui: &mut egui::Ui, blocks: &[Block]) {
                 if text.trim().is_empty() {
                     continue;
                 }
-                ui.label(RichText::new(text).size(15.5).color(theme::TEXT));
+                ui.label(RichText::new(text).size(15.5).color(theme::text()));
                 ui.add_space(4.0);
             }
             Block::Items { items } => {
@@ -546,9 +564,9 @@ fn render_blocks_readonly(ui: &mut egui::Ui, blocks: &[Block]) {
                             RichText::new(format!("{}.", i + 1))
                                 .strong()
                                 .size(15.0)
-                                .color(theme::ACCENT),
+                                .color(theme::accent()),
                         );
-                        ui.label(RichText::new(it).size(15.0).color(theme::TEXT));
+                        ui.label(RichText::new(it).size(15.0).color(theme::text()));
                     });
                 }
                 ui.add_space(4.0);
@@ -557,8 +575,8 @@ fn render_blocks_readonly(ui: &mut egui::Ui, blocks: &[Block]) {
                 table_seq += 1;
                 let ncols = headers.len().max(1);
                 Frame::none()
-                    .fill(theme::CARD)
-                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .fill(theme::card())
+                    .stroke(Stroke::new(1.0, theme::border()))
                     .rounding(Rounding::same(6.0))
                     .inner_margin(Margin::same(8.0))
                     .show(ui, |ui| {
@@ -569,7 +587,7 @@ fn render_blocks_readonly(ui: &mut egui::Ui, blocks: &[Block]) {
                             .show(ui, |ui| {
                                 for h in headers {
                                     ui.label(
-                                        RichText::new(h).strong().size(13.0).color(theme::TEXT),
+                                        RichText::new(h).strong().size(13.0).color(theme::text()),
                                     );
                                 }
                                 ui.end_row();
@@ -577,7 +595,7 @@ fn render_blocks_readonly(ui: &mut egui::Ui, blocks: &[Block]) {
                                     for c in 0..ncols {
                                         let cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
                                         ui.label(
-                                            RichText::new(cell).size(13.0).color(theme::TEXT),
+                                            RichText::new(cell).size(13.0).color(theme::text()),
                                         );
                                     }
                                     ui.end_row();
@@ -611,4 +629,46 @@ pub fn task_plan_template(title: &str) -> String {
         title.trim()
     };
     format!("{t}\n\n（工作说明）\n\n1. \n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memo_template_has_single_paragraph() {
+        let note = memo_template("2026-09-30");
+        let (title, body) = split_note(&note, "未命名备忘");
+        let doc = Doc::from_store(&title, &body);
+        let n_para = doc
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Paragraph { .. }))
+            .count();
+        let n_items = doc
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Items { .. }))
+            .count();
+        let n_table = doc
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Table { .. }))
+            .count();
+        assert_eq!(n_para, 1, "应只有一段正文");
+        assert_eq!(n_items, 1, "空编号行应识别为事项");
+        assert_eq!(n_table, 1);
+        assert_eq!(doc.title, "工作备忘 2026-09-30");
+    }
+
+    #[test]
+    fn empty_ordered_items_survive_trim_end() {
+        assert_eq!(ordered_item("1."), Some((1, "")));
+        assert_eq!(ordered_item("1. "), Some((1, "")));
+        assert_eq!(ordered_item("2. 落实"), Some((2, "落实")));
+        assert_eq!(ordered_item("3.foo"), None);
+        assert_eq!(unordered_item("-"), Some(""));
+        assert_eq!(unordered_item("- "), Some(""));
+        assert_eq!(unordered_item("-x"), None);
+    }
 }

@@ -1,4 +1,4 @@
-//! Calendar tab: left navigator + wide central overview / task detail.
+﻿//! Calendar tab: left navigator + wide central overview / task detail.
 
 use chrono::{Datelike, Local, NaiveDate, TimeDelta};
 use eframe::egui::{self, Color32, Margin, RichText, Rounding, Sense, Stroke, Vec2};
@@ -218,12 +218,12 @@ fn person_name<'a>(persons: &'a [PersonView], id: &str) -> &'a str {
 
 fn status_fg(status: TaskStatus) -> Color32 {
     match status {
-        TaskStatus::NotStarted => theme::TEXT_MUTED,
-        TaskStatus::InProgress => theme::ACCENT,
-        TaskStatus::Paused => theme::WARN,
+        TaskStatus::NotStarted => theme::text_muted(),
+        TaskStatus::InProgress => theme::accent(),
+        TaskStatus::Paused => theme::warn(),
         TaskStatus::Blocked => Color32::from_rgb(0xC2, 0x41, 0x0C),
-        TaskStatus::Cancelled => theme::TEXT_MUTED,
-        TaskStatus::Done => theme::SUCCESS,
+        TaskStatus::Cancelled => theme::text_muted(),
+        TaskStatus::Done => theme::success(),
     }
 }
 
@@ -292,13 +292,13 @@ pub fn show_left(
     if cal.filter == CalFilter::Cycle && female_current {
         ui.add_space(8.0);
         ui.separator();
-        ui.label(RichText::new("设置周期").strong().size(13.0).color(theme::TEXT));
+        ui.label(RichText::new("设置周期").strong().size(13.0).color(theme::text()));
         ui.horizontal(|ui| {
             ui.label("上次开始");
             ui.add(
                 egui::TextEdit::singleline(&mut cal.cycle_last_start)
                     .desired_width(100.0)
-                    .hint_text("YYYY-MM-DD"),
+                    .hint_text(theme::hint("YYYY-MM-DD")),
             );
         });
         ui.horizontal(|ui| {
@@ -323,7 +323,7 @@ pub fn show_left(
             RichText::new("全部会议")
                 .strong()
                 .size(13.0)
-                .color(theme::TEXT),
+                .color(theme::text()),
         );
         let mut meetings: Vec<_> = tasks
             .iter()
@@ -360,7 +360,7 @@ pub fn show_left(
         RichText::new(format!("当日 · {}", cal.selected_day))
             .strong()
             .size(13.0)
-            .color(theme::TEXT),
+            .color(theme::text()),
     );
     let day_tasks: Vec<_> = cal_tasks
         .iter()
@@ -404,7 +404,7 @@ fn show_task_row(
             rect,
             Rounding::same(theme::ROUND_CTRL),
             fill,
-            Stroke::new(1.0, theme::BORDER),
+            Stroke::new(1.0, theme::border()),
         );
         let pad = 8.0;
         let kind_c = kind_color(t.kind);
@@ -434,7 +434,7 @@ fn show_task_row(
             egui::Align2::LEFT_TOP,
             format!("{} · {}", t.title, name),
             egui::FontId::proportional(13.0),
-            theme::TEXT,
+            theme::text(),
         );
     }
     if resp.clicked() {
@@ -484,7 +484,7 @@ fn show_month_nav(
         ui.label(
             RichText::new(format!("{}-{:02}", cal.year, cal.month))
                 .strong()
-                .color(theme::TEXT),
+                .color(theme::text()),
         );
         if ui.button("▶").clicked() {
             if cal.month == 12 {
@@ -532,9 +532,9 @@ fn show_month_nav(
                         RichText::new(name)
                             .small()
                             .color(if weekend {
-                                Color32::from_rgb(0xDC, 0x26, 0x26)
+                                theme::danger()
                             } else {
-                                theme::TEXT_MUTED
+                                theme::text_muted()
                             }),
                     );
                 },
@@ -558,17 +558,17 @@ fn show_month_nav(
                     ui.allocate_exact_size(Vec2::new(col, cell_h), Sense::click());
                 if ui.is_rect_visible(rect) {
                     let mut fill = if sel {
-                        theme::ACCENT_SOFT
+                        theme::accent_soft()
                     } else if info.kind == DayKind::Holiday {
-                        Color32::from_rgb(0xFE, 0xE2, 0xE2)
+                        theme::danger_soft()
                     } else if info.kind == DayKind::MakeupWork {
-                        Color32::from_rgb(0xDB, 0xEA, 0xFE)
+                        theme::accent_soft()
                     } else if info.kind == DayKind::Weekend {
                         Color32::from_rgb(0xFE, 0xF2, 0xF2)
                     } else if resp.hovered() {
-                        theme::PANEL
+                        theme::panel()
                     } else {
-                        theme::CARD
+                        theme::card()
                     };
                     if period && (filter == CalFilter::All || filter == CalFilter::Cycle) {
                         fill = if sel {
@@ -581,16 +581,16 @@ fn show_month_nav(
                         rect,
                         Rounding::same(4.0),
                         fill,
-                        Stroke::new(1.0, theme::BORDER),
+                        Stroke::new(1.0, theme::border()),
                     );
                     let day_color = if !in_month {
-                        theme::TEXT_MUTED
+                        theme::text_muted()
                     } else if info.is_rest() {
-                        Color32::from_rgb(0xDC, 0x26, 0x26)
+                        theme::danger()
                     } else if info.kind == DayKind::MakeupWork {
-                        theme::ACCENT
+                        theme::accent()
                     } else {
-                        theme::TEXT
+                        theme::text()
                     };
                     ui.painter().text(
                         egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
@@ -601,9 +601,9 @@ fn show_month_nav(
                     );
                     if let Some(badge) = info.badge() {
                         let badge_color = if info.kind == DayKind::MakeupWork {
-                            theme::ACCENT
+                            theme::accent()
                         } else {
-                            Color32::from_rgb(0xDC, 0x26, 0x26)
+                            theme::danger()
                         };
                         ui.painter().text(
                             egui::pos2(rect.right() - 3.0, rect.top() + 2.0),
@@ -671,7 +671,7 @@ fn show_week_nav(ui: &mut egui::Ui, cal: &mut CalUi) {
             (monday + days(6)).format("%m-%d")
         ))
         .strong()
-        .color(theme::TEXT),
+        .color(theme::text()),
     );
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
@@ -688,11 +688,11 @@ fn show_week_nav(ui: &mut egui::Ui, cal: &mut CalUi) {
                 format!("{wd}{}{mark}", d.day())
             };
             let color = if info.is_rest() {
-                Color32::from_rgb(0xDC, 0x26, 0x26)
+                theme::danger()
             } else if info.kind == DayKind::MakeupWork {
-                theme::ACCENT
+                theme::accent()
             } else {
-                theme::TEXT
+                theme::text()
             };
             if ui
                 .selectable_label(sel, RichText::new(label).size(12.0).color(color))
@@ -727,17 +727,17 @@ fn show_day_agenda(
         ui.heading(
             RichText::new(format!("{} 工作安排", cal.selected_day))
                 .size(20.0)
-                .color(theme::TEXT),
+                .color(theme::text()),
         );
         ui.label(
             RichText::new(day_info.describe())
                 .size(14.0)
                 .color(if day_info.is_rest() {
-                    Color32::from_rgb(0xDC, 0x26, 0x26)
+                    theme::danger()
                 } else if day_info.kind == DayKind::MakeupWork {
-                    theme::ACCENT
+                    theme::accent()
                 } else {
-                    theme::TEXT_MUTED
+                    theme::text_muted()
                 }),
         );
         if period {
@@ -756,7 +756,7 @@ fn show_day_agenda(
             ui.label(
                 RichText::new(format!("合计 {:.1} 小时", total))
                     .size(14.0)
-                    .color(theme::TEXT_MUTED),
+                    .color(theme::text_muted()),
             );
         });
     });
@@ -785,10 +785,10 @@ fn show_day_agenda(
                 let stroke = if sel {
                     Stroke::new(1.5, kind_color(t.kind))
                 } else {
-                    Stroke::new(1.0, theme::BORDER)
+                    Stroke::new(1.0, theme::border())
                 };
                 let resp = egui::Frame::none()
-                    .fill(theme::CARD)
+                    .fill(theme::card())
                     .stroke(stroke)
                     .rounding(Rounding::same(theme::ROUND_CARD))
                     .inner_margin(Margin::same(14.0))
@@ -815,10 +815,10 @@ fn show_day_agenda(
                             ui.label(
                                 RichText::new(format!("{:.1}h", t.hours))
                                     .size(13.0)
-                                    .color(theme::TEXT_MUTED),
+                                    .color(theme::text_muted()),
                             );
                             ui.label(
-                                RichText::new(name).size(13.0).color(theme::TEXT_MUTED),
+                                RichText::new(name).size(13.0).color(theme::text_muted()),
                             );
                             ui.label(
                                 RichText::new(t.status.label())
@@ -832,7 +832,7 @@ fn show_day_agenda(
                                     ui.label(
                                         RichText::new("查看详情 ›")
                                             .small()
-                                            .color(theme::ACCENT),
+                                            .color(theme::accent()),
                                     );
                                 },
                             );
@@ -842,7 +842,7 @@ fn show_day_agenda(
                             RichText::new(&t.title)
                                 .strong()
                                 .size(17.0)
-                                .color(theme::TEXT),
+                                .color(theme::text()),
                         );
                         ui.add_space(6.0);
                         if t.plan.trim().is_empty() {
@@ -851,7 +851,7 @@ fn show_day_agenda(
                             ui.label(
                                 RichText::new(t.plan.as_str())
                                     .size(14.5)
-                                    .color(theme::TEXT),
+                                    .color(theme::text()),
                             );
                         }
                     })
@@ -901,7 +901,7 @@ fn show_week(
             ))
             .strong()
             .size(16.0)
-            .color(theme::TEXT),
+            .color(theme::text()),
         );
         ui.label(theme::muted_label("点击色块打开任务详情").small());
     });
@@ -926,15 +926,15 @@ fn show_week(
             let fill = if period {
                 PERIOD_TINT
             } else if sel {
-                theme::ACCENT_SOFT
+                theme::accent_soft()
             } else if info.kind == DayKind::Holiday {
-                Color32::from_rgb(0xFE, 0xE2, 0xE2)
+                theme::danger_soft()
             } else if info.kind == DayKind::MakeupWork {
-                Color32::from_rgb(0xDB, 0xEA, 0xFE)
+                theme::accent_soft()
             } else if info.kind == DayKind::Weekend {
                 Color32::from_rgb(0xFE, 0xF2, 0xF2)
             } else {
-                theme::PANEL
+                theme::panel()
             };
             ui.painter().rect_filled(rect, Rounding::same(4.0), fill);
             let wd = ["一", "二", "三", "四", "五", "六", "日"][i as usize];
@@ -945,11 +945,11 @@ fn show_week(
                 format!("{} {}{}", wd, d.format("%m/%d"), badge)
             };
             let color = if info.is_rest() {
-                Color32::from_rgb(0xDC, 0x26, 0x26)
+                theme::danger()
             } else if info.kind == DayKind::MakeupWork {
-                theme::ACCENT
+                theme::accent()
             } else {
-                theme::TEXT
+                theme::text()
             };
             ui.painter().text(
                 rect.center(),
@@ -970,8 +970,8 @@ fn show_week(
     ui.painter().rect(
         body_rect,
         Rounding::same(4.0),
-        theme::CARD,
-        Stroke::new(1.0, theme::BORDER),
+        theme::card(),
+        Stroke::new(1.0, theme::border()),
     );
 
     // hour labels on left edge of first column when wide
@@ -983,14 +983,14 @@ fn show_week(
                 egui::Align2::LEFT_TOP,
                 format!("{h:02}:00"),
                 egui::FontId::proportional(10.0),
-                theme::TEXT_MUTED,
+                theme::text_muted(),
             );
             ui.painter().line_segment(
                 [
                     egui::pos2(body_rect.left(), y),
                     egui::pos2(body_rect.right(), y),
                 ],
-                Stroke::new(1.0, Color32::from_rgb(0xF1, 0xF5, 0xF9)),
+                Stroke::new(1.0, theme::c().list_hover),
             );
         }
     }
@@ -1005,7 +1005,7 @@ fn show_week(
         );
         ui.painter().line_segment(
             [col.left_top(), col.left_bottom()],
-            Stroke::new(1.0, theme::BORDER),
+            Stroke::new(1.0, theme::border()),
         );
 
         for t in tasks.iter().filter(|t| t.spans_date(&ymd)) {
@@ -1074,7 +1074,7 @@ fn show_gantt(
             RichText::new("甘特 · 人员 × 日")
                 .strong()
                 .size(16.0)
-                .color(theme::TEXT),
+                .color(theme::text()),
         );
         ui.label(theme::muted_label("条宽∝工时 · 点击打开详情").small());
     });
@@ -1095,7 +1095,7 @@ fn show_gantt(
                     ui.label(
                         RichText::new(format!("{}", d.format("%m/%d")))
                             .small()
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                     );
                 },
             );
@@ -1121,7 +1121,7 @@ fn show_gantt(
                                 RichText::new(&p.name)
                                     .strong()
                                     .size(if wide { 14.0 } else { 12.0 })
-                                    .color(theme::TEXT),
+                                    .color(theme::text()),
                             );
                         },
                     );
@@ -1139,8 +1139,8 @@ fn show_gantt(
                         ui.painter().rect(
                             rect,
                             Rounding::same(4.0),
-                            theme::CARD,
-                            Stroke::new(1.0, theme::BORDER),
+                            theme::card(),
+                            Stroke::new(1.0, theme::border()),
                         );
                         if day_h > 0.0 {
                             let bar_w =
@@ -1190,7 +1190,7 @@ fn show_gantt(
                         RichText::new(format!("{:.1}h", week_hours))
                             .strong()
                             .size(13.0)
-                            .color(theme::TEXT),
+                            .color(theme::text()),
                     );
                 });
                 ui.add_space(6.0);

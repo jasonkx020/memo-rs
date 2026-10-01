@@ -1,4 +1,4 @@
-//! 任务负责人等人名目录（无密码；身份由密钥对决定）。
+﻿//! 任务负责人等人名目录（无密码；身份由密钥对决定）。
 
 use eframe::egui::{self, RichText};
 use memo_core::person::Gender;
@@ -58,12 +58,12 @@ impl PeopleUi {
 
 fn gender_badge(ui: &mut egui::Ui, g: Gender) {
     let (label, color) = match g {
-        Gender::Male => ("男", theme::ACCENT),
+        Gender::Male => ("男", theme::accent()),
         Gender::Female => ("女", egui::Color32::from_rgb(0xDB, 0x27, 0x77)),
-        Gender::Unknown => ("?", theme::TEXT_MUTED),
+        Gender::Unknown => ("?", theme::text_muted()),
     };
     egui::Frame::none()
-        .fill(theme::PANEL)
+        .fill(theme::panel())
         .rounding(egui::Rounding::same(4.0))
         .inner_margin(egui::Margin::symmetric(6.0, 2.0))
         .show(ui, |ui| {
@@ -79,10 +79,9 @@ pub fn show_window(ctx: &egui::Context, ui_state: &mut PeopleUi, svc: &MemoServi
     let mut changed = false;
     let mut open = ui_state.show;
     let current = svc.current_person_id();
-    egui::Window::new("人员目录")
-        .collapsible(false)
-        .resizable(true)
-        .default_size([480.0, 460.0])
+    let modal = theme::begin_modal(ctx, "people_modal");
+    theme::modal_fixed(ctx, "人员目录", [480.0, 460.0])
+        .id(modal.window_id)
         .open(&mut open)
         .show(ctx, |ui| {
             ui.label(
@@ -94,7 +93,8 @@ pub fn show_window(ctx: &egui::Context, ui_state: &mut PeopleUi, svc: &MemoServi
             ui.add_space(8.0);
 
             let persons = svc.list_persons();
-            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+            let list_h = (ui.available_height() * 0.45).clamp(120.0, 280.0);
+            egui::ScrollArea::vertical().max_height(list_h).show(ui, |ui| {
                 if persons.is_empty() {
                     ui.label(theme::muted_label("暂无人员"));
                 }
@@ -111,7 +111,7 @@ pub fn show_window(ctx: &egui::Context, ui_state: &mut PeopleUi, svc: &MemoServi
                             "启用"
                         };
                         ui.label(
-                            RichText::new(format!("{}  ({})", p.name, st)).color(theme::TEXT),
+                            RichText::new(format!("{}  ({})", p.name, st)).color(theme::text()),
                         );
                         if !editing {
                             if ui.small_button("修改").clicked() {
@@ -146,7 +146,7 @@ pub fn show_window(ctx: &egui::Context, ui_state: &mut PeopleUi, svc: &MemoServi
                             ui.label(
                                 RichText::new("编辑中…")
                                     .small()
-                                    .color(theme::WARN),
+                                    .color(theme::warn()),
                             );
                         }
                     });
@@ -156,13 +156,13 @@ pub fn show_window(ctx: &egui::Context, ui_state: &mut PeopleUi, svc: &MemoServi
             if ui_state.edit_id.is_some() {
                 ui.add_space(10.0);
                 ui.separator();
-                ui.label(RichText::new("修改人员").strong().color(theme::TEXT));
+                ui.label(RichText::new("修改人员").strong().color(theme::text()));
                 ui.horizontal(|ui| {
                     ui.label("姓名");
                     ui.add(
                         egui::TextEdit::singleline(&mut ui_state.edit_name)
                             .desired_width(180.0)
-                            .hint_text("姓名"),
+                            .hint_text(theme::hint("姓名")),
                     );
                 });
                 ui.horizontal(|ui| {
@@ -201,13 +201,13 @@ pub fn show_window(ctx: &egui::Context, ui_state: &mut PeopleUi, svc: &MemoServi
 
             ui.add_space(10.0);
             ui.separator();
-            ui.label(RichText::new("新增人员").strong().color(theme::TEXT));
+            ui.label(RichText::new("新增人员").strong().color(theme::text()));
             ui.horizontal(|ui| {
                 ui.label("姓名");
                 ui.add(
                     egui::TextEdit::singleline(&mut ui_state.new_name)
                         .desired_width(180.0)
-                        .hint_text("姓名"),
+                        .hint_text(theme::hint("姓名")),
                 );
             });
             ui.horizontal(|ui| {
@@ -237,13 +237,15 @@ pub fn show_window(ctx: &egui::Context, ui_state: &mut PeopleUi, svc: &MemoServi
                 ui.label(
                     RichText::new(&ui_state.status)
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                 );
             }
         });
-    ui_state.show = open;
-    if !open {
+    if modal.end(ctx, open) {
+        ui_state.show = false;
         ui_state.cancel_edit();
+    } else {
+        ui_state.show = open;
     }
     changed
 }
