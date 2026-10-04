@@ -517,7 +517,13 @@ pub fn category_icon_color(cat: MemoCategory) -> Color32 {
 /// 左侧菜单图标语义色。
 pub fn nav_icon_color(item: NavItem) -> Color32 {
     match item {
-        NavItem::All => navy_mid(),
+        NavItem::All => {
+            if dark_icons() {
+                Color32::from_rgb(0x8E, 0xA4, 0xC8)
+            } else {
+                Color32::from_rgb(0x3D, 0x5A, 0x80)
+            }
+        }
         NavItem::DueToday => warn(),
         NavItem::Trash => text_muted(),
         other => other
@@ -533,39 +539,100 @@ pub fn icon_label_job(
     label: &str,
     icon_color: Color32,
     label_color: Color32,
-    size: f32,
+    icon_size: f32,
+    label_size: f32,
 ) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
-    let font = egui::FontId::proportional(size);
+    let icon_font = egui::FontId::proportional(icon_size);
+    let label_font = egui::FontId::proportional(label_size);
+    let row_h = icon_size.max(label_size);
     let mut job = LayoutJob::default();
-    job.append(
-        icon,
-        0.0,
-        TextFormat {
-            font_id: font.clone(),
-            color: icon_color,
-            ..Default::default()
-        },
-    );
-    job.append(
-        "  ",
-        0.0,
-        TextFormat {
-            font_id: font.clone(),
-            color: label_color,
-            ..Default::default()
-        },
-    );
-    job.append(
-        label,
-        0.0,
-        TextFormat {
-            font_id: font,
-            color: label_color,
-            ..Default::default()
-        },
-    );
+    job.first_row_min_height = row_h;
+    let icon_fmt = TextFormat {
+        font_id: icon_font,
+        color: icon_color,
+        valign: egui::Align::Center,
+        line_height: Some(row_h),
+        ..Default::default()
+    };
+    let label_fmt = TextFormat {
+        font_id: label_font,
+        color: label_color,
+        valign: egui::Align::Center,
+        line_height: Some(row_h),
+        ..Default::default()
+    };
+    job.append(icon, 0.0, icon_fmt);
+    job.append("  ", 0.0, label_fmt.clone());
+    job.append(label, 0.0, label_fmt);
     job
+}
+
+pub fn layout_galley(
+    ui: &egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font, color))
+}
+
+/// 按字形墨水包围盒对齐，避免 emoji 与汉字视觉中心错位。
+pub fn galley_pos_center(center: egui::Pos2, g: &egui::Galley) -> egui::Pos2 {
+    let m = g.mesh_bounds;
+    if m.width() > 0.5 && m.height() > 0.5 {
+        egui::pos2(center.x - m.center().x, center.y - m.center().y)
+    } else {
+        egui::pos2(center.x - g.size().x * 0.5, center.y - g.size().y * 0.5)
+    }
+}
+
+pub fn galley_pos_left_center(left_center: egui::Pos2, g: &egui::Galley) -> egui::Pos2 {
+    let m = g.mesh_bounds;
+    if m.height() > 0.5 {
+        egui::pos2(left_center.x - m.left(), left_center.y - m.center().y)
+    } else {
+        egui::pos2(left_center.x, left_center.y - g.size().y * 0.5)
+    }
+}
+
+/// 列表/回收站标题：图标与文字按墨水中心线对齐。
+pub fn icon_label_heading(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    icon_color: Color32,
+    label_color: Color32,
+    icon_size: f32,
+    label_size: f32,
+) {
+    let icon_g = layout_galley(
+        ui,
+        icon,
+        egui::FontId::proportional(icon_size),
+        icon_color,
+    );
+    let label_g = layout_galley(
+        ui,
+        label,
+        egui::FontId::proportional(label_size),
+        label_color,
+    );
+    let icon_slot = (icon_size * 1.35).max(icon_g.mesh_bounds.width());
+    let h = icon_size.max(label_size) * 1.2;
+    let w = icon_slot + 8.0 + label_g.size().x + 2.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
+    let cy = rect.center().y;
+    ui.painter().galley(
+        galley_pos_center(egui::pos2(rect.left() + icon_slot * 0.5, cy), &icon_g),
+        icon_g,
+        icon_color,
+    );
+    ui.painter().galley(
+        galley_pos_left_center(egui::pos2(rect.left() + icon_slot + 8.0, cy), &label_g),
+        label_g,
+        label_color,
+    );
 }
 pub fn shell_accent_soft() -> Color32 {
     c().shell_accent_soft

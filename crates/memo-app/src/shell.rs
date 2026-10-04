@@ -1084,6 +1084,7 @@ pub fn show(
                 .inner_margin(Margin::same(12.0)),
         )
         .show(ctx, |ui| {
+            ui.set_clip_rect(ui.max_rect());
             show_status_strip(
                 ui,
                 &last_sync_label,
@@ -1280,7 +1281,7 @@ fn nav_row(
     editing: &mut bool,
 ) {
     let sel = *current == item && !locked;
-    let height = 34.0;
+    let height = 40.0;
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), height),
         Sense::click(),
@@ -1347,25 +1348,34 @@ fn nav_row(
     let pad_x = 10.0;
     let icon = item.icon();
     let label = item.label();
-    let icon_font = egui::FontId::proportional(13.0);
-    let label_font = egui::FontId::proportional(13.5);
-    let icon_w = ui.fonts(|f| {
-        f.layout_no_wrap(icon.to_owned(), icon_font.clone(), icon_fg)
-            .size()
-            .x
-    });
-    ui.painter().text(
-        egui::pos2(rect.left() + pad_x, rect.center().y),
-        egui::Align2::LEFT_CENTER,
+    let icon_g = theme::layout_galley(
+        ui,
         icon,
-        icon_font,
+        egui::FontId::proportional(19.5),
         icon_fg,
     );
-    ui.painter().text(
-        egui::pos2(rect.left() + pad_x + icon_w + 6.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
+    let label_g = theme::layout_galley(
+        ui,
         label,
-        label_font,
+        egui::FontId::proportional(13.5),
+        label_fg,
+    );
+    let icon_slot = 28.0_f32.max(icon_g.mesh_bounds.width());
+    let cy = rect.center().y;
+    ui.painter().galley(
+        theme::galley_pos_center(
+            egui::pos2(rect.left() + pad_x + icon_slot * 0.5, cy),
+            &icon_g,
+        ),
+        icon_g,
+        icon_fg,
+    );
+    ui.painter().galley(
+        theme::galley_pos_left_center(
+            egui::pos2(rect.left() + pad_x + icon_slot + 8.0, cy),
+            &label_g,
+        ),
+        label_g,
         label_fg,
     );
 
@@ -1528,13 +1538,15 @@ fn show_trash(
     tx: &Sender<BgMsg>,
 ) {
     ui.horizontal(|ui| {
-        ui.label(theme::icon_label_job(
+        theme::icon_label_heading(
+            ui,
             NavItem::Trash.icon(),
             NavItem::Trash.label(),
             theme::nav_icon_color(NavItem::Trash),
             theme::text(),
+            30.0,
             20.0,
-        ));
+        );
         ui.label(
             RichText::new(format!("{} 条", trash.len()))
                 .size(13.0)
@@ -1677,23 +1689,34 @@ fn show_split(
     let avail = ui.available_width();
     // 必须在 horizontal 之前取高度：horizontal 内 available_height 不可靠
     let full_h = ui.available_height().max(120.0);
-    let list_w = (avail * 0.38).clamp(260.0, 400.0);
+    let gap = 8.0;
+    let min_detail = 200.0;
+    let mut list_w = (avail * 0.38).clamp(200.0, 400.0);
+    if list_w + min_detail + gap > avail {
+        list_w = (avail - min_detail - gap).max(160.0);
+    }
+    let detail_w = (avail - list_w - gap).max(160.0);
 
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
         ui.allocate_ui_with_layout(
             Vec2::new(list_w, full_h),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.set_min_height(full_h);
                 ui.set_max_height(full_h);
+                ui.set_max_width(list_w);
+                ui.set_clip_rect(ui.max_rect());
                 ui.horizontal(|ui| {
-                    ui.label(theme::icon_label_job(
+                    theme::icon_label_heading(
+                        ui,
                         nav.icon(),
                         nav.label(),
                         theme::nav_icon_color(nav),
                         theme::text(),
+                        24.0,
                         16.0,
-                    ));
+                    );
                     let list_n = filtered.iter().filter(|m| !is_private_hub(&m.id)).count();
                     ui.label(
                         RichText::new(if hub_memo_for(nav).is_some() {
@@ -1964,14 +1987,14 @@ fn show_split(
             },
         );
 
-        ui.separator();
-
         ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), full_h),
+            Vec2::new(detail_w, full_h),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.set_min_height(full_h);
                 ui.set_max_height(full_h);
+                ui.set_max_width(detail_w);
+                ui.set_clip_rect(ui.max_rect());
                 show_detail(
                     ui,
                     svc,

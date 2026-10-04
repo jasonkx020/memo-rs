@@ -267,9 +267,90 @@ fn field_label(ui: &mut egui::Ui, text: &str, required: bool) {
     });
 }
 
+fn show_category_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    cats: &[MemoCategory; 8],
+    selected_cat: MemoCategory,
+    stamp: &str,
+    state: &mut MemoFormState,
+) {
+    let popup_id = ui.make_persistent_id(("memo_cat_combo", id_salt));
+    let w = ui.available_width();
+    let h = 34.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fill = if resp.hovered() {
+        theme::c().list_hover
+    } else {
+        theme::card()
+    };
+    ui.painter().rect(
+        rect,
+        Rounding::same(8.0),
+        fill,
+        Stroke::new(1.0, theme::border()),
+    );
+
+    let pad = 10.0;
+    let icon_slot = 28.0;
+    let cy = rect.center().y;
+    let icon_g = theme::layout_galley(
+        ui,
+        category_icon(selected_cat),
+        egui::FontId::proportional(19.5),
+        theme::category_icon_color(selected_cat),
+    );
+    let label_g = theme::layout_galley(
+        ui,
+        selected_cat.label(),
+        egui::FontId::proportional(13.0),
+        theme::text(),
+    );
+    ui.painter().galley(
+        theme::galley_pos_center(
+            egui::pos2(rect.left() + pad + icon_slot * 0.5, cy),
+            &icon_g,
+        ),
+        icon_g,
+        theme::category_icon_color(selected_cat),
+    );
+    ui.painter().galley(
+        theme::galley_pos_left_center(
+            egui::pos2(rect.left() + pad + icon_slot + 8.0, cy),
+            &label_g,
+        ),
+        label_g,
+        theme::text(),
+    );
+    ui.painter().text(
+        egui::pos2(rect.right() - 14.0, cy),
+        egui::Align2::CENTER_CENTER,
+        "▾",
+        egui::FontId::proportional(11.0),
+        theme::text_muted(),
+    );
+
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+    egui::popup_below_widget(ui, popup_id, &resp, |ui| {
+        ui.set_min_width(w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for &cat in cats {
+            if category_option_row(ui, cat, selected_cat == cat).clicked() {
+                state.set_category(cat, stamp);
+                ui.memory_mut(|m| m.close_popup());
+            }
+        }
+    });
+}
+
 fn category_option_row(ui: &mut egui::Ui, cat: MemoCategory, selected: bool) -> egui::Response {
     let w = ui.available_width().max(200.0);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 44.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 50.0), Sense::click());
     let hovered = resp.hovered();
     if hovered || selected {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -289,26 +370,47 @@ fn category_option_row(ui: &mut egui::Ui, cat: MemoCategory, selected: bool) -> 
     } else {
         theme::text()
     };
-    let icon_pos = egui::pos2(rect.left() + 10.0, rect.center().y);
-    ui.painter().text(
-        icon_pos,
-        egui::Align2::LEFT_CENTER,
+    let icon_font = egui::FontId::proportional(24.0);
+    let title_font = egui::FontId::proportional(13.0);
+    let desc_font = egui::FontId::proportional(11.0);
+    let icon_g = theme::layout_galley(
+        ui,
         category_icon(cat),
-        egui::FontId::proportional(16.0),
+        icon_font,
         theme::category_icon_color(cat),
     );
-    ui.painter().text(
-        egui::pos2(rect.left() + 34.0, rect.center().y - 8.0),
-        egui::Align2::LEFT_CENTER,
-        cat.label(),
-        egui::FontId::proportional(13.0),
+    let title_g = theme::layout_galley(ui, cat.label(), title_font, fg);
+    let desc_g = theme::layout_galley(ui, category_desc(cat), desc_font, theme::text_muted());
+    let icon_slot = 32.0_f32.max(icon_g.mesh_bounds.width());
+    let title_h = title_g.mesh_bounds.height().max(title_g.size().y);
+    let desc_h = desc_g.mesh_bounds.height().max(desc_g.size().y);
+    let gap = 2.0;
+    let text_h = title_h + gap + desc_h;
+    let cy = rect.center().y;
+    let text_x = rect.left() + 10.0 + icon_slot + 8.0;
+    let text_top = cy - text_h * 0.5;
+    ui.painter().galley(
+        theme::galley_pos_center(
+            egui::pos2(rect.left() + 10.0 + icon_slot * 0.5, cy),
+            &icon_g,
+        ),
+        icon_g,
+        theme::category_icon_color(cat),
+    );
+    ui.painter().galley(
+        theme::galley_pos_left_center(
+            egui::pos2(text_x, text_top + title_h * 0.5),
+            &title_g,
+        ),
+        title_g,
         fg,
     );
-    ui.painter().text(
-        egui::pos2(rect.left() + 34.0, rect.center().y + 9.0),
-        egui::Align2::LEFT_CENTER,
-        category_desc(cat),
-        egui::FontId::proportional(11.0),
+    ui.painter().galley(
+        theme::galley_pos_left_center(
+            egui::pos2(text_x, text_top + title_h + gap + desc_h * 0.5),
+            &desc_g,
+        ),
+        desc_g,
         theme::text_muted(),
     );
     resp
@@ -373,26 +475,7 @@ pub fn show_fields(
     } else {
         state.category.canonical()
     };
-    egui::ComboBox::from_id_source(format!("{id_salt}_cat"))
-        .width(ui.available_width())
-        .selected_text(theme::icon_label_job(
-            category_icon(selected_cat),
-            selected_cat.label(),
-            theme::category_icon_color(selected_cat),
-            theme::text(),
-            13.0,
-        ))
-        .show_ui(ui, |ui| {
-            ui.set_min_width(ui.available_width().max(240.0));
-            ui.spacing_mut().item_spacing.y = 2.0;
-            for &cat in &cats {
-                let selected = selected_cat == cat;
-                if category_option_row(ui, cat, selected).clicked() {
-                    state.set_category(cat, &stamp);
-                    ui.close_menu();
-                }
-            }
-        });
+    show_category_combo(ui, id_salt, &cats, selected_cat, &stamp, state);
     ui.label(
         RichText::new(category_desc(selected_cat))
             .size(11.0)
@@ -522,32 +605,34 @@ pub fn show_fields(
         let tags = parse_tags(&state.tags);
         state.tags = format_tags(&tags);
     }
-    ui.add_space(3.0);
+    ui.add_space(2.0);
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+        ui.spacing_mut().button_padding = egui::vec2(6.0, 1.5);
         ui.label(
-            RichText::new("预设：")
-                .size(11.5)
+            RichText::new("预设")
+                .size(11.0)
                 .color(theme::text_muted()),
         );
         let cat_tags = preset_tags_for(state.category);
         for t in cat_tags.iter().chain(COMMON_TAGS.iter()) {
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(*t)
-                            .size(11.5)
-                            .color(theme::shell_accent()),
-                    )
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::NONE),
+            let chip = ui.add(
+                egui::Button::new(
+                    RichText::new(*t)
+                        .size(11.0)
+                        .color(theme::shell_accent()),
                 )
-                .clicked()
-            {
+                .fill(theme::shell_tag_bg())
+                .stroke(Stroke::NONE)
+                .rounding(Rounding::same(6.0))
+                .min_size(Vec2::ZERO),
+            );
+            if chip.clicked() {
                 append_tag(&mut state.tags, t);
             }
         }
     });
-    ui.add_space(8.0);
+    ui.add_space(6.0);
 
     if mode == FormMode::Edit {
         ui.checkbox(&mut state.done, "已完成");
