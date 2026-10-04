@@ -13,9 +13,12 @@ use crate::export::export_txt;
 use crate::hosted::{HostedBlob, HostedStore};
 use crate::identity_keys::{self, IdentityKeys};
 use crate::cycle::{CycleConfig, CycleStore};
+use crate::male_health::{MaleHealthConfig, MaleHealthStore};
 use crate::person::{Gender, Person, PersonStore, PersonView};
-use crate::store::{Broadcaster, ConflictNotice, MemoItem, MemoLifecycle, MemoStore, MemoVisibility};
-use crate::task::{TaskItem, TaskKind, TaskStatus, TaskStore, TaskView};
+use crate::store::{
+    Broadcaster, ConflictNotice, MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoStore,
+    MemoVisibility,
+};
 
 #[derive(Debug, Clone)]
 pub struct MemoView {
@@ -30,6 +33,13 @@ pub struct MemoView {
     pub modified_at: String,
     pub lifecycle: MemoLifecycle,
     pub deleted_at: String,
+    pub category: MemoCategory,
+    pub due_date: String,
+    pub remind_before_days: u32,
+    pub remind_seen_for: String,
+    pub done: bool,
+    pub tags: Vec<String>,
+    pub priority: MemoPriority,
 }
 
 /// 回收站宽限期（天）
@@ -68,8 +78,8 @@ pub struct MemoService {
     key: Zeroizing<Vec<u8>>,
     store: Arc<MemoStore>,
     person_store: Arc<PersonStore>,
-    task_store: Arc<TaskStore>,
     cycle_store: Arc<CycleStore>,
+    male_health_store: Arc<MaleHealthStore>,
     hosted: Arc<HostedStore>,
     audit: Arc<AuditLog>,
     session_fp: String,
@@ -84,8 +94,8 @@ impl MemoService {
         key: Zeroizing<Vec<u8>>,
         store: Arc<MemoStore>,
         person_store: Arc<PersonStore>,
-        task_store: Arc<TaskStore>,
         cycle_store: Arc<CycleStore>,
+        male_health_store: Arc<MaleHealthStore>,
         hosted: Arc<HostedStore>,
         audit: Arc<AuditLog>,
         session_fp: String,
@@ -96,8 +106,8 @@ impl MemoService {
             key,
             store,
             person_store,
-            task_store,
             cycle_store,
+            male_health_store,
             hosted,
             audit,
             session_fp,
@@ -113,10 +123,6 @@ impl MemoService {
 
     pub fn person_store(&self) -> Arc<PersonStore> {
         self.person_store.clone()
-    }
-
-    pub fn task_store(&self) -> Arc<TaskStore> {
-        self.task_store.clone()
     }
 
     pub fn hosted_store(&self) -> Arc<HostedStore> {
@@ -137,8 +143,7 @@ impl MemoService {
 
     pub fn set_broadcaster(&self, bc: Arc<dyn Broadcaster>) {
         self.store.set_broadcaster(bc.clone());
-        self.person_store.set_broadcaster(bc.clone());
-        self.task_store.set_broadcaster(bc);
+        self.person_store.set_broadcaster(bc);
     }
 
     pub fn subscribe(&self, f: Box<dyn Fn() + Send + Sync>) {
@@ -163,6 +168,24 @@ impl MemoService {
             .unwrap_or_default()
     }
 
+    /// 设置当前会话人员性别（男/女）；会先确保已有会话人员档。
+    pub fn set_current_person_gender(&self, gender: Gender) -> anyhow::Result<()> {
+        if matches!(gender, Gender::Unknown) {
+            anyhow::bail!("请选择性别");
+        }
+        self.ensure_session_person()?;
+        let id = self
+            .current_person_id()
+            .ok_or_else(|| anyhow::anyhow!("请先完成身份解锁"))?;
+        let name = self.person_name(&id);
+        let disabled = self
+            .person_store
+            .get(&id)
+            .map(|p| p.disabled)
+            .unwrap_or(false);
+        self.update_person(&id, &name, gender, disabled)
+    }
+
     pub fn set_current_person(&self, id: Option<String>) {
         *self.current_person_id.lock() = id;
     }
@@ -177,16 +200,38 @@ impl MemoService {
         content: &str,
         visibility: MemoVisibility,
     ) -> anyhow::Result<String> {
-        self.add_with_lifecycle(title, content, visibility, MemoLifecycle::Permanent)
+        self.add_full(
+            title,
+            content,
+            visibility,
+            MemoLifecycle::Permanent,
+            MemoCategory::General,
+            "",
+            &[],
+            MemoPriority::Normal,
+            0,
+        )
     }
 
-    pub fn add_with_lifecycle(
+    pub fn add_full(
         &self,
         title: &str,
         content: &str,
         visibility: MemoVisibility,
         lifecycle: MemoLifecycle,
+        category: MemoCategory,
+        due_date: &str,
+        tags: &[String],
+        priority: MemoPriority,
+        remind_before_days: u32,
     ) -> anyhow::Result<String> {
+        let visibility = if category.is_gender_private() {
+            MemoVisibility::Private
+        } else {
+            visibility
+        };
+        let _ = lifecycle;
+        let lifecycle = MemoLifecycle::Permanent;
         let ct = crypto::encrypt_string(&self.key, content)?;
         let id = Uuid::new_v4().to_string().replace('-', "");
         let (aid, aname) = self.current_actor();
@@ -199,6 +244,13 @@ impl MemoService {
             visibility,
             &self.session_fp,
             lifecycle,
+            category,
+            due_date,
+            false,
+            tags,
+            priority,
+            remind_before_days,
+            "",
         )?;
         if visibility == MemoVisibility::Private {
             self.push_private_backup(&item)?;
@@ -216,29 +268,51 @@ impl MemoService {
                     || it.owner_fp.is_empty()
                     || it.owner_fp == self.session_fp
             })
-            .map(|it| {
-                let plain = crypto::decrypt_string(&self.key, &it.content).unwrap_or_else(|_| {
-                    if it.visibility == MemoVisibility::Public {
-                        it.content.clone()
-                    } else {
-                        "[解密失败]".into()
-                    }
-                });
-                MemoView {
-                    id: it.id,
-                    title: it.title,
-                    content: plain,
-                    deleted: it.deleted,
-                    version: it.version,
-                    node_id: it.node_id,
-                    visibility: it.visibility,
-                    owner_fp: it.owner_fp,
-                    modified_at: it.modified_at,
-                    lifecycle: it.lifecycle,
-                    deleted_at: it.deleted_at,
-                }
-            })
+            .map(|it| self.to_view(it))
             .collect()
+    }
+
+    pub fn list_trash(&self) -> Vec<MemoView> {
+        self.store
+            .get_deleted()
+            .into_iter()
+            .filter(|it| {
+                it.visibility == MemoVisibility::Public
+                    || it.owner_fp.is_empty()
+                    || it.owner_fp == self.session_fp
+            })
+            .map(|it| self.to_view(it))
+            .collect()
+    }
+
+    fn to_view(&self, it: MemoItem) -> MemoView {
+        let plain = crypto::decrypt_string(&self.key, &it.content).unwrap_or_else(|_| {
+            if it.visibility == MemoVisibility::Public {
+                it.content.clone()
+            } else {
+                "[解密失败]".into()
+            }
+        });
+        MemoView {
+            id: it.id,
+            title: it.title,
+            content: plain,
+            deleted: it.deleted,
+            version: it.version,
+            node_id: it.node_id,
+            visibility: it.visibility,
+            owner_fp: it.owner_fp,
+            modified_at: it.modified_at,
+            lifecycle: it.lifecycle.normalize(),
+            deleted_at: it.deleted_at,
+            category: it.category,
+            due_date: it.due_date,
+            remind_before_days: it.remind_before_days,
+            remind_seen_for: it.remind_seen_for,
+            done: it.done,
+            tags: it.tags,
+            priority: it.priority,
+        }
     }
 
     pub fn edit(&self, id: &str, title: &str, content: &str) -> anyhow::Result<()> {
@@ -246,16 +320,36 @@ impl MemoService {
             .store
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
-        self.edit_with_lifecycle(id, title, content, prev.visibility, prev.lifecycle)
+        self.edit_full(
+            id,
+            title,
+            content,
+            prev.visibility,
+            MemoLifecycle::Permanent,
+            prev.category,
+            &prev.due_date,
+            prev.done,
+            &prev.tags,
+            prev.priority,
+            prev.remind_before_days,
+            &prev.remind_seen_for,
+        )
     }
 
-    pub fn edit_with_lifecycle(
+    pub fn edit_full(
         &self,
         id: &str,
         title: &str,
         content: &str,
         visibility: MemoVisibility,
         lifecycle: MemoLifecycle,
+        category: MemoCategory,
+        due_date: &str,
+        done: bool,
+        tags: &[String],
+        priority: MemoPriority,
+        remind_before_days: u32,
+        remind_seen_for: &str,
     ) -> anyhow::Result<()> {
         let prev = self
             .store
@@ -264,7 +358,13 @@ impl MemoService {
         if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
             anyhow::bail!("无权编辑他人私密备忘");
         }
-        // 公开备忘改为私密时，归属本身份
+        let visibility = if category.is_gender_private() {
+            MemoVisibility::Private
+        } else {
+            visibility
+        };
+        let _ = lifecycle;
+        let lifecycle = MemoLifecycle::Permanent;
         let owner_fp = if visibility == MemoVisibility::Private {
             if prev.owner_fp.is_empty() {
                 self.session_fp.as_str()
@@ -285,12 +385,82 @@ impl MemoService {
             visibility,
             owner_fp,
             lifecycle,
+            category,
+            due_date,
+            done,
+            tags,
+            priority,
+            remind_before_days,
+            remind_seen_for,
         )?;
         if item.visibility == MemoVisibility::Private {
             self.push_private_backup(&item)?;
         }
         self.fire();
         Ok(())
+    }
+
+    /// 标记某条备忘的到期提醒已弹出（防重复）。
+    pub fn ack_remind(&self, id: &str) -> anyhow::Result<()> {
+        let prev = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        if prev.due_date.trim().is_empty() {
+            return Ok(());
+        }
+        if prev.remind_seen_for == prev.due_date {
+            return Ok(());
+        }
+        let plain = crypto::decrypt_string(&self.key, &prev.content).unwrap_or_else(|_| {
+            if prev.visibility == MemoVisibility::Public {
+                prev.content.clone()
+            } else {
+                String::new()
+            }
+        });
+        self.edit_full(
+            id,
+            &prev.title,
+            &plain,
+            prev.visibility,
+            MemoLifecycle::Permanent,
+            prev.category,
+            &prev.due_date,
+            prev.done,
+            &prev.tags,
+            prev.priority,
+            prev.remind_before_days,
+            &prev.due_date,
+        )
+    }
+
+    pub fn set_done(&self, id: &str, done: bool) -> anyhow::Result<()> {
+        let prev = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        let plain = crypto::decrypt_string(&self.key, &prev.content).unwrap_or_else(|_| {
+            if prev.visibility == MemoVisibility::Public {
+                prev.content.clone()
+            } else {
+                String::new()
+            }
+        });
+        self.edit_full(
+            id,
+            &prev.title,
+            &plain,
+            prev.visibility,
+            MemoLifecycle::Permanent,
+            prev.category,
+            &prev.due_date,
+            done,
+            &prev.tags,
+            prev.priority,
+            prev.remind_before_days,
+            &prev.remind_seen_for,
+        )
     }
 
     pub fn upsert_imported(&self, view: &MemoView) -> anyhow::Result<()> {
@@ -309,7 +479,14 @@ impl MemoService {
             &aname,
             view.visibility,
             owner,
-            view.lifecycle.clone(),
+            MemoLifecycle::Permanent,
+            view.category,
+            &view.due_date,
+            view.done,
+            &view.tags,
+            view.priority,
+            view.remind_before_days,
+            &view.remind_seen_for,
         )?;
         if item.visibility == MemoVisibility::Private {
             self.push_private_backup(&item)?;
@@ -340,7 +517,7 @@ impl MemoService {
             backed_up_at: String::new(),
             updated_at: chrono::Local::now().to_rfc3339(),
             source_node: self.cfg.node_id.clone(),
-            lifecycle: item.lifecycle.clone(),
+            lifecycle: MemoLifecycle::Permanent,
             deleted: item.deleted,
             deleted_at: item.deleted_at.clone(),
         };
@@ -398,7 +575,7 @@ impl MemoService {
                 } else {
                     blob.content_modified_at.clone()
                 },
-                lifecycle: blob.lifecycle.clone(),
+                lifecycle: MemoLifecycle::Permanent,
                 deleted_at: if blob.deleted {
                     if blob.deleted_at.is_empty() {
                         chrono::Local::now().to_rfc3339()
@@ -408,6 +585,13 @@ impl MemoService {
                 } else {
                     String::new()
                 },
+                category: MemoCategory::General,
+                due_date: String::new(),
+                remind_before_days: 0,
+                remind_seen_for: String::new(),
+                done: false,
+                tags: vec![],
+                priority: MemoPriority::Normal,
             };
             self.store.force_put_restored(item)?;
             n += 1;
@@ -541,37 +725,6 @@ impl MemoService {
         Ok(())
     }
 
-    /// 回收站列表（仍可恢复的已删项）
-    pub fn list_trash(&self) -> Vec<MemoView> {
-        self.store
-            .get_deleted()
-            .into_iter()
-            .filter(|it| {
-                it.visibility == MemoVisibility::Public
-                    || it.owner_fp.is_empty()
-                    || it.owner_fp == self.session_fp
-            })
-            .map(|it| {
-                let plain = crypto::decrypt_string(&self.key, &it.content).unwrap_or_else(|_| {
-                    "[解密失败]".into()
-                });
-                MemoView {
-                    id: it.id,
-                    title: it.title,
-                    content: plain,
-                    deleted: it.deleted,
-                    version: it.version,
-                    node_id: it.node_id,
-                    visibility: it.visibility,
-                    owner_fp: it.owner_fp,
-                    modified_at: it.modified_at,
-                    lifecycle: it.lifecycle,
-                    deleted_at: it.deleted_at,
-                }
-            })
-            .collect()
-    }
-
     /// 扫描超期回收站项并彻底清除
     pub fn purge_expired_trash(&self) -> anyhow::Result<usize> {
         let retention = chrono::Duration::try_days(TRASH_RETENTION_DAYS).unwrap_or_default();
@@ -618,7 +771,6 @@ impl MemoService {
             password,
             &self.list(),
             &self.list_persons(),
-            &self.list_tasks(),
         )
     }
 
@@ -644,10 +796,6 @@ impl MemoService {
             );
             n += 1;
         }
-        for t in &bundle.tasks {
-            self.upsert_task(t)?;
-            n += 1;
-        }
         self.fire();
         Ok(n)
     }
@@ -655,7 +803,6 @@ impl MemoService {
     pub fn take_conflicts(&self) -> Vec<ConflictNotice> {
         let mut out = self.store.take_conflicts();
         out.extend(self.person_store.take_conflicts());
-        out.extend(self.task_store.take_conflicts());
         out
     }
 
@@ -712,7 +859,6 @@ impl MemoService {
     ) -> anyhow::Result<HistorySnapshot> {
         match entity {
             "memo" => self.snapshot_from_memo(v),
-            "task" => self.snapshot_from_task(v),
             "person" => self.snapshot_from_person(v),
             _ => anyhow::bail!("未知实体类型: {entity}"),
         }
@@ -726,40 +872,6 @@ impl MemoService {
             crypto::decrypt_string(&self.key, &item.content)
                 .unwrap_or_else(|_| "[无法解密]".into())
         };
-        Ok(HistorySnapshot {
-            title: item.title,
-            content,
-            version: item.version,
-            node_id: item.node_id,
-            deleted: item.deleted,
-        })
-    }
-
-    fn snapshot_from_task(&self, v: &serde_json::Value) -> anyhow::Result<HistorySnapshot> {
-        let item: TaskItem = serde_json::from_value(v.clone())?;
-        let plan = if item.plan.is_empty() {
-            String::new()
-        } else {
-            crypto::decrypt_string(&self.key, &item.plan)
-                .unwrap_or_else(|_| "[无法解密]".into())
-        };
-        let assignee = if item.assignee_id.is_empty() {
-            "未指定".to_string()
-        } else {
-            self.person_name(&item.assignee_id)
-        };
-        let (end_d, end_h) = item.resolved_end();
-        let content = format!(
-            "开始: {} {:.1} 时\n结束: {} {:.1} 时\n工时: {:.1}\n负责人: {}\n状态: {}\n计划:\n{}",
-            item.date,
-            item.start_hour,
-            end_d,
-            end_h,
-            item.hours,
-            assignee,
-            item.status.label(),
-            plan
-        );
         Ok(HistorySnapshot {
             title: item.title,
             content,
@@ -981,229 +1093,13 @@ impl MemoService {
         Ok(ok)
     }
 
-    fn decrypt_task(&self, it: TaskItem) -> TaskView {
-        let plan = if it.plan.is_empty() {
-            String::new()
-        } else {
-            crypto::decrypt_string(&self.key, &it.plan)
-                .unwrap_or_else(|_| "[解密失败]".into())
-        };
-        let (end_date, end_hour) = it.resolved_end();
-        TaskView {
-            id: it.id,
-            title: it.title,
-            plan,
-            date: it.date,
-            start_hour: it.start_hour,
-            hours: it.hours,
-            end_date,
-            end_hour,
-            assignee_id: it.assignee_id,
-            status: it.status,
-            kind: it.kind,
-            on_calendar: it.on_calendar,
-            remind: it.remind,
-            deleted: it.deleted,
-            version: it.version,
-            node_id: it.node_id,
-        }
-    }
-
-    pub fn list_tasks(&self) -> Vec<TaskView> {
-        self.task_store
-            .get_visible()
-            .into_iter()
-            .map(|it| self.decrypt_task(it))
-            .collect()
-    }
-
-    pub fn list_tasks_on(&self, date: &str) -> Vec<TaskView> {
-        let mut v: Vec<_> = self
-            .list_tasks()
-            .into_iter()
-            .filter(|t| t.spans_date(date))
-            .collect();
-        v.sort_by(|a, b| {
-            a.date
-                .cmp(&b.date)
-                .then_with(|| {
-                    a.start_hour
-                        .partial_cmp(&b.start_hour)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| a.title.cmp(&b.title))
-        });
-        v
-    }
-
-    pub fn list_tasks_in_range(&self, start_date: &str, end_date: &str) -> Vec<TaskView> {
-        let mut v: Vec<_> = self
-            .list_tasks()
-            .into_iter()
-            .filter(|t| t.date.as_str() <= end_date && t.end_date.as_str() >= start_date)
-            .collect();
-        v.sort_by(|a, b| {
-            a.date
-                .cmp(&b.date)
-                .then_with(|| {
-                    a.start_hour
-                        .partial_cmp(&b.start_hour)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| a.title.cmp(&b.title))
-        });
-        v
-    }
-
-    pub fn get_task(&self, id: &str) -> Option<TaskView> {
-        self.task_store.get(id).map(|it| self.decrypt_task(it))
-    }
-
-    pub fn add_task(
-        &self,
-        title: &str,
-        plan: &str,
-        date: &str,
-        start_hour: f32,
-        end_date: &str,
-        end_hour: f32,
-        assignee_id: &str,
-        status: TaskStatus,
-        kind: TaskKind,
-        on_calendar: bool,
-        remind: bool,
-    ) -> anyhow::Result<String> {
-        if title.trim().is_empty() {
-            anyhow::bail!("任务标题不能为空");
-        }
-        if date.len() != 10 || end_date.len() != 10 {
-            anyhow::bail!("日期格式应为 YYYY-MM-DD");
-        }
-        let ct = crypto::encrypt_string(&self.key, plan)?;
-        let id = Uuid::new_v4().to_string().replace('-', "");
-        let (aid, aname) = self.current_actor();
-        self.task_store.put(
-            &id,
-            title.trim(),
-            &ct,
-            date,
-            start_hour,
-            end_date,
-            end_hour,
-            assignee_id,
-            status,
-            kind,
-            on_calendar,
-            remind,
-            &aid,
-            &aname,
-        )?;
-        self.fire();
-        Ok(id)
-    }
-
-    pub fn update_task(
-        &self,
-        id: &str,
-        title: &str,
-        plan: &str,
-        date: &str,
-        start_hour: f32,
-        end_date: &str,
-        end_hour: f32,
-        assignee_id: &str,
-        status: TaskStatus,
-        kind: TaskKind,
-        on_calendar: bool,
-        remind: bool,
-    ) -> anyhow::Result<()> {
-        if self.task_store.get(id).is_none() {
-            anyhow::bail!("任务不存在");
-        }
-        if title.trim().is_empty() {
-            anyhow::bail!("任务标题不能为空");
-        }
-        if date.len() != 10 || end_date.len() != 10 {
-            anyhow::bail!("日期格式应为 YYYY-MM-DD");
-        }
-        let ct = crypto::encrypt_string(&self.key, plan)?;
-        let (aid, aname) = self.current_actor();
-        self.task_store.put(
-            id,
-            title.trim(),
-            &ct,
-            date,
-            start_hour,
-            end_date,
-            end_hour,
-            assignee_id,
-            status,
-            kind,
-            on_calendar,
-            remind,
-            &aid,
-            &aname,
-        )?;
-        self.fire();
-        Ok(())
-    }
-
-    pub fn upsert_task(&self, view: &TaskView) -> anyhow::Result<()> {
-        let ct = crypto::encrypt_string(&self.key, &view.plan)?;
-        let (aid, aname) = self.current_actor();
-        self.task_store.put(
-            &view.id,
-            &view.title,
-            &ct,
-            &view.date,
-            view.start_hour,
-            &view.end_date,
-            view.end_hour,
-            &view.assignee_id,
-            view.status,
-            view.kind,
-            view.on_calendar,
-            view.remind,
-            &aid,
-            &aname,
-        )?;
-        Ok(())
-    }
-
-    /// 今日需提醒的会议/报送（remind && on_calendar，且日期覆盖今天）。
-    pub fn today_reminders(&self) -> Vec<TaskView> {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let mut v: Vec<_> = self
-            .list_tasks()
-            .into_iter()
-            .filter(|t| {
-                t.remind
-                    && t.on_calendar
-                    && !t.status.is_closed()
-                    && matches!(t.kind, TaskKind::Meeting | TaskKind::Report)
-                    && t.spans_date(&today)
-            })
-            .collect();
-        v.sort_by(|a, b| {
-            a.start_hour
-                .partial_cmp(&b.start_hour)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.title.cmp(&b.title))
-        });
-        v
-    }
-
     pub fn get_cycle(&self, person_id: &str) -> Option<CycleConfig> {
         self.cycle_store.get(person_id)
     }
 
     pub fn set_cycle(&self, person_id: &str, cfg: CycleConfig) -> anyhow::Result<()> {
-        let person = self
-            .person_store
-            .get(person_id)
-            .ok_or_else(|| anyhow::anyhow!("人员不存在"))?;
-        if !matches!(person.gender, Gender::Female) {
-            anyhow::bail!("仅女性人员可设置生理期");
+        if self.person_store.get(person_id).is_none() {
+            anyhow::bail!("人员不存在");
         }
         self.cycle_store.set(person_id, cfg)?;
         self.fire();
@@ -1212,31 +1108,31 @@ impl MemoService {
 
     pub fn current_cycle(&self) -> Option<CycleConfig> {
         let id = self.current_person_id()?;
-        if !matches!(self.current_person_gender(), Gender::Female) {
-            return None;
-        }
         self.cycle_store.get(&id)
     }
 
     pub fn is_period_day(&self, ymd: &str) -> bool {
         self.current_cycle()
-            .map(|c| c.is_period_day(ymd))
+            .map(|c| c.is_predicted_period_day(ymd))
             .unwrap_or(false)
     }
 
-    pub fn delete_task(&self, id: &str, _password: &str) -> anyhow::Result<()> {
-        let (aid, aname) = self.current_actor();
-        self.task_store.delete(id, &aid, &aname)?;
+    pub fn get_male_health(&self, person_id: &str) -> Option<MaleHealthConfig> {
+        self.male_health_store.get(person_id)
+    }
+
+    pub fn set_male_health(&self, person_id: &str, cfg: MaleHealthConfig) -> anyhow::Result<()> {
+        if self.person_store.get(person_id).is_none() {
+            anyhow::bail!("人员不存在");
+        }
+        self.male_health_store.set(person_id, cfg)?;
         self.fire();
         Ok(())
     }
 
-    pub fn merge_task(&self, remote: TaskItem, source: &str) -> anyhow::Result<bool> {
-        let ok = self.task_store.merge(remote, source)?;
-        if ok {
-            self.fire();
-        }
-        Ok(ok)
+    pub fn current_male_health(&self) -> Option<MaleHealthConfig> {
+        let id = self.current_person_id()?;
+        self.male_health_store.get(&id)
     }
 
     /// 公开备忘同步用：活数据带明文；已删则发 tombstone（清空 content 减流量）。
@@ -1309,13 +1205,8 @@ pub fn unlock_with_identity(
         cfg.argon2.clone(),
         audit.clone(),
     )?);
-    let task_store = Arc::new(TaskStore::open(
-        cfg.node_id.clone(),
-        &vault,
-        &key,
-        audit.clone(),
-    )?);
     let cycle_store = Arc::new(CycleStore::open(&vault, &key)?);
+    let male_health_store = Arc::new(MaleHealthStore::open(&vault, &key)?);
     let hosted = Arc::new(HostedStore::open(&vault)?);
 
     let svc = MemoService::new(
@@ -1323,8 +1214,8 @@ pub fn unlock_with_identity(
         key,
         store,
         person_store,
-        task_store,
         cycle_store,
+        male_health_store,
         hosted,
         audit.clone(),
         identity.fingerprint.clone(),

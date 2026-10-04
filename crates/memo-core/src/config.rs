@@ -40,7 +40,7 @@ fn default_node_role() -> NodeRole {
 }
 
 /// 节点角色：主机广播并受理登记；从机只收听并连主机。主机同时具备向其他主机备份/同步的出站能力。
-/// 外观主题偏好（对齐 Android Studio：浅色 / 深色 / 跟随系统）。
+/// 外观主题偏好：浅色 / 深色 / 跟随系统 / 柔美（女性向舒心配色）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemePreference {
@@ -48,6 +48,8 @@ pub enum ThemePreference {
     System,
     Light,
     Dark,
+    /// 柔美：浅粉雾面、玫瑰强调色，长时间使用更柔和
+    Blush,
 }
 
 impl ThemePreference {
@@ -56,6 +58,7 @@ impl ThemePreference {
             ThemePreference::System => "跟随系统",
             ThemePreference::Light => "浅色",
             ThemePreference::Dark => "深色",
+            ThemePreference::Blush => "柔美",
         }
     }
 }

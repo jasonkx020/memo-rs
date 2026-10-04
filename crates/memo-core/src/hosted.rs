@@ -265,33 +265,17 @@ impl HostedStore {
         Ok(removed)
     }
 
-    /// 删除已过期（非永久且到期）的托管备份；返回删除条数。
-    pub fn purge_expired(&self) -> anyhow::Result<usize> {
-        let mut idx = self.index.write();
-        let before = idx.blobs.len();
-        idx.blobs.retain(|b| !b.lifecycle.is_expired());
-        let n = before - idx.blobs.len();
-        if n > 0 {
-            drop(idx);
-            self.persist()?;
-        }
-        Ok(n)
-    }
-
-    /// 在仍不足时，按 backed_up_at 最旧优先删除已过期；若无过期可删，再删非永久中最旧的。
+    /// 按 backed_up_at 最旧优先删除托管备份以腾挪空间（最多一批 8 条）。
     pub fn purge_for_space(&self, need_bytes_hint: u64) -> anyhow::Result<usize> {
         let _ = need_bytes_hint;
-        let mut n = self.purge_expired()?;
-        if n > 0 {
-            return Ok(n);
-        }
-        // 无过期项：删除最旧的非永久备份（最多一批 8 条）以腾挪
         let mut idx = self.index.write();
+        if idx.blobs.is_empty() {
+            return Ok(0);
+        }
         let mut candidates: Vec<(usize, String)> = idx
             .blobs
             .iter()
             .enumerate()
-            .filter(|(_, b)| !b.lifecycle.is_permanent())
             .map(|(i, b)| {
                 let key = if b.backed_up_at.is_empty() {
                     b.updated_at.clone()
@@ -301,13 +285,12 @@ impl HostedStore {
                 (i, key)
             })
             .collect();
-        if candidates.is_empty() {
-            return Ok(0);
-        }
         candidates.sort_by(|a, b| a.1.cmp(&b.1));
         let remove_n = candidates.len().min(8);
-        let mut remove_idx: Vec<usize> = candidates.into_iter().take(remove_n).map(|(i, _)| i).collect();
+        let mut remove_idx: Vec<usize> =
+            candidates.into_iter().take(remove_n).map(|(i, _)| i).collect();
         remove_idx.sort_unstable_by(|a, b| b.cmp(a));
+        let mut n = 0usize;
         for i in remove_idx {
             idx.blobs.remove(i);
             n += 1;

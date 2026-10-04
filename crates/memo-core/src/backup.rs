@@ -8,11 +8,6 @@ use crate::config::{Argon2Params, Config};
 use crate::crypto::{self, derive_key, resolve_salt};
 use crate::person::PersonView;
 use crate::service::MemoView;
-use crate::task::{end_from_duration, TaskKind, TaskStatus, TaskView};
-
-fn default_true() -> bool {
-    true
-}
 
 const FORMAT: &str = "memo-bak-v1";
 
@@ -32,8 +27,9 @@ struct BackupPayload {
     memos: Vec<BackupMemo>,
     #[serde(default)]
     persons: Vec<BackupPerson>,
+    /// 旧版备份可能含 tasks；导入时忽略
     #[serde(default)]
-    tasks: Vec<BackupTask>,
+    tasks: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,55 +55,23 @@ struct BackupPerson {
     gender: crate::person::Gender,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct BackupTask {
-    id: String,
-    title: String,
-    plan: String,
-    date: String,
-    #[serde(default = "default_start")]
-    start_hour: f32,
-    hours: f32,
-    #[serde(default)]
-    end_date: String,
-    #[serde(default)]
-    end_hour: Option<f32>,
-    assignee_id: String,
-    #[serde(default)]
-    status: TaskStatus,
-    #[serde(default)]
-    kind: TaskKind,
-    #[serde(default = "default_true")]
-    on_calendar: bool,
-    #[serde(default)]
-    remind: bool,
-    version: u64,
-    node_id: String,
-}
-
-fn default_start() -> f32 {
-    9.0
-}
-
 pub struct BackupBundle {
     pub memos: Vec<MemoView>,
     pub persons: Vec<PersonView>,
-    pub tasks: Vec<TaskView>,
 }
 
-/// 用给定密码加密导出全部可见备忘（及人员元数据、任务）。
+/// 用给定密码加密导出全部可见备忘（及人员元数据）。
 pub fn export_encrypted(
     path: &Path,
     cfg: &Config,
     password: &str,
     items: &[MemoView],
     persons: &[PersonView],
-    tasks: &[TaskView],
 ) -> anyhow::Result<()> {
     if password.is_empty() {
         anyhow::bail!("备份密码不能为空");
     }
-    if items.is_empty() && persons.is_empty() && tasks.is_empty() {
+    if items.is_empty() && persons.is_empty() {
         anyhow::bail!("没有可备份的数据");
     }
     if let Some(parent) = path.parent() {
@@ -142,26 +106,7 @@ pub fn export_encrypted(
                 gender: p.gender,
             })
             .collect(),
-        tasks: tasks
-            .iter()
-            .map(|t| BackupTask {
-                id: t.id.clone(),
-                title: t.title.clone(),
-                plan: t.plan.clone(),
-                date: t.date.clone(),
-                start_hour: t.start_hour,
-                hours: t.hours,
-                end_date: t.end_date.clone(),
-                end_hour: Some(t.end_hour),
-                assignee_id: t.assignee_id.clone(),
-                status: t.status,
-                kind: t.kind,
-                on_calendar: t.on_calendar,
-                remind: t.remind,
-                version: t.version,
-                node_id: t.node_id.clone(),
-            })
-            .collect(),
+        tasks: Vec::new(),
     };
     let plain = serde_json::to_string(&payload)?;
     let ciphertext = crypto::encrypt_string(&key, &plain)?;
@@ -193,6 +138,7 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
     let plain = crypto::decrypt_string(&key, &file.ciphertext)
         .map_err(|_| anyhow::anyhow!("备份密码错误或文件损坏"))?;
     let payload: BackupPayload = serde_json::from_str(&plain)?;
+    let _ = payload.tasks; // 忽略旧版任务
     Ok(BackupBundle {
         memos: payload
             .memos
@@ -209,6 +155,13 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 modified_at: String::new(),
                 lifecycle: crate::store::MemoLifecycle::Permanent,
                 deleted_at: String::new(),
+                category: crate::store::MemoCategory::General,
+                due_date: String::new(),
+                remind_before_days: 0,
+                remind_seen_for: String::new(),
+                done: false,
+                tags: vec![],
+                priority: crate::store::MemoPriority::Normal,
             })
             .collect(),
         persons: payload
@@ -221,39 +174,6 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 version: p.version,
                 node_id: p.node_id,
                 gender: p.gender,
-            })
-            .collect(),
-        tasks: payload
-            .tasks
-            .into_iter()
-            .map(|t| {
-                let (end_date, end_hour) = if !t.end_date.is_empty() {
-                    if let Some(h) = t.end_hour {
-                        (t.end_date, h)
-                    } else {
-                        end_from_duration(&t.date, t.start_hour, t.hours)
-                    }
-                } else {
-                    end_from_duration(&t.date, t.start_hour, t.hours)
-                };
-                TaskView {
-                    id: t.id,
-                    title: t.title,
-                    plan: t.plan,
-                    date: t.date,
-                    start_hour: t.start_hour,
-                    hours: t.hours,
-                    end_date,
-                    end_hour,
-                    assignee_id: t.assignee_id,
-                    status: t.status,
-                    kind: t.kind,
-                    on_calendar: t.on_calendar,
-                    remind: t.remind,
-                    deleted: false,
-                    version: t.version,
-                    node_id: t.node_id,
-                }
             })
             .collect(),
     })

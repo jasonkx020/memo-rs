@@ -6,7 +6,6 @@ use memo_core::hosted::{BackupMetaItem, HostedBlob};
 use memo_core::peer_acl::{PeerAclEntry, PeerAclStore};
 use memo_core::person::{Gender, Person, PersonStore};
 use memo_core::store::{Broadcaster, MemoItem, MemoStore, MemoVisibility};
-use memo_core::task::{TaskItem, TaskStore};
 use memo_core::MemoService;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -41,6 +40,7 @@ pub enum MsgType {
     Hello,
     MemoUpdate,
     PersonUpdate,
+    /// 旧版对等节点可能仍发送；本端忽略
     TaskUpdate,
     SyncRequest,
     SyncResponse,
@@ -72,8 +72,9 @@ pub struct SyncResponse {
     pub items: Vec<MemoItem>,
     #[serde(default)]
     pub persons: Vec<Person>,
+    /// 旧版可能含 tasks；导入时忽略
     #[serde(default)]
-    pub tasks: Vec<TaskItem>,
+    pub tasks: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,7 +225,6 @@ pub struct SyncEngine {
     data_dir: PathBuf,
     store: Arc<MemoStore>,
     person_store: Arc<PersonStore>,
-    task_store: Arc<TaskStore>,
     service: RwLock<Weak<MemoService>>,
     peers: RwLock<HashMap<String, Arc<PeerHandle>>>,
     discovered: RwLock<HashMap<String, DiscoEntry>>,
@@ -238,6 +238,7 @@ pub struct SyncEngine {
     backup_meta: RwLock<HashMap<String, HashMap<String, BackupMetaItem>>>,
     backup_meta_ready: RwLock<HashSet<String>>,
     pending_hosted: RwLock<Vec<HostedBlob>>,
+    backup_targets: RwLock<Vec<String>>,
     last_udp_tx: RwLock<Option<Instant>>,
     last_udp_rx: RwLock<Option<Instant>>,
     udp_tx_pulse_until: RwLock<Option<Instant>>,
@@ -267,7 +268,6 @@ impl SyncEngine {
         peers: Vec<String>,
         store: Arc<MemoStore>,
         person_store: Arc<PersonStore>,
-        task_store: Arc<TaskStore>,
         cluster_salt_hex: String,
         lan_discovery: bool,
         data_dir: PathBuf,
@@ -278,7 +278,6 @@ impl SyncEngine {
             peers,
             store,
             person_store,
-            task_store,
             cluster_salt_hex,
             lan_discovery,
             NodeRole::Slave,
@@ -296,7 +295,6 @@ impl SyncEngine {
         peers: Vec<String>,
         store: Arc<MemoStore>,
         person_store: Arc<PersonStore>,
-        task_store: Arc<TaskStore>,
         cluster_salt_hex: String,
         lan_discovery: bool,
         node_role: NodeRole,
@@ -328,7 +326,6 @@ impl SyncEngine {
             data_dir,
             store,
             person_store,
-            task_store,
             service: RwLock::new(Weak::new()),
             peers: RwLock::new(HashMap::new()),
             discovered: RwLock::new(HashMap::new()),
@@ -341,12 +338,33 @@ impl SyncEngine {
             backup_meta: RwLock::new(HashMap::new()),
             backup_meta_ready: RwLock::new(HashSet::new()),
             pending_hosted: RwLock::new(Vec::new()),
+            backup_targets: RwLock::new(Vec::new()),
             last_udp_tx: RwLock::new(None),
             last_udp_rx: RwLock::new(None),
             udp_tx_pulse_until: RwLock::new(None),
             udp_rx_pulse_until: RwLock::new(None),
             stop: tokio::sync::Notify::new(),
         })
+    }
+
+    pub fn set_backup_targets(&self, targets: Vec<String>) {
+        *self.backup_targets.write() = targets;
+    }
+
+    fn is_backup_target(&self, node_id: &str) -> bool {
+        let t = self.backup_targets.read();
+        t.is_empty() || t.iter().any(|id| id == node_id)
+    }
+
+    fn hosted_dest_ok(&self, p: &PeerHandle) -> bool {
+        if !p.offer_private.load(Ordering::Relaxed) {
+            return false;
+        }
+        let id = p.remote_id.read().clone();
+        if id.is_empty() {
+            return self.backup_targets.read().is_empty();
+        }
+        self.is_backup_target(&id)
     }
 
     pub fn node_role(&self) -> NodeRole {
@@ -1275,7 +1293,7 @@ impl SyncEngine {
             };
             line.push(b'\n');
             for p in self.peers.read().values() {
-                if p.offer_private.load(Ordering::Relaxed) {
+                if self.hosted_dest_ok(p) {
                     let _ = p.tx.send(line.clone());
                 }
             }
@@ -1617,23 +1635,7 @@ impl SyncEngine {
                 }
             }
             MsgType::TaskUpdate => {
-                let rid = peer.remote_id.read().clone();
-                if rid.is_empty() || !self.inbound_public_allowed(&rid) {
-                    return;
-                }
-                if !self.disk_allows_incremental() {
-                    self.set_block_reason(format!(
-                        "本机磁盘可用空间低于 128MiB，已拒绝增量同步。{}",
-                        disk::disk_help_hint()
-                    ));
-                    return;
-                }
-                if let Ok(item) = serde_json::from_value::<TaskItem>(env.payload) {
-                    match self.task_store.merge(item, &env.from) {
-                        Ok(_) => self.notify(),
-                        Err(_) => {}
-                    }
-                }
+                // 旧版对等节点任务更新：忽略
             }
             MsgType::SyncRequest => {
                 let rid = peer.remote_id.read().clone();
@@ -1662,7 +1664,7 @@ impl SyncEngine {
                 let resp_body = SyncResponse {
                     items,
                     persons: self.person_store.all(),
-                    tasks: self.task_store.all(),
+                    tasks: Vec::new(),
                 };
                 let payload = serde_json::to_value(&resp_body).unwrap_or_default();
                 let payload_len = serde_json::to_vec(&payload).map(|v| v.len()).unwrap_or(0) as u64;
@@ -1732,12 +1734,7 @@ impl SyncEngine {
                             Err(_) => {}
                         }
                     }
-                    for it in resp.tasks {
-                        match self.task_store.merge(it, &env.from) {
-                            Ok(_) => notify = true,
-                            Err(_) => {}
-                        }
-                    }
+                    let _ = resp.tasks; // 忽略旧版任务
                     if notify {
                         self.mark_full_sync(&env.from);
                         self.notify();
@@ -1931,17 +1928,6 @@ impl Broadcaster for EngineBroadcaster {
         );
     }
 
-    fn broadcast_task(&self, item: &TaskItem) {
-        self.broadcast_env_filtered(
-            Envelope {
-                msg_type: MsgType::TaskUpdate,
-                from: self.engine.node_id.clone(),
-                payload: serde_json::to_value(item).unwrap_or_default(),
-            },
-            |p| p.offer_public.load(Ordering::Relaxed),
-        );
-    }
-
     fn broadcast_hosted(&self, blob: &memo_core::hosted::HostedBlob) {
         let blob = blob.clone();
         if !self.engine.backup_meta_ready.read().contains(&blob.owner_fp) {
@@ -1963,7 +1949,7 @@ impl Broadcaster for EngineBroadcaster {
                 from: self.engine.node_id.clone(),
                 payload: serde_json::to_value(&blob).unwrap_or_default(),
             },
-            |p| p.offer_private.load(Ordering::Relaxed),
+            |p| self.engine.hosted_dest_ok(p),
         );
         self.engine.note_hosted_acked(&blob);
     }
@@ -1979,7 +1965,7 @@ impl Broadcaster for EngineBroadcaster {
                     "version": version,
                 }),
             },
-            |p| p.offer_private.load(Ordering::Relaxed),
+            |p| self.engine.hosted_dest_ok(p),
         );
         if let Some(by) = self.engine.backup_meta.write().get_mut(owner_fp) {
             by.remove(memo_id);

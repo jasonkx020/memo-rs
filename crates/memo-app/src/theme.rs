@@ -2,18 +2,22 @@
 
 //! 视觉令牌：Lumen 风浅灰 chrome + 深色变体；启动门 mac 灰阶对齐主 UI。
 
+use crate::nav::NavItem;
 use eframe::egui::{
     self, Color32, Frame, Margin, Rounding, Stroke, Style, TextStyle, Vec2, Visuals,
 };
+use memo_core::store::MemoCategory;
 use memo_core::ThemePreference;
 use parking_lot::RwLock;
 use std::sync::OnceLock;
 
-/// 解析后的明暗模式（非用户偏好）。
+/// 解析后的主题模式（非用户偏好）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
     Light,
     Dark,
+    /// 柔美粉：浅色基底 + 玫瑰雾面配色
+    Blush,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +59,25 @@ pub struct Palette {
     pub chrome_stroke: Color32,
     pub remind_bg: Color32,
     pub remind_fg: Color32,
+    /// 分类壳层主色（蓝）
+    pub shell_accent: Color32,
+    pub shell_accent_soft: Color32,
+    pub shell_nav_selected: Color32,
+    pub shell_chip_green: Color32,
+    pub shell_chip_green_fg: Color32,
+    pub shell_chip_gray: Color32,
+    pub shell_chip_gray_fg: Color32,
+    pub shell_warn_bg: Color32,
+    pub shell_warn_fg: Color32,
+    pub shell_tag_bg: Color32,
+    pub shell_tag_fg: Color32,
+    pub shell_women_pill: Color32,
+    pub shell_women_pill_fg: Color32,
+    pub shell_men_pill: Color32,
+    pub shell_men_pill_fg: Color32,
+    pub period_pink_bg: Color32,
+    pub period_day: Color32,
+    pub period_fertile: Color32,
 }
 
 pub const ROUND_CARD: f32 = 4.0;
@@ -102,6 +125,85 @@ fn light_palette() -> Palette {
         chrome_stroke: Color32::from_rgb(0xE5, 0xE5, 0xEA),
         remind_bg: Color32::from_rgb(0xFE, 0xF3, 0xC7),
         remind_fg: Color32::from_rgb(0xB4, 0x53, 0x09),
+        shell_accent: Color32::from_rgb(0x3B, 0x82, 0xF6),
+        shell_accent_soft: Color32::from_rgb(0xEF, 0xF6, 0xFF),
+        shell_nav_selected: Color32::from_rgb(0xDB, 0xEA, 0xFE),
+        shell_chip_green: Color32::from_rgb(0xD1, 0xFA, 0xE5),
+        shell_chip_green_fg: Color32::from_rgb(0x05, 0x96, 0x69),
+        shell_chip_gray: Color32::from_rgb(0xF3, 0xF4, 0xF6),
+        shell_chip_gray_fg: Color32::from_rgb(0x6B, 0x72, 0x80),
+        shell_warn_bg: Color32::from_rgb(0xFF, 0xF7, 0xED),
+        shell_warn_fg: Color32::from_rgb(0xC2, 0x41, 0x0C),
+        shell_tag_bg: Color32::from_rgb(0xDB, 0xEA, 0xFE),
+        shell_tag_fg: Color32::from_rgb(0x1D, 0x4E, 0xD8),
+        shell_women_pill: Color32::from_rgb(0xFD, 0xE8, 0xF0),
+        shell_women_pill_fg: Color32::from_rgb(0xDB, 0x27, 0x7A),
+        shell_men_pill: Color32::from_rgb(0xE0, 0xF2, 0xFE),
+        shell_men_pill_fg: Color32::from_rgb(0x03, 0x67, 0xA1),
+        // 预测浅填：够粉可辨、仍浅于手标实填；易孕：描边/角标用色，需与白底高对比
+        period_pink_bg: Color32::from_rgb(0xFB, 0xCF, 0xE8),
+        period_day: Color32::from_rgb(0xDB, 0x27, 0x7A),
+        period_fertile: Color32::from_rgb(0x0F, 0x76, 0x6E),
+    }
+}
+
+/// 柔美：雾面浅粉底 + 玫瑰强调，低对比柔和，适合长时间阅读与女性私密场景。
+fn blush_palette() -> Palette {
+    Palette {
+        navy: Color32::from_rgb(0xFD, 0xF2, 0xF8),
+        navy_mid: Color32::from_rgb(0xFC, 0xE7, 0xF3),
+        bg: Color32::from_rgb(0xFF, 0xF7, 0xFA),
+        panel: Color32::from_rgb(0xFD, 0xF2, 0xF8),
+        card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        border: Color32::from_rgb(0xFB, 0xE4, 0xEF),
+        border_strong: Color32::from_rgb(0xF9, 0xC8, 0xDC),
+        text: Color32::from_rgb(0x4A, 0x2C, 0x3D),
+        text_muted: Color32::from_rgb(0x9D, 0x71, 0x88),
+        accent: Color32::from_rgb(0xE8, 0x5A, 0x9B),
+        accent_hover: Color32::from_rgb(0xDB, 0x27, 0x7A),
+        accent_soft: Color32::from_rgb(0xFC, 0xE7, 0xF3),
+        success: Color32::from_rgb(0x0D, 0x94, 0x88),
+        success_soft: Color32::from_rgb(0xCC, 0xFB, 0xF1),
+        danger: Color32::from_rgb(0xE1, 0x1D, 0x48),
+        danger_soft: Color32::from_rgb(0xFF, 0xE4, 0xE6),
+        warn: Color32::from_rgb(0xC2, 0x4B, 0x6E),
+        list_hover: Color32::from_rgb(0xFC, 0xE7, 0xF3),
+        widget_active: Color32::from_rgb(0xFB, 0xD0, 0xE8),
+        code_bg: Color32::from_rgb(0xFD, 0xF2, 0xF8),
+        mac_bg: Color32::from_rgb(0xFD, 0xF2, 0xF8),
+        mac_bg_top: Color32::from_rgb(0xFF, 0xF7, 0xFA),
+        mac_card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        mac_separator: Color32::from_rgb(0xFB, 0xE4, 0xEF),
+        mac_fill: Color32::from_rgb(0xFC, 0xE7, 0xF3),
+        mac_fill_hover: Color32::from_rgb(0xFB, 0xD0, 0xE8),
+        mac_text: Color32::from_rgb(0x4A, 0x2C, 0x3D),
+        mac_text_secondary: Color32::from_rgb(0x9D, 0x71, 0x88),
+        mac_text_tertiary: Color32::from_rgb(0xB8, 0x8F, 0xA3),
+        mac_blue: Color32::from_rgb(0xE8, 0x5A, 0x9B),
+        mac_blue_pressed: Color32::from_rgb(0xDB, 0x27, 0x7A),
+        mac_red: Color32::from_rgb(0xE1, 0x1D, 0x48),
+        chrome_fg: Color32::from_rgb(0x4A, 0x2C, 0x3D),
+        chrome_stroke: Color32::from_rgb(0xFB, 0xE4, 0xEF),
+        remind_bg: Color32::from_rgb(0xFF, 0xED, 0xD5),
+        remind_fg: Color32::from_rgb(0xC2, 0x41, 0x0C),
+        shell_accent: Color32::from_rgb(0xE8, 0x5A, 0x9B),
+        shell_accent_soft: Color32::from_rgb(0xFC, 0xE7, 0xF3),
+        shell_nav_selected: Color32::from_rgb(0xFB, 0xD0, 0xE8),
+        shell_chip_green: Color32::from_rgb(0xCC, 0xFB, 0xF1),
+        shell_chip_green_fg: Color32::from_rgb(0x0D, 0x94, 0x88),
+        shell_chip_gray: Color32::from_rgb(0xFD, 0xF2, 0xF8),
+        shell_chip_gray_fg: Color32::from_rgb(0x9D, 0x71, 0x88),
+        shell_warn_bg: Color32::from_rgb(0xFF, 0xF1, 0xF2),
+        shell_warn_fg: Color32::from_rgb(0xBE, 0x12, 0x3C),
+        shell_tag_bg: Color32::from_rgb(0xFC, 0xE7, 0xF3),
+        shell_tag_fg: Color32::from_rgb(0xBE, 0x18, 0x5D),
+        shell_women_pill: Color32::from_rgb(0xFB, 0xD0, 0xE8),
+        shell_women_pill_fg: Color32::from_rgb(0xBE, 0x18, 0x5D),
+        shell_men_pill: Color32::from_rgb(0xE0, 0xF2, 0xFE),
+        shell_men_pill_fg: Color32::from_rgb(0x0C, 0x4A, 0x6E),
+        period_pink_bg: Color32::from_rgb(0xFB, 0xD0, 0xE8),
+        period_day: Color32::from_rgb(0xBE, 0x18, 0x5D),
+        period_fertile: Color32::from_rgb(0x0F, 0x76, 0x6E),
     }
 }
 
@@ -144,6 +246,24 @@ fn dark_palette() -> Palette {
         chrome_stroke: Color32::from_rgb(0x48, 0x48, 0x4C),
         remind_bg: Color32::from_rgb(0x4A, 0x3C, 0x1A),
         remind_fg: Color32::from_rgb(0xE8, 0xC4, 0x6A),
+        shell_accent: Color32::from_rgb(0x60, 0xA5, 0xFA),
+        shell_accent_soft: Color32::from_rgb(0x1E, 0x3A, 0x5F),
+        shell_nav_selected: Color32::from_rgb(0x1E, 0x3A, 0x5F),
+        shell_chip_green: Color32::from_rgb(0x1F, 0x3A, 0x30),
+        shell_chip_green_fg: Color32::from_rgb(0x6E, 0xE7, 0xB7),
+        shell_chip_gray: Color32::from_rgb(0x3A, 0x3A, 0x3E),
+        shell_chip_gray_fg: Color32::from_rgb(0xA1, 0xA1, 0xA6),
+        shell_warn_bg: Color32::from_rgb(0x4A, 0x3C, 0x1A),
+        shell_warn_fg: Color32::from_rgb(0xFB, 0xBF, 0x24),
+        shell_tag_bg: Color32::from_rgb(0x1E, 0x3A, 0x5F),
+        shell_tag_fg: Color32::from_rgb(0x93, 0xC5, 0xFD),
+        shell_women_pill: Color32::from_rgb(0x4A, 0x2A, 0x38),
+        shell_women_pill_fg: Color32::from_rgb(0xF4, 0x72, 0xB6),
+        shell_men_pill: Color32::from_rgb(0x1E, 0x3A, 0x5F),
+        shell_men_pill_fg: Color32::from_rgb(0x7D, 0xD3, 0xFC),
+        period_pink_bg: Color32::from_rgb(0x5C, 0x2E, 0x42),
+        period_day: Color32::from_rgb(0xF4, 0x72, 0xB6),
+        period_fertile: Color32::from_rgb(0x5E, 0xEA, 0xD4),
     }
 }
 
@@ -164,14 +284,16 @@ pub fn palette_for(mode: ThemeMode) -> Palette {
     match mode {
         ThemeMode::Light => light_palette(),
         ThemeMode::Dark => dark_palette(),
+        ThemeMode::Blush => blush_palette(),
     }
 }
 
-/// 将用户偏好解析为明暗。`system_dark=None` 时按浅色回退。
+/// 将用户偏好解析为具体模式。`system_dark=None` 时按浅色回退。
 pub fn resolve(pref: ThemePreference, system_dark: Option<bool>) -> ThemeMode {
     match pref {
         ThemePreference::Light => ThemeMode::Light,
         ThemePreference::Dark => ThemeMode::Dark,
+        ThemePreference::Blush => ThemeMode::Blush,
         ThemePreference::System => {
             if system_dark.unwrap_or(false) {
                 ThemeMode::Dark
@@ -342,13 +464,182 @@ pub fn remind_bg() -> Color32 {
 pub fn remind_fg() -> Color32 {
     c().remind_fg
 }
+pub fn shell_accent() -> Color32 {
+    c().shell_accent
+}
+
+fn dark_icons() -> bool {
+    let [r, g, b, _] = c().bg.to_array();
+    (r as u16) + (g as u16) + (b as u16) < 380
+}
+
+/// 分类图标语义色（待办绿、应急红等）。
+pub fn category_icon_color(cat: MemoCategory) -> Color32 {
+    let dark = dark_icons();
+    match cat {
+        MemoCategory::Todo => success(),
+        MemoCategory::Work | MemoCategory::Office => shell_accent(),
+        MemoCategory::Credentials => {
+            if dark {
+                Color32::from_rgb(0x7E, 0xB6, 0xD9)
+            } else {
+                Color32::from_rgb(0x3D, 0x7A, 0xA8)
+            }
+        }
+        MemoCategory::Life => {
+            if dark {
+                Color32::from_rgb(0x4E, 0xC9, 0xB0)
+            } else {
+                Color32::from_rgb(0x1F, 0xA0, 0x7A)
+            }
+        }
+        MemoCategory::Finance => {
+            if dark {
+                Color32::from_rgb(0xE8, 0xC3, 0x4A)
+            } else {
+                Color32::from_rgb(0xC4, 0x8E, 0x14)
+            }
+        }
+        MemoCategory::Emergency => danger(),
+        MemoCategory::Inspiration => {
+            if dark {
+                Color32::from_rgb(0xC4, 0xA0, 0xF8)
+            } else {
+                Color32::from_rgb(0x7C, 0x4D, 0xDE)
+            }
+        }
+        MemoCategory::GenderPrivate | MemoCategory::WomenPrivate => shell_women_pill_fg(),
+        MemoCategory::MalePrivate => shell_men_pill_fg(),
+        MemoCategory::General => text(),
+    }
+}
+
+/// 左侧菜单图标语义色。
+pub fn nav_icon_color(item: NavItem) -> Color32 {
+    match item {
+        NavItem::All => navy_mid(),
+        NavItem::DueToday => warn(),
+        NavItem::Trash => text_muted(),
+        other => other
+            .category()
+            .map(category_icon_color)
+            .unwrap_or_else(text),
+    }
+}
+
+/// 图标与标签分色排版。
+pub fn icon_label_job(
+    icon: &str,
+    label: &str,
+    icon_color: Color32,
+    label_color: Color32,
+    size: f32,
+) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let font = egui::FontId::proportional(size);
+    let mut job = LayoutJob::default();
+    job.append(
+        icon,
+        0.0,
+        TextFormat {
+            font_id: font.clone(),
+            color: icon_color,
+            ..Default::default()
+        },
+    );
+    job.append(
+        "  ",
+        0.0,
+        TextFormat {
+            font_id: font.clone(),
+            color: label_color,
+            ..Default::default()
+        },
+    );
+    job.append(
+        label,
+        0.0,
+        TextFormat {
+            font_id: font,
+            color: label_color,
+            ..Default::default()
+        },
+    );
+    job
+}
+pub fn shell_accent_soft() -> Color32 {
+    c().shell_accent_soft
+}
+pub fn shell_nav_selected() -> Color32 {
+    c().shell_nav_selected
+}
+pub fn shell_chip_green() -> Color32 {
+    c().shell_chip_green
+}
+pub fn shell_chip_green_fg() -> Color32 {
+    c().shell_chip_green_fg
+}
+pub fn shell_chip_gray() -> Color32 {
+    c().shell_chip_gray
+}
+pub fn shell_chip_gray_fg() -> Color32 {
+    c().shell_chip_gray_fg
+}
+pub fn shell_warn_bg() -> Color32 {
+    c().shell_warn_bg
+}
+pub fn shell_warn_fg() -> Color32 {
+    c().shell_warn_fg
+}
+pub fn shell_tag_bg() -> Color32 {
+    c().shell_tag_bg
+}
+pub fn shell_tag_fg() -> Color32 {
+    c().shell_tag_fg
+}
+pub fn shell_women_pill() -> Color32 {
+    c().shell_women_pill
+}
+pub fn shell_women_pill_fg() -> Color32 {
+    c().shell_women_pill_fg
+}
+pub fn shell_men_pill() -> Color32 {
+    c().shell_men_pill
+}
+pub fn shell_men_pill_fg() -> Color32 {
+    c().shell_men_pill_fg
+}
+pub fn period_pink_bg() -> Color32 {
+    c().period_pink_bg
+}
+pub fn period_day() -> Color32 {
+    c().period_day
+}
+pub fn period_fertile() -> Color32 {
+    c().period_fertile
+}
+
+/// 头像底色：按索引循环。
+pub fn avatar_color(index: usize) -> Color32 {
+    const COLORS: [Color32; 8] = [
+        Color32::from_rgb(0x3B, 0x82, 0xF6),
+        Color32::from_rgb(0x0E, 0xA5, 0xE9),
+        Color32::from_rgb(0x10, 0xB9, 0x81),
+        Color32::from_rgb(0xF5, 0x9E, 0x0B),
+        Color32::from_rgb(0xEF, 0x44, 0x44),
+        Color32::from_rgb(0xEC, 0x48, 0x99),
+        Color32::from_rgb(0x8B, 0x5C, 0xF6),
+        Color32::from_rgb(0x14, 0xB8, 0xA6),
+    ];
+    COLORS[index % COLORS.len()]
+}
 
 pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
     let p = palette_for(mode);
     set_current(p);
 
     let mut visuals = match mode {
-        ThemeMode::Light => Visuals::light(),
+        ThemeMode::Light | ThemeMode::Blush => Visuals::light(),
         ThemeMode::Dark => Visuals::dark(),
     };
     visuals.dark_mode = matches!(mode, ThemeMode::Dark);

@@ -38,36 +38,119 @@ impl Default for MemoLifecycle {
 
 impl MemoLifecycle {
     pub fn label(&self) -> String {
-        match self {
-            Self::Permanent => "永久".into(),
-            Self::ExpiresAt { at } => format!("到期 {at}"),
-        }
+        "永久".into()
     }
 
     pub fn expires_at(&self) -> Option<&str> {
-        match self {
-            Self::Permanent => None,
-            Self::ExpiresAt { at } => Some(at.as_str()),
-        }
+        None
     }
 
-    pub fn from_days(days: i64) -> Self {
-        let at = (chrono::Local::now() + chrono::Duration::try_days(days).unwrap_or_default())
-            .to_rfc3339();
-        Self::ExpiresAt { at }
+    #[allow(dead_code)]
+    pub fn from_days(_days: i64) -> Self {
+        Self::Permanent
     }
 
     pub fn is_expired(&self) -> bool {
-        match self {
-            Self::Permanent => false,
-            Self::ExpiresAt { at } => chrono::DateTime::parse_from_rfc3339(at)
-                .map(|t| t < chrono::Local::now())
-                .unwrap_or(false),
-        }
+        // 产品已取消生命周期过期；保留方法以兼容旧调用，恒为未过期。
+        let _ = self;
+        false
     }
 
     pub fn is_permanent(&self) -> bool {
-        matches!(self, Self::Permanent)
+        true
+    }
+
+    /// 旧 ExpiresAt 一律视为永久。
+    pub fn normalize(self) -> Self {
+        Self::Permanent
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoCategory {
+    #[default]
+    General,
+    Todo,
+    Credentials,
+    Work,
+    /// 旧「机关事务」分类（反序列化兼容，界面归入工作学习）。
+    Office,
+    Life,
+    Finance,
+    /// 统一性别私密（经期关怀 + 体检健康）；新写入使用此变体。
+    GenderPrivate,
+    /// 旧版女性私密（反序列化兼容）。
+    WomenPrivate,
+    /// 旧版男性私密（反序列化兼容）。
+    MalePrivate,
+    Emergency,
+    Inspiration,
+}
+
+impl MemoCategory {
+    pub const ALL: &'static [MemoCategory] = &[
+        Self::General,
+        Self::Todo,
+        Self::Credentials,
+        Self::Work,
+        Self::Life,
+        Self::Finance,
+        Self::GenderPrivate,
+        Self::Emergency,
+        Self::Inspiration,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "全部",
+            Self::Todo => "待办提醒",
+            Self::Credentials => "账号证件",
+            Self::Work | Self::Office => "工作学习",
+            Self::Life => "生活家庭",
+            Self::Finance => "财务订阅",
+            Self::GenderPrivate | Self::WomenPrivate | Self::MalePrivate => "性别私密",
+            Self::Emergency => "应急",
+            Self::Inspiration => "灵感",
+        }
+    }
+
+    /// 性别私密分类（强制 Private）；含旧版女/男私密变体。
+    pub fn is_gender_private(self) -> bool {
+        matches!(
+            self,
+            Self::GenderPrivate | Self::WomenPrivate | Self::MalePrivate
+        )
+    }
+
+    /// 已下线分类归并到仍展示的分类（机关事务 → 工作学习）。
+    pub fn canonical(self) -> Self {
+        match self {
+            Self::Office => Self::Work,
+            Self::WomenPrivate | Self::MalePrivate => Self::GenderPrivate,
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoPriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+impl MemoPriority {
+    pub const ALL: &'static [MemoPriority] = &[Self::Low, Self::Normal, Self::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "低",
+            Self::Normal => "普通",
+            Self::High => "高",
+        }
     }
 }
 
@@ -98,6 +181,23 @@ pub struct MemoItem {
     /// 软删时间（RFC3339）；回收站宽限期据此计算
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub deleted_at: String,
+    #[serde(default)]
+    pub category: MemoCategory,
+    /// 到期时间本地 `YYYY-MM-DD HH:MM`（兼容旧 `YYYY-MM-DD`）；空=无到期（永久）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub due_date: String,
+    /// 提前提醒天数；仅 due 非空时有效；0=到期当日该时刻
+    #[serde(default)]
+    pub remind_before_days: u32,
+    /// 已弹出提醒所对应的 due_date 全文
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remind_seen_for: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub priority: MemoPriority,
 }
 
 fn actor_opts(person_id: &str, name: &str) -> (Option<String>, Option<String>) {
@@ -132,7 +232,6 @@ pub struct ConflictNotice {
 pub trait Broadcaster: Send + Sync {
     fn broadcast_memo(&self, item: &MemoItem);
     fn broadcast_person(&self, item: &crate::person::Person);
-    fn broadcast_task(&self, item: &crate::task::TaskItem);
     fn broadcast_hosted(&self, blob: &crate::hosted::HostedBlob) {
         let _ = blob;
     }
@@ -194,10 +293,41 @@ impl MemoStore {
         visibility: MemoVisibility,
         owner_fp: &str,
         lifecycle: MemoLifecycle,
+        category: MemoCategory,
+        due_date: &str,
+        done: bool,
+        tags: &[String],
+        priority: MemoPriority,
+        remind_before_days: u32,
+        remind_seen_for: &str,
     ) -> anyhow::Result<MemoItem> {
         let mut items = self.items.write();
         let prev = items.get(id).cloned();
         let ver = self.tick(0);
+        let due = due_date.trim().to_string();
+        let (remind_before_days, remind_seen_for) = if due.is_empty() {
+            (0u32, String::new())
+        } else {
+            let due_changed = prev
+                .as_ref()
+                .map(|p| p.due_date.trim() != due.as_str())
+                .unwrap_or(true);
+            let seen = if due_changed {
+                // 到期变更后重新提醒；ack 时调用方传入 due 全文
+                if remind_seen_for == due.as_str() {
+                    remind_seen_for.to_string()
+                } else {
+                    String::new()
+                }
+            } else if remind_seen_for.is_empty() {
+                prev.as_ref()
+                    .map(|p| p.remind_seen_for.clone())
+                    .unwrap_or_default()
+            } else {
+                remind_seen_for.to_string()
+            };
+            (remind_before_days.min(365), seen)
+        };
         let item = MemoItem {
             id: id.to_string(),
             title: title.to_string(),
@@ -212,6 +342,13 @@ impl MemoStore {
             modified_at: chrono::Local::now().to_rfc3339(),
             lifecycle,
             deleted_at: String::new(),
+            category,
+            due_date: due,
+            remind_before_days,
+            remind_seen_for,
+            done,
+            tags: tags.to_vec(),
+            priority,
         };
         items.insert(id.to_string(), item.clone());
         drop(items);

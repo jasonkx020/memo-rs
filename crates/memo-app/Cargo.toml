@@ -29,3 +29,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
     "Win32_System_Registry",
 ] }
+# WinRT Toast（进程内调用，不拉起 PowerShell）
+windows = { version = "=0.52.0", features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Foundation",
+] }

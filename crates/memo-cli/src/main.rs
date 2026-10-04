@@ -93,7 +93,6 @@ fn run_headless(cfg: Config, args: Args) -> anyhow::Result<()> {
         cfg.peers.clone(),
         svc.store(),
         svc.person_store(),
-        svc.task_store(),
         cfg.cluster_salt_hex.clone(),
         cfg.lan_discovery,
         cfg.node_role,
@@ -104,6 +103,7 @@ fn run_headless(cfg: Config, args: Args) -> anyhow::Result<()> {
         PathBuf::from(&cfg.data_dir),
     );
     engine.set_service(&svc);
+    engine.set_backup_targets(cfg.backup_targets.clone());
     svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
     engine.start();
 

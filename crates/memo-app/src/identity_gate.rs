@@ -144,8 +144,15 @@ pub fn show(
     let mut show_help = false;
 
     egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(theme::mac_bg_top()))
+        .frame(egui::Frame::none().fill(Color32::from_rgb(0x1C, 0x1C, 0x22)))
         .show(ui_ctx, |ui| {
+            let select_mode =
+                !st.legacy_wipe_confirm && !st.show_init && st.pending_identity.is_none();
+            if select_mode {
+                draw_select(ui, cfg, st, &mut action);
+                return;
+            }
+
             paint_flat_bg(ui);
 
             egui::ScrollArea::vertical()
@@ -153,7 +160,6 @@ pub fn show(
                 .show(ui, |ui| {
                     ui.add_space(28.0);
                     ui.vertical_centered(|ui| {
-                        // 单列内容，无浮层卡片
                         ui.set_max_width(400.0);
                         ui.set_min_width(ui.available_width().min(400.0));
 
@@ -173,7 +179,6 @@ pub fn show(
                         );
                         ui.add_space(20.0);
 
-                        // 左对齐表单列
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
                             ui.set_max_width(400.0);
                             ui.set_width(ui.available_width().min(400.0));
@@ -203,8 +208,6 @@ pub fn show(
                                         st.refresh_list(cfg);
                                     }
                                 });
-                            } else {
-                                draw_select(ui, cfg, st, &mut action);
                             }
 
                             mac_status(ui, &st.status, st.busy);
@@ -547,115 +550,200 @@ fn draw_select(
         }
     }
 
-    ui.label(
-        RichText::new("选择身份")
-            .size(17.0)
-            .strong()
-            .color(theme::mac_text()),
-    );
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new("每个身份独立数据。选定后进入；退出可再切换其他身份。")
-            .size(13.0)
-            .color(theme::mac_text_secondary()),
-    );
-    ui.add_space(12.0);
+    let accent = theme::shell_accent();
+    let card_w = ui.available_width().min(420.0);
 
-    egui::ScrollArea::vertical()
-        .max_height(220.0)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            if st.identities.is_empty() {
+    // 深色全屏底 + 居中白卡片
+    let screen = ui.ctx().screen_rect();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_rgb(0x1C, 0x1C, 0x22));
+
+    ui.vertical_centered(|ui| {
+        ui.add_space(48.0);
+        theme::mac_sheet_frame()
+            .fill(Color32::WHITE)
+            .inner_margin(egui::Margin::symmetric(28.0, 24.0))
+            .show(ui, |ui| {
+                ui.set_width(card_w);
+                ui.label(
+                    RichText::new("选择用户")
+                        .size(22.0)
+                        .strong()
+                        .color(Color32::from_rgb(0x1D, 0x1D, 0x1F)),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("每位用户拥有独立的备忘录和私密空间")
+                        .size(13.5)
+                        .color(Color32::from_rgb(0x6E, 0x6E, 0x73)),
+                );
                 ui.add_space(16.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new("暂无已保存的身份").color(theme::mac_text_tertiary()),
-                    );
-                });
-                ui.add_space(16.0);
-                return;
-            }
-            for m in st.identities.iter() {
-                let sel = st.selected.as_deref() == Some(m.fingerprint.as_str());
-                let fill = if sel {
-                    Color32::from_rgb(0xE5, 0xF1, 0xFF)
-                } else {
-                    theme::mac_fill()
-                };
-                let stroke = if sel {
-                    egui::Stroke::new(1.0, theme::mac_blue())
-                } else {
-                    egui::Stroke::new(0.5, theme::mac_separator())
-                };
-                egui::Frame::none()
-                    .fill(fill)
-                    .stroke(stroke)
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        let resp = ui.allocate_response(
-                            Vec2::new(ui.available_width(), 36.0),
-                            Sense::click(),
-                        );
-                        let painter = ui.painter();
-                        let r = resp.rect;
-                        painter.circle_filled(
-                            egui::pos2(r.left() + 10.0, r.center().y),
-                            6.0,
-                            if sel {
-                                theme::mac_blue()
+                        if st.identities.is_empty() {
+                            ui.add_space(16.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("暂无已保存的用户")
+                                        .color(Color32::from_rgb(0x8E, 0x8E, 0x93)),
+                                );
+                            });
+                            ui.add_space(16.0);
+                            return;
+                        }
+                        for (idx, m) in st.identities.iter().enumerate() {
+                            let sel = st.selected.as_deref() == Some(m.fingerprint.as_str());
+                            let fill = if sel {
+                                theme::shell_accent_soft()
                             } else {
-                                theme::mac_separator()
-                            },
-                        );
-                        painter.text(
-                            egui::pos2(r.left() + 28.0, r.center().y - 7.0),
-                            egui::Align2::LEFT_CENTER,
-                            if m.alias.is_empty() {
+                                Color32::from_rgb(0xF5, 0xF5, 0xF7)
+                            };
+                            let stroke = if sel {
+                                egui::Stroke::new(2.0, accent)
+                            } else {
+                                egui::Stroke::new(1.0, Color32::from_rgb(0xE5, 0xE5, 0xEA))
+                            };
+                            let alias = if m.alias.is_empty() {
                                 "未命名"
                             } else {
                                 m.alias.as_str()
-                            },
-                            egui::FontId::proportional(14.5),
-                            theme::mac_text(),
-                        );
-                        painter.text(
-                            egui::pos2(r.left() + 28.0, r.center().y + 9.0),
-                            egui::Align2::LEFT_CENTER,
-                            IdentityKeys::short_fp(&m.fingerprint),
-                            egui::FontId::proportional(11.5),
-                            theme::mac_text_tertiary(),
-                        );
-                        if resp.clicked() {
-                            st.selected = Some(m.fingerprint.clone());
+                            };
+                            let letter = alias
+                                .chars()
+                                .next()
+                                .map(|c| c.to_uppercase().to_string())
+                                .unwrap_or_else(|| "?".into());
+
+                            egui::Frame::none()
+                                .fill(fill)
+                                .stroke(stroke)
+                                .rounding(egui::Rounding::same(10.0))
+                                .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                                .show(ui, |ui| {
+                                    let resp = ui.allocate_response(
+                                        Vec2::new(ui.available_width(), 48.0),
+                                        Sense::click(),
+                                    );
+                                    let painter = ui.painter();
+                                    let r = resp.rect;
+                                    let av = theme::avatar_color(idx);
+                                    painter.circle_filled(
+                                        egui::pos2(r.left() + 18.0, r.center().y),
+                                        16.0,
+                                        av,
+                                    );
+                                    painter.text(
+                                        egui::pos2(r.left() + 18.0, r.center().y),
+                                        egui::Align2::CENTER_CENTER,
+                                        &letter,
+                                        egui::FontId::proportional(14.0),
+                                        Color32::WHITE,
+                                    );
+                                    painter.text(
+                                        egui::pos2(r.left() + 44.0, r.center().y - 8.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        alias,
+                                        egui::FontId::proportional(15.0),
+                                        Color32::from_rgb(0x1D, 0x1D, 0x1F),
+                                    );
+                                    // 私密 badge
+                                    let badge_pos = egui::pos2(r.left() + 44.0 + 80.0, r.center().y - 8.0);
+                                    let badge_rect = egui::Rect::from_center_size(
+                                        egui::pos2(badge_pos.x + 28.0, badge_pos.y),
+                                        Vec2::new(40.0, 18.0),
+                                    );
+                                    // place badge after name
+                                    let name_w = ui.fonts(|f| {
+                                        f.layout_no_wrap(
+                                            alias.to_owned(),
+                                            egui::FontId::proportional(15.0),
+                                            Color32::WHITE,
+                                        )
+                                        .size()
+                                        .x
+                                    });
+                                    let br = egui::Rect::from_min_size(
+                                        egui::pos2(r.left() + 44.0 + name_w + 8.0, r.center().y - 16.0),
+                                        Vec2::new(36.0, 16.0),
+                                    );
+                                    painter.rect_filled(br, 4.0, theme::shell_accent_soft());
+                                    painter.text(
+                                        br.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "私密",
+                                        egui::FontId::proportional(10.0),
+                                        accent,
+                                    );
+                                    let _ = badge_rect;
+                                    painter.text(
+                                        egui::pos2(r.left() + 44.0, r.center().y + 10.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        IdentityKeys::short_fp(&m.fingerprint),
+                                        egui::FontId::proportional(11.5),
+                                        Color32::from_rgb(0x8E, 0x8E, 0x93),
+                                    );
+                                    if resp.clicked() {
+                                        st.selected = Some(m.fingerprint.clone());
+                                    }
+                                });
+                            ui.add_space(8.0);
                         }
                     });
-                ui.add_space(6.0);
-            }
-        });
 
-    ui.add_space(14.0);
-    let can = st.selected.is_some() && !st.busy;
-    if theme::mac_primary_button(ui, if st.busy { "打开中…" } else { "继续" }, can).clicked() {
-        if let Some(fp) = st.selected.clone() {
-            match IdentityKeys::load(PathBuf::from(&cfg.data_dir).as_path(), &fp) {
-                Ok(id) => {
-                    st.busy = true;
-                    st.status = "正在打开…".into();
-                    *action = GateAction::Unlock {
-                        cfg: cfg.clone(),
-                        identity: id,
-                        export_path: None,
-                        export_pass: String::new(),
-                    };
+                ui.add_space(16.0);
+                let can = st.selected.is_some() && !st.busy;
+                let btn_label = if st.busy {
+                    "打开中…"
+                } else {
+                    "进入备忘录"
+                };
+                let text = RichText::new(btn_label)
+                    .color(Color32::WHITE)
+                    .strong()
+                    .size(15.0);
+                let w = ui.available_width().clamp(120.0, 400.0);
+                if ui
+                    .add_enabled(
+                        can,
+                        egui::Button::new(text)
+                            .fill(accent)
+                            .rounding(egui::Rounding::same(theme::MAC_ROUND_PILL))
+                            .min_size(Vec2::new(w, 38.0)),
+                    )
+                    .clicked()
+                {
+                    if let Some(fp) = st.selected.clone() {
+                        match IdentityKeys::load(PathBuf::from(&cfg.data_dir).as_path(), &fp) {
+                            Ok(id) => {
+                                st.busy = true;
+                                st.status = "正在打开…".into();
+                                *action = GateAction::Unlock {
+                                    cfg: cfg.clone(),
+                                    identity: id,
+                                    export_path: None,
+                                    export_pass: String::new(),
+                                };
+                            }
+                            Err(e) => st.status = e.to_string(),
+                        }
+                    }
                 }
-                Err(e) => st.status = e.to_string(),
-            }
-        }
-    }
-    ui.add_space(8.0);
-    if theme::mac_secondary_button(ui, "生成或导入新身份…").clicked() {
-        st.show_init = true;
-        st.status.clear();
-    }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if theme::mac_secondary_button(ui, "生成新身份").clicked() {
+                        st.show_init = true;
+                        st.init_mode_import = false;
+                        st.status.clear();
+                    }
+                    if theme::mac_secondary_button(ui, "导入身份").clicked() {
+                        st.show_init = true;
+                        st.init_mode_import = true;
+                        st.status.clear();
+                    }
+                });
+            });
+    });
 }

@@ -1,43 +1,42 @@
-﻿mod app_icon;
-mod calendar_view;
-mod china_calendar;
+mod app_icon;
+mod date_field;
 mod doc_editor;
 mod fonts;
+mod gender_private_view;
 mod help_view;
 mod history_view;
 mod identity_gate;
-mod people_view;
+mod male_view;
+mod memo_form;
+mod msg;
+mod nav;
+mod notify_sys;
+mod period_view;
+mod runtime;
 mod save_dialog;
+mod shell;
 mod single_instance;
 mod theme;
 
-use calendar_view::CalUi;
-use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Stroke, Vec2};
+use eframe::egui::{self, Color32, Frame, Margin, RichText};
 use identity_gate::{GateAction, IdentityGateState};
 use memo_core::config::{self, Config, NodeRole};
 use memo_core::identity_keys::IdentityKeys;
-use memo_core::license::{self, LicenseStatus};
-use memo_core::service::{HistoryEvent, MemoService};
-use memo_core::store::{MemoLifecycle, MemoVisibility};
 use memo_core::person::Gender;
-use memo_core::task::{TaskKind, TaskStatus};
-use memo_core::format_bytes;
-use memo_sync::{
-    BackupUiStatus, DiscoveredPeer, EngineBroadcaster, PeerStatus, SyncEngine, UdpPulse,
-};
-use people_view::PeopleUi;
+use memo_core::service::HistoryEvent;
+use memo_core::store::{MemoCategory, MemoPriority, MemoVisibility};
+use memo_form::MemoFormState;
+use memo_sync::{EngineBroadcaster, SyncEngine};
+use msg::BgMsg;
+use runtime::AppRuntime;
+use shell::{ShellAction, ShellUi};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LeftTab {
-    Memos,
-    Calendar,
-}
+const AUTO_LOCK: Duration = Duration::from_secs(3 * 60);
 
-/// 设置项：字段名 + 可选说明 + 下方控件。
 fn settings_item_header(ui: &mut egui::Ui, title: &str, description: &str) {
     ui.label(
         RichText::new(title)
@@ -83,11 +82,7 @@ fn settings_text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: 
 }
 
 fn theme_pref_label(p: memo_core::ThemePreference) -> &'static str {
-    match p {
-        memo_core::ThemePreference::System => "跟随系统",
-        memo_core::ThemePreference::Light => "浅色",
-        memo_core::ThemePreference::Dark => "深色",
-    }
+    p.label()
 }
 
 /// egui 0.27 在 Windows 中文 IME 下：CompositionUpdate 会写入临时字，
@@ -114,76 +109,41 @@ fn sanitize_cjk_ime_events(ctx: &egui::Context) {
     });
 }
 
-/// 新建备忘模板：第一行标题，下面正文/事项/表格。
-fn memo_new_template() -> String {
-    doc_editor::memo_template(&chrono_like_stamp())
-}
-
-enum BgMsg {
-    UnlockResult(Result<Arc<AppRuntime>, String>),
-    Error(String),
-    Info(String),
-    Refresh,
-    /// 删除成功后清除选中
-    Deleted,
-    /// 模板新建完成：选中并直接进入编辑
-    CreatedMemo {
-        id: String,
-        title: String,
-        body: String,
-    },
-}
-
-struct AppRuntime {
-    svc: Arc<MemoService>,
-    engine: Arc<SyncEngine>,
-    cfg: Config,
-    /// 保持 tokio 运行时存活（同步引擎依赖它）
-    _rt: tokio::runtime::Runtime,
-}
-
 enum Screen {
     IdentityGate(IdentityGateState),
     Main {
         rt: Arc<AppRuntime>,
         search: String,
         selected: Option<String>,
-        /// 仅编辑模式下可改
         title_draft: String,
         body_draft: String,
-        /// 编辑中的生命周期预设：0=永久 30/90/365 天
-        lifecycle_days: i64,
-        /// 编辑中的可见性（默认私密）
         visibility_draft: MemoVisibility,
-        /// false=只读浏览；true=编辑态
+        category_draft: MemoCategory,
+        due_date_draft: String,
+        tags_draft: String,
+        done_draft: bool,
+        priority_draft: MemoPriority,
         editing: bool,
         show_settings: bool,
         settings_draft: Config,
         show_delete: bool,
-        /// 回收站窗口
-        show_trash: bool,
-        /// 彻底删除二次确认的 memo id
         purge_confirm_id: Option<String>,
-        /// 导出确认（主密码 + 路径）
         show_export: bool,
         export_pw: String,
         export_path: String,
-        /// None = 全部；Some = 指定 id 列表
         export_ids: Option<Vec<String>>,
-        /// 变更时间线
         show_history: bool,
         history_entity: String,
         history_events: Vec<HistoryEvent>,
         history_sel_a: Option<usize>,
         history_sel_b: Option<usize>,
-        /// 加密备份 / 导入
         show_backup: bool,
         backup_import: bool,
         backup_pw: String,
         backup_path: String,
         status_line: String,
         peers: Vec<String>,
-        discovered: Vec<DiscoveredPeer>,
+        discovered: Vec<memo_sync::DiscoveredPeer>,
         audit_ok: bool,
         audit_detail: String,
     },
@@ -198,32 +158,14 @@ pub struct MemoApp {
     last_peer_refresh: Instant,
     show_help: bool,
     show_about: bool,
-    left_tab: LeftTab,
-    cal: CalUi,
-    people: PeopleUi,
-    task_title: String,
-    task_plan: String,
-    task_date: String,
-    task_start: f32,
-    task_end_date: String,
-    task_end_hour: f32,
-    task_hours: f32,
-    task_assignee: String,
-    task_status: TaskStatus,
-    task_kind: TaskKind,
-    task_on_calendar: bool,
-    task_remind: bool,
-    task_editing: bool,
-    show_new_task: bool,
-    show_task_delete: bool,
-    task_delete_pw: String,
     pending_switch_person: bool,
-    /// 右侧节点栏（默认收起，给详情更多宽度）
-    show_nodes: bool,
-    /// 备忘公文编辑文档（标题=第一行）
+    shell: ShellUi,
     memo_doc: doc_editor::Doc,
-    /// 任务计划公文编辑文档（标题=第一行，同步 task_title）
-    task_doc: doc_editor::Doc,
+    edit_form: MemoFormState,
+    last_input_at: Instant,
+    last_sync_at: Option<Instant>,
+    pending_sync_hint: usize,
+    last_remind_scan: Instant,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
@@ -242,29 +184,14 @@ impl MemoApp {
             last_peer_refresh: Instant::now() - Duration::from_secs(10),
             show_help: false,
             show_about: false,
-            left_tab: LeftTab::Memos,
-            cal: CalUi::default(),
-            people: PeopleUi::default(),
-            task_title: String::new(),
-            task_plan: String::new(),
-            task_date: String::new(),
-            task_start: 9.0,
-            task_end_date: String::new(),
-            task_end_hour: 10.0,
-            task_hours: 1.0,
-            task_assignee: String::new(),
-            task_status: TaskStatus::NotStarted,
-            task_kind: TaskKind::Normal,
-            task_on_calendar: true,
-            task_remind: false,
-            task_editing: false,
-            show_new_task: false,
-            show_task_delete: false,
-            task_delete_pw: String::new(),
             pending_switch_person: false,
-            show_nodes: false,
+            shell: ShellUi::default(),
             memo_doc: doc_editor::Doc::empty(),
-            task_doc: doc_editor::Doc::empty(),
+            edit_form: MemoFormState::default(),
+            last_input_at: Instant::now(),
+            last_sync_at: None,
+            pending_sync_hint: 0,
+            last_remind_scan: Instant::now() - Duration::from_secs(30),
         }
     }
 
@@ -280,13 +207,16 @@ impl MemoApp {
             selected: None,
             title_draft: String::new(),
             body_draft: String::new(),
-            lifecycle_days: 0,
             visibility_draft: MemoVisibility::Private,
+            category_draft: MemoCategory::General,
+            due_date_draft: String::new(),
+            tags_draft: String::new(),
+            done_draft: false,
+            priority_draft: MemoPriority::Normal,
             editing: false,
             show_settings: false,
             settings_draft: cfg.clone(),
             show_delete: false,
-            show_trash: false,
             purge_confirm_id: None,
             show_export: false,
             export_pw: String::new(),
@@ -305,22 +235,6 @@ impl MemoApp {
             audit_ok,
             audit_detail,
         }
-    }
-
-    fn help_about_menu(ui: &mut egui::Ui, show_help: &mut bool, show_about: &mut bool) {
-        ui.menu_button(
-            RichText::new("帮助").color(theme::chrome_fg()).size(14.0),
-            |ui| {
-                if ui.button("使用说明").clicked() {
-                    *show_help = true;
-                    ui.close_menu();
-                }
-                if ui.button("关于").clicked() {
-                    *show_about = true;
-                    ui.close_menu();
-                }
-            },
-        );
     }
 
     fn draw_help_about_windows(ctx: &egui::Context, show_help: &mut bool, show_about: &mut bool) {
@@ -346,63 +260,32 @@ impl MemoApp {
                 *show_help = false;
             }
         }
-
         if *show_about {
             let modal = theme::begin_modal(ctx, "about_modal");
-            theme::modal_fixed(ctx, "关于", [440.0, 320.0])
+            theme::modal_fixed(ctx, "关于", [480.0, 420.0])
                 .id(modal.window_id)
                 .open(show_about)
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height((ui.available_height() - 4.0).max(120.0))
-                        .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
+                    ui.vertical_centered(|ui| {
                         app_icon::show(ui, 48.0);
-                        ui.add_space(10.0);
-                        ui.vertical(|ui| {
-                            ui.label(theme::brand_title(22.0));
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(theme::APP_DESCRIPTION)
-                                    .color(theme::text_muted())
-                                    .size(13.0),
-                            );
-                        });
+                        ui.add_space(8.0);
+                        ui.label(theme::brand_title(22.0));
+                        ui.label(
+                            RichText::new(format!("版本 {APP_VERSION}"))
+                                .color(theme::text_muted()),
+                        );
                     });
-                    ui.add_space(14.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-                    about_kv(ui, "产品名称", theme::APP_NAME);
-                    about_kv(ui, "版本", APP_VERSION);
-                    about_kv(ui, "文件版本", theme::APP_FILE_VERSION);
+                    ui.add_space(12.0);
+                    about_kv(ui, "产品", theme::APP_NAME);
+                    about_kv(ui, "说明", theme::APP_DESCRIPTION);
                     about_kv(ui, "版权", theme::APP_COPYRIGHT);
-                    let lic = if let Ok(p) = config::settings_path() {
-                        if let Some(parent) = p.parent() {
-                            license::load_status(parent)
-                        } else {
-                            LicenseStatus::Community
-                        }
-                    } else {
-                        LicenseStatus::Community
-                    };
-                    about_kv(ui, "授权", &license::status_label(&lic));
-                    #[cfg(windows)]
-                    about_kv(ui, "平台", "Windows x64");
-                    #[cfg(not(windows))]
-                    about_kv(ui, "平台", std::env::consts::OS);
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("功能特性").strong().color(theme::text()));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("主要能力").strong().color(theme::text()));
                     ui.add_space(4.0);
-                    ui.label(RichText::new("· 身份密钥对登录 · 强制导出备份").color(theme::text()));
+                    ui.label(RichText::new("· 身份密钥对登录 · 分类备忘壳层").color(theme::text()));
                     ui.label(RichText::new("· 私人密文异地托管 · 公开备忘局域网同步").color(theme::text()));
                     ui.label(RichText::new("· Ed25519 审计链 · 变更时间线").color(theme::text()));
-                    ui.label(RichText::new("· 日历：月历 / 周视图 / 甘特与工时").color(theme::text()));
-                    ui.label(RichText::new("· 加密备份 (.memobak)").color(theme::text()));
+                    ui.label(RichText::new("· 性别私密（经期关怀 + 体检健康）· 加密备份").color(theme::text()));
                     ui.add_space(10.0);
                     ui.label(
                         theme::muted_label(
@@ -418,8 +301,6 @@ impl MemoApp {
                                 .color(theme::text_muted()),
                         );
                     }
-                    ui.add_space(4.0);
-                        });
                 });
             if modal.end(ctx, *show_about) {
                 *show_about = false;
@@ -433,6 +314,10 @@ impl MemoApp {
                 BgMsg::UnlockResult(Ok(rt)) => {
                     let cfg = rt.cfg.clone();
                     self.cfg = cfg.clone();
+                    self.shell = ShellUi::default();
+                    self.last_input_at = Instant::now();
+                    self.last_sync_at = None;
+                    self.pending_sync_hint = 0;
                     self.screen = Self::make_main(rt, &cfg);
                 }
                 BgMsg::UnlockResult(Err(e)) => {
@@ -441,46 +326,75 @@ impl MemoApp {
                         st.busy = false;
                     }
                 }
-                BgMsg::Error(e) => {
-                    match &mut self.screen {
-                        Screen::Main { status_line, .. } => {
-                            *status_line = format!("错误: {e}");
-                        }
-                        Screen::IdentityGate(st) => {
-                            st.status = format!("错误: {e}");
-                            st.busy = false;
-                        }
+                BgMsg::Error(e) => match &mut self.screen {
+                    Screen::Main { status_line, .. } => {
+                        *status_line = format!("错误: {e}");
                     }
-                }
+                    Screen::IdentityGate(st) => {
+                        st.status = format!("错误: {e}");
+                        st.busy = false;
+                    }
+                },
                 BgMsg::Info(s) => {
                     if let Screen::Main { status_line, .. } = &mut self.screen {
                         *status_line = s;
                     }
                 }
-                BgMsg::CreatedMemo { id, title, body } => {
+                BgMsg::CreatedMemo {
+                    id,
+                    title,
+                    body,
+                    category,
+                    due_date,
+                    priority,
+                    tags,
+                } => {
                     if let Screen::Main {
                         selected,
                         title_draft,
                         body_draft,
+                        category_draft,
+                        due_date_draft,
+                        tags_draft,
+                        done_draft,
+                        priority_draft,
                         editing,
                         status_line,
                         ..
                     } = &mut self.screen
                     {
                         *selected = Some(id);
-                        *title_draft = title;
-                        *body_draft = body;
-                        *editing = true;
-                        *status_line = "已创建，直接修改后保存即可".into();
-                    }
-                    if let Screen::Main {
-                        title_draft,
-                        body_draft,
-                        ..
-                    } = &self.screen
-                    {
-                        self.memo_doc =
-                            doc_editor::Doc::from_store(title_draft, body_draft);
+                        *title_draft = title.clone();
+                        *body_draft = body.clone();
+                        *category_draft = category;
+                        *due_date_draft = due_date.clone();
+                        *tags_draft = tags
+                            .iter()
+                            .map(|t| {
+                                if t.starts_with('#') {
+                                    t.clone()
+                                } else {
+                                    format!("#{t}")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        *done_draft = false;
+                        *priority_draft = priority;
+                        *editing = false;
+                        *status_line = "已创建".into();
+                        self.memo_doc = doc_editor::Doc::from_store(&title, &body);
+                        self.edit_form = MemoFormState::load_from_drafts(
+                            category,
+                            &title,
+                            &body,
+                            &due_date,
+                            priority,
+                            tags_draft,
+                            false,
+                            MemoVisibility::Private,
+                            0,
+                        );
                     }
                 }
                 BgMsg::Deleted => {
@@ -488,6 +402,8 @@ impl MemoApp {
                         selected,
                         title_draft,
                         body_draft,
+                        tags_draft,
+                        done_draft,
                         editing,
                         status_line,
                         rt,
@@ -501,6 +417,8 @@ impl MemoApp {
                         *selected = None;
                         title_draft.clear();
                         body_draft.clear();
+                        tags_draft.clear();
+                        *done_draft = false;
                         *editing = false;
                         *status_line = "已移入回收站".into();
                         *peers = rt.engine.connected_peers();
@@ -521,8 +439,12 @@ impl MemoApp {
                         selected,
                         title_draft,
                         body_draft,
-                        lifecycle_days,
                         visibility_draft,
+                        category_draft,
+                        due_date_draft,
+                        tags_draft,
+                        done_draft,
+                        priority_draft,
                         editing,
                         status_line,
                         ..
@@ -536,6 +458,7 @@ impl MemoApp {
                         let conflicts = rt.svc.take_conflicts();
                         if !conflicts.is_empty() {
                             let n = conflicts.len();
+                            self.pending_sync_hint = n;
                             let first = &conflicts[0];
                             let title = if first.title.is_empty() {
                                 "(无标题)"
@@ -547,21 +470,37 @@ impl MemoApp {
                                 first.local_version, first.remote_node, first.remote_version
                             );
                         }
-                        // 非编辑态时用服务端数据刷新只读展示
                         if !*editing {
                             if let Some(id) = selected.clone() {
                                 if let Some(m) = rt.svc.list().into_iter().find(|m| m.id == id) {
                                     *title_draft = m.title;
                                     *body_draft = m.content;
-                                    *lifecycle_days = match &m.lifecycle {
-                                        MemoLifecycle::Permanent => 0,
-                                        MemoLifecycle::ExpiresAt { .. } => 30,
-                                    };
                                     *visibility_draft = m.visibility;
+                                    *category_draft = m.category.canonical();
+                                    *due_date_draft = m.due_date;
+                                    *tags_draft = m
+                                        .tags
+                                        .iter()
+                                        .map(|t| {
+                                            if t.starts_with('#') {
+                                                t.clone()
+                                            } else {
+                                                format!("#{t}")
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    *done_draft = m.done;
+                                    *priority_draft = m.priority;
+                                    self.memo_doc =
+                                        doc_editor::Doc::from_store(title_draft, body_draft);
                                 } else {
                                     *selected = None;
                                     title_draft.clear();
                                     body_draft.clear();
+                                    tags_draft.clear();
+                                    *done_draft = false;
+                                    *priority_draft = MemoPriority::Normal;
                                 }
                             }
                         }
@@ -584,39 +523,18 @@ fn about_kv(ui: &mut egui::Ui, key: &str, value: &str) {
     });
 }
 
-fn udp_pulse_row(pulse: &UdpPulse) -> (bool, &'static str, String) {
-    if !pulse.lan_on {
-        return (false, "发现已关闭", String::new());
-    }
-    if pulse.is_master {
-        let lit = pulse.tx_pulse;
-        let detail = if pulse.tx_pulse {
-            "发送中".into()
-        } else if let Some(ago) = pulse.last_tx_ago_secs {
-            format!("{ago}s 前发包")
-        } else if pulse.broadcasting {
-            "等待首次广播…".into()
-        } else {
-            "未广播（已关可见性）".into()
-        };
-        (lit, "广播心跳", detail)
-    } else {
-        let lit = pulse.rx_pulse;
-        let detail = if pulse.rx_pulse {
-            "收到广播".into()
-        } else if let Some(ago) = pulse.last_rx_ago_secs {
-            format!("{ago}s 前收到")
-        } else {
-            "等待主机信号…".into()
-        };
-        (lit, "主机信号", detail)
-    }
+fn chrono_like_stamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
 }
 
 impl eframe::App for MemoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         theme::sync(ctx, self.cfg.theme, &mut self.last_theme_mode);
-        // 必须在绘制 TextEdit 之前修正 IME 事件
         sanitize_cjk_ime_events(ctx);
         self.pump(ctx);
 
@@ -628,7 +546,24 @@ impl eframe::App for MemoApp {
         }
 
         if let Screen::Main { .. } = &self.screen {
-            ctx.request_repaint_after(Duration::from_secs(2));
+            let any_input = ctx.input(|i| {
+                i.pointer.any_pressed()
+                    || i.events.iter().any(|e| {
+                        matches!(
+                            e,
+                            egui::Event::Key { pressed: true, .. }
+                                | egui::Event::Text(_)
+                                | egui::Event::Scroll(_)
+                        )
+                    })
+            });
+            if any_input {
+                self.last_input_at = Instant::now();
+            }
+            if self.last_input_at.elapsed() >= AUTO_LOCK {
+                self.pending_switch_person = true;
+            }
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
 
         let mut show_help = self.show_help;
@@ -679,13 +614,16 @@ impl eframe::App for MemoApp {
                 selected,
                 title_draft,
                 body_draft,
-                lifecycle_days,
                 visibility_draft,
+                category_draft,
+                due_date_draft,
+                tags_draft,
+                done_draft,
+                priority_draft,
                 editing,
                 show_settings,
                 settings_draft,
                 show_delete,
-                show_trash,
                 purge_confirm_id,
                 show_export,
                 export_pw,
@@ -707,13 +645,13 @@ impl eframe::App for MemoApp {
                 audit_detail,
             } => {
                 let rt = rt.clone();
-                // 发现列表低频刷新，避免每帧改状态干扰输入法
                 if self.last_peer_refresh.elapsed() >= Duration::from_secs(2) {
                     *peers = rt.engine.connected_peers();
                     *discovered = rt.engine.discovered_peers();
                     let conflicts = rt.svc.take_conflicts();
                     if !conflicts.is_empty() {
                         let n = conflicts.len();
+                        self.pending_sync_hint = n;
                         let first = &conflicts[0];
                         let title = if first.title.is_empty() {
                             "(无标题)"
@@ -728,140 +666,48 @@ impl eframe::App for MemoApp {
                     self.last_peer_refresh = Instant::now();
                 }
 
-                egui::TopBottomPanel::top("top")
-                    .exact_height(44.0)
-                    .frame(theme::top_bar_frame())
-                    .show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 14.0;
-                            app_icon::show(ui, 20.0);
-                            ui.label(theme::brand_title_on_navy(16.0));
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} · {}",
-                                    rt.svc.session_alias(),
-                                    IdentityKeys::short_fp(rt.svc.session_fp())
-                                ))
-                                .color(theme::text_muted())
-                                .size(12.5),
-                            );
-                            if theme::menu_text_button(ui, "退出").clicked() {
-                                self.pending_switch_person = true;
-                            }
-                            if self.left_tab == LeftTab::Memos {
-                                ui.add(
-                                    egui::TextEdit::singleline(search)
-                                        .hint_text(theme::hint("搜索备忘…"))
-                                        .desired_width(180.0),
-                                );
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.spacing_mut().item_spacing.x = 12.0;
-                                let new_label = if self.left_tab == LeftTab::Calendar {
-                                    "新建任务"
-                                } else {
-                                    "新建"
-                                };
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(new_label)
-                                                .color(Color32::WHITE)
-                                                .strong()
-                                                .size(13.5),
-                                        )
-                                        .fill(theme::accent())
-                                        .rounding(Rounding::same(theme::ROUND_CTRL))
-                                        .min_size(Vec2::new(64.0, 28.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    if self.left_tab == LeftTab::Calendar {
-                                        self.show_new_task = true;
-                                        self.task_doc = doc_editor::parse(
-                                            &doc_editor::task_plan_template("未命名任务"),
-                                        );
-                                        self.task_title = self.task_doc.title.clone();
-                                        self.task_plan.clear();
-                                        self.task_date = self.cal.selected_day.clone();
-                                        self.task_start = 9.0;
-                                        self.task_hours = 1.0;
-                                        calendar_view::sync_end_from_hours(
-                                            &self.task_date,
-                                            self.task_start,
-                                            self.task_hours,
-                                            &mut self.task_end_date,
-                                            &mut self.task_end_hour,
-                                        );
-                                        self.task_assignee = rt
-                                            .svc
-                                            .current_person_id()
-                                            .unwrap_or_default();
-                                        self.task_status = TaskStatus::NotStarted;
-                                        self.task_kind = TaskKind::Normal;
-                                        self.task_on_calendar = true;
-                                        self.task_remind = false;
-                                    } else {
-                                        let note = memo_new_template();
-                                        let (title, body) =
-                                            doc_editor::split_note(&note, "未命名备忘");
-                                        let svc = rt.svc.clone();
-                                        let tx = self.tx.clone();
-                                        std::thread::spawn(move || {
-                                            match svc.add(
-                                                &title,
-                                                &body,
-                                                MemoVisibility::Private,
-                                            ) {
-                                                Ok(id) => {
-                                                    let _ = tx.send(BgMsg::CreatedMemo {
-                                                        id,
-                                                        title,
-                                                        body,
-                                                    });
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(BgMsg::Error(e.to_string()));
-                                                }
-                                            }
-                                        });
-                                    }
-                                }
-                                Self::help_about_menu(ui, &mut show_help, &mut show_about);
-                                if theme::menu_text_button(ui, "导出").clicked() {
-                                    let dir = std::path::PathBuf::from(&rt.cfg.data_dir)
-                                        .join("exports");
-                                    let path = dir.join(format!(
-                                        "memo-all-{}.txt",
-                                        chrono_like_stamp()
-                                    ));
-                                    *export_ids = None;
-                                    *export_path = path.display().to_string();
-                                    export_pw.clear();
-                                    *show_export = true;
-                                }
-                                if theme::menu_text_button(ui, "设置").clicked() {
-                                    *settings_draft =
-                                        config::load_settings().unwrap_or(self.cfg.clone());
-                                    *show_settings = true;
-                                }
-                                let nodes_label = if self.show_nodes {
-                                    "隐藏节点"
-                                } else {
-                                    "节点"
-                                };
-                                if theme::menu_text_button(ui, nodes_label).clicked() {
-                                    self.show_nodes = !self.show_nodes;
-                                }
-                                if theme::menu_text_button(ui, "人员").clicked() {
-                                    self.people.show = true;
-                                }
-                            });
-                        });
-                    });
+                if self.last_remind_scan.elapsed() >= Duration::from_secs(30) {
+                    self.last_remind_scan = Instant::now();
+                    let now = chrono::Local::now().naive_local();
+                    for m in rt.svc.list() {
+                        if m.done || m.due_date.trim().is_empty() {
+                            continue;
+                        }
+                        // 经期/备注等日历备忘不当作到期待办提醒
+                        if shell::is_private_calendar_memo(&m) {
+                            continue;
+                        }
+                        if m.remind_seen_for == m.due_date {
+                            continue;
+                        }
+                        let Some(at) = memo_core::remind_at(&m.due_date, m.remind_before_days)
+                        else {
+                            continue;
+                        };
+                        if now < at {
+                            continue;
+                        }
+                        let title = if m.title.trim().is_empty() {
+                            "备忘到期提醒"
+                        } else {
+                            m.title.trim()
+                        };
+                        let body = memo_core::display_due(&m.due_date);
+                        let ok = notify_sys::notify(title, &body);
+                        if let Err(e) = rt.svc.ack_remind(&m.id) {
+                            *status_line = format!("提醒标记失败: {e}");
+                        } else if ok {
+                            *status_line = format!("已提醒：{title}");
+                        } else {
+                            *status_line = format!("到期提醒（系统通知失败）：{title} · {body}");
+                            ctx.request_repaint();
+                        }
+                    }
+                    ctx.request_repaint_after(Duration::from_secs(30));
+                }
 
-                egui::TopBottomPanel::bottom("bottom")
+                // status bar（须在 CentralPanel 之前）
+                egui::TopBottomPanel::bottom("shell_bottom")
                     .frame(theme::bottom_bar_frame())
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -871,58 +717,40 @@ impl eframe::App for MemoApp {
                                     .color(theme::text_muted()),
                             );
                             ui.separator();
-                            {
-                                let online_n = discovered
-                                    .iter()
-                                    .filter(|d| d.status == PeerStatus::Online)
-                                    .count();
-                                let ch_n = discovered.iter().filter(|d| d.sync_ready).count();
-                                ui.label(
-                                    RichText::new(format!(
-                                        "发现 {} · 在线 {} · 通道 {}",
-                                        discovered.len(),
-                                        online_n,
-                                        ch_n
-                                    ))
-                                    .small()
-                                    .color(theme::text_muted()),
-                                );
-                            }
+                            ui.label(
+                                RichText::new(format!(
+                                    "发现 {} · 连接 {}",
+                                    discovered.len(),
+                                    peers.len()
+                                ))
+                                .small()
+                                .color(theme::text_muted()),
+                            );
                             ui.separator();
-                            {
-                                let disk = rt.engine.local_disk_space();
-                                let disk_color = if disk.is_low() {
-                                    theme::danger()
-                                } else if disk.free_bytes < 1024 * 1024 * 1024 {
-                                    theme::warn()
-                                } else {
-                                    theme::text_muted()
-                                };
-                                ui.label(
-                                    RichText::new(format!("磁盘 {}", disk.format_pair()))
-                                        .small()
-                                        .color(disk_color),
-                                )
-                                .on_hover_text("数据目录所在卷：可用 / 总计");
+                            let disk = rt.svc.disk_space();
+                            let disk_txt = if disk.total_bytes > 0 {
+                                format!("磁盘 {}", disk.format_pair())
+                            } else {
+                                "磁盘 —".into()
+                            };
+                            let disk_color = if disk.is_low() {
+                                theme::warn()
+                            } else {
+                                theme::text_muted()
+                            };
+                            let disk_resp = ui.label(
+                                RichText::new(disk_txt).small().color(disk_color),
+                            );
+                            if disk.is_low() {
+                                disk_resp.on_hover_text(memo_core::disk::disk_help_hint());
+                            } else if disk.total_bytes > 0 {
+                                disk_resp.on_hover_text("数据目录所在卷：可用 / 总量");
                             }
-                            if let Some(reason) = rt.engine.take_sync_block_reason() {
-                                *status_line = reason;
-                            }
-                            ui.separator();
                             if *audit_ok {
+                                ui.separator();
                                 ui.label(
                                     RichText::new("审计完整").small().color(theme::success()),
                                 );
-                            } else {
-                                ui.label(
-                                    RichText::new(format!("审计: {audit_detail}"))
-                                        .small()
-                                        .color(theme::danger()),
-                                );
-                            }
-                            if let Some(err) = rt.engine.listen_error() {
-                                ui.separator();
-                                ui.label(RichText::new(err).small().color(theme::danger()));
                             }
                             if !status_line.is_empty() {
                                 ui.separator();
@@ -932,1287 +760,96 @@ impl eframe::App for MemoApp {
                                         .color(theme::text_muted()),
                                 );
                             }
+                            let _ = audit_detail;
                         });
                     });
 
-                if self.show_nodes {
-                    egui::SidePanel::right("nodes")
-                        .resizable(true)
-                        .default_width(200.0)
-                        .min_width(140.0)
-                        .max_width(280.0)
-                        .frame(theme::right_panel_frame())
-                        .show(ctx, |ui| {
-                            ui.label(
-                                RichText::new("节点").strong().size(15.0).color(theme::text()),
-                            );
-                            ui.label(
-                                theme::muted_label(if !rt.cfg.lan_discovery {
-                                    "局域网发现已关闭"
-                                } else if rt.cfg.node_role.is_master() {
-                                    "主机 10s 广播 · 从机/主机登记 · TCP 通道"
-                                } else {
-                                    "从机：收听主机广播并登记（不广播）"
-                                })
-                                .small(),
-                            );
-                            ui.label(
-                                RichText::new(format!("本机角色：{}", rt.cfg.node_role.label()))
-                                    .small()
-                                    .color(theme::text_muted()),
-                            );
-                            {
-                                let pulse = rt.engine.udp_pulse();
-                                ui.horizontal(|ui| {
-                                    let (lit, label, detail) = udp_pulse_row(&pulse);
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        Vec2::splat(8.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().circle_filled(
-                                        rect.center(),
-                                        3.5,
-                                        if lit {
-                                            theme::success()
-                                        } else {
-                                            theme::border_strong()
-                                        },
-                                    );
-                                    ui.label(
-                                        RichText::new(label)
-                                            .small()
-                                            .color(if lit {
-                                                theme::success()
-                                            } else {
-                                                theme::text_muted()
-                                            }),
-                                    );
-                                    ui.label(
-                                        RichText::new(detail)
-                                            .small()
-                                            .color(theme::text_muted()),
-                                    );
-                                });
-                                ctx.request_repaint_after(Duration::from_millis(100));
-                            }
-                            {
-                                let disk = rt.engine.local_disk_space();
-                                let c = if disk.is_low() {
-                                    theme::danger()
-                                } else {
-                                    theme::text_muted()
-                                };
-                                ui.label(
-                                    RichText::new(format!("本机磁盘 {}", disk.format_pair()))
-                                        .small()
-                                        .color(c),
-                                );
-                            }
-                            egui::CollapsingHeader::new(
-                                RichText::new("如何腾出空间").small().color(theme::text_muted()),
-                            )
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.label(
-                                    theme::muted_label(
-                                        "1) 清理数据盘无关大文件\n\
-                                         2) 设置中把「数据目录」改到更大磁盘并迁移后重启\n\
-                                         3) 删除不需要的 exports/ 与旧 .memobak\n\
-                                         4) 满盘时勿大量导入或全量同步",
-                                    )
-                                    .small(),
-                                );
-                            });
-                            if rt.engine.peer_count_warning() {
-                                ui.label(
-                                    RichText::new("节点偏多，建议减少同 salt 设备")
-                                        .small()
-                                        .color(theme::warn()),
-                                );
-                            }
-                            ui.add_space(8.0);
-                            {
-                                let g = rt.svc.current_person_gender();
-                                let tag = g.tag();
-                                if !tag.is_empty() {
-                                    let who = rt
-                                        .svc
-                                        .current_person_id()
-                                        .map(|id| rt.svc.person_name(&id))
-                                        .unwrap_or_else(|| "本机".into());
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new("本机当前")
-                                                .small()
-                                                .color(theme::text_muted()),
-                                        );
-                                        gender_chip(ui, g);
-                                        ui.label(
-                                            RichText::new(who)
-                                                .small()
-                                                .color(theme::text()),
-                                        );
-                                    });
-                                } else {
-                                    ui.label(
-                                        theme::muted_label("本机未设置当前人员性别（人员目录中「设为当前」）")
-                                            .small(),
-                                    );
-                                }
-                            }
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                if discovered.is_empty() {
-                                    ui.label(
-                                        theme::muted_label(if rt.cfg.node_role.is_master() {
-                                            "暂无从机/对端主机\n请确认同网段、同 salt，并放行 UDP 17000"
-                                        } else {
-                                            "暂未发现主机\n请确认有主机在广播，同网段、同 salt"
-                                        })
-                                        .small(),
-                                    );
-                                }
-                                for d in discovered.iter() {
-                                    let (st_color, dot) = match d.status {
-                                        PeerStatus::Online => (theme::success(), theme::success()),
-                                        PeerStatus::Stale => (theme::warn(), theme::warn()),
-                                        PeerStatus::Offline => (theme::danger(), theme::border_strong()),
-                                        PeerStatus::Undiscovered => {
-                                            (theme::text_muted(), theme::border_strong())
-                                        }
-                                    };
-                                    theme::card_frame()
-                                        .inner_margin(Margin::same(10.0))
-                                        .show(ui, |ui| {
-                                            ui.set_min_width(ui.available_width());
-                                            ui.horizontal(|ui| {
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    Vec2::splat(8.0),
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().circle_filled(rect.center(), 3.5, dot);
-                                                let title = if d.alias.is_empty() {
-                                                    d.node_id.clone()
-                                                } else {
-                                                    format!("{} · {}", d.alias, d.node_id)
-                                                };
-                                                ui.label(
-                                                    RichText::new(title)
-                                                        .strong()
-                                                        .small()
-                                                        .color(theme::text()),
-                                                );
-                                                if d.gender.tag() != "" {
-                                                    gender_chip(ui, d.gender);
-                                                }
-                                            });
-                                            if !d.key_fingerprint.is_empty() {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "身份 {}",
-                                                        IdentityKeys::short_fp(&d.key_fingerprint)
-                                                    ))
-                                                    .small()
-                                                    .color(theme::text_muted()),
-                                                );
-                                            }
-                                            ui.label(
-                                                RichText::new(&d.addr)
-                                                    .small()
-                                                    .color(theme::text_muted()),
-                                            );
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    RichText::new(d.role.label())
-                                                        .small()
-                                                        .color(theme::accent()),
-                                                );
-                                                ui.label(
-                                                    RichText::new(d.status.label())
-                                                        .small()
-                                                        .color(st_color),
-                                                );
-                                                if d.sync_ready {
-                                                    ui.label(
-                                                        RichText::new("通道")
-                                                            .small()
-                                                            .color(theme::success()),
-                                                    );
-                                                }
-                                                if d.status != PeerStatus::Undiscovered
-                                                    && d.last_seen_secs < 3600
-                                                {
-                                                    ui.label(
-                                                        RichText::new(format!(
-                                                            "{}s 前",
-                                                            d.last_seen_secs
-                                                        ))
-                                                        .small()
-                                                        .color(theme::text_muted()),
-                                                    );
-                                                }
-                                            });
-                                            if rt.cfg.node_role.is_master() {
-                                                if let Some(mut acl) = rt
-                                                    .engine
-                                                    .list_peer_acls()
-                                                    .into_iter()
-                                                    .find(|a| a.node_id == d.node_id)
-                                                {
-                                                    let mut priv_b = acl.allow_private_backup;
-                                                    let mut pub_s = acl.allow_public_sync;
-                                                    ui.horizontal(|ui| {
-                                                        if ui
-                                                            .checkbox(&mut priv_b, "私有备份")
-                                                            .changed()
-                                                            || ui
-                                                                .checkbox(&mut pub_s, "公开同步")
-                                                                .changed()
-                                                        {
-                                                            let _ = rt.engine.set_peer_acl(
-                                                                &acl.node_id,
-                                                                priv_b,
-                                                                pub_s,
-                                                            );
-                                                            acl.allow_private_backup = priv_b;
-                                                            acl.allow_public_sync = pub_s;
-                                                        }
-                                                    });
-                                                }
-                                            }
-                                            let disk_line = match (d.disk_free, d.disk_total) {
-                                                (Some(f), Some(t)) => {
-                                                    format!(
-                                                        "磁盘 {} / {}",
-                                                        format_bytes(f),
-                                                        format_bytes(t)
-                                                    )
-                                                }
-                                                _ => "空间未知".into(),
-                                            };
-                                            ui.label(
-                                                RichText::new(disk_line)
-                                                    .small()
-                                                    .color(theme::text_muted()),
-                                            );
-                                        });
-                                    ui.add_space(6.0);
-                                }
-                            });
-                        });
+                let auto_lock_remaining =
+                    AUTO_LOCK.saturating_sub(self.last_input_at.elapsed());
+                let shell_action: ShellAction = shell::show(
+                    ctx,
+                    &rt.svc,
+                    &mut self.shell,
+                    search,
+                    selected,
+                    title_draft,
+                    body_draft,
+                    visibility_draft,
+                    category_draft,
+                    due_date_draft,
+                    tags_draft,
+                    done_draft,
+                    priority_draft,
+                    editing,
+                    &mut self.memo_doc,
+                    &mut self.edit_form,
+                    status_line,
+                    show_settings,
+                    show_export,
+                    export_pw,
+                    export_path,
+                    export_ids,
+                    show_history,
+                    history_entity,
+                    history_events,
+                    history_sel_a,
+                    history_sel_b,
+                    show_delete,
+                    purge_confirm_id,
+                    &mut show_help,
+                    &mut show_about,
+                    &rt.cfg.data_dir,
+                    rt.cfg.show_backup_status,
+                    discovered,
+                    peers.len(),
+                    self.last_sync_at,
+                    auto_lock_remaining,
+                    self.pending_sync_hint,
+                    &rt.cfg.node_id,
+                    rt.cfg.node_role,
+                    rt.cfg.node_visible,
+                    rt.cfg.lan_discovery,
+                    rt.svc.disk_space(),
+                    &mut settings_draft.backup_targets,
+                    &self.tx,
+                );
+                if shell_action.backup_dirty {
+                    let _ = config::save_settings(settings_draft);
+                    rt.engine
+                        .set_backup_targets(settings_draft.backup_targets.clone());
+                    self.cfg.backup_targets = settings_draft.backup_targets.clone();
                 }
-
-                let mut filtered: Vec<_> = rt
-                    .svc
-                    .list()
-                    .into_iter()
-                    .filter(|m| {
-                        let q = search.to_lowercase();
-                        q.is_empty()
-                            || m.title.to_lowercase().contains(&q)
-                            || m.content.to_lowercase().contains(&q)
-                    })
-                    .collect();
-                filtered.sort_by(|a, b| b.version.cmp(&a.version));
-
-                let tasks_all = rt.svc.list_tasks();
-                let persons_all = rt.svc.list_active_persons();
-                let female_current =
-                    matches!(rt.svc.current_person_gender(), Gender::Female);
-                let cycle_cfg = rt.svc.current_cycle();
-                if let Some(pid) = rt.svc.current_person_id() {
-                    if female_current && self.cal.cycle_synced_person != pid {
-                        self.cal.load_cycle_draft(cycle_cfg.as_ref());
-                        self.cal.cycle_synced_person = pid;
-                    }
-                } else {
-                    self.cal.cycle_synced_person.clear();
+                if shell_action.open_new_memo {
+                    shell::begin_new_memo(
+                        selected,
+                        editing,
+                        &mut self.edit_form,
+                        self.shell.nav,
+                    );
+                    *status_line = "填写新建备忘，保存后写入本机".into();
                 }
-                if let Some(cfg) = self.cal.take_cycle_save() {
-                    if let Some(pid) = rt.svc.current_person_id() {
-                        match rt.svc.set_cycle(&pid, cfg) {
-                            Ok(()) => {
-                                *status_line = "周期已保存（仅本机）".into();
-                                self.cal.cycle_synced_person = pid;
-                            }
-                            Err(e) => *status_line = format!("保存周期失败: {e}"),
-                        }
-                    } else {
-                        *status_line = "请先设置当前人员".into();
-                    }
+                if shell_action.switch {
+                    self.pending_switch_person = true;
                 }
-
-                let reminders = rt.svc.today_reminders();
-                if !reminders.is_empty() {
-                    egui::TopBottomPanel::top("remind_banner")
-                        .frame(
-                            Frame::none()
-                                .fill(theme::remind_bg())
-                                .inner_margin(Margin::symmetric(16.0, 6.0)),
-                        )
-                        .show(ctx, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    RichText::new("今日提醒")
-                                        .strong()
-                                        .size(13.0)
-                                        .color(theme::remind_fg()),
-                                );
-                                for t in &reminders {
-                                    let label = format!("[{}] {}", t.kind.label(), t.title);
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new(label)
-                                                    .size(13.0)
-                                                    .color(calendar_view::kind_color(t.kind)),
-                                            )
-                                            .frame(false),
-                                        )
-                                        .on_hover_text("打开任务")
-                                        .clicked()
-                                    {
-                                        self.left_tab = LeftTab::Calendar;
-                                        apply_selected_task(
-                                            &mut self.cal,
-                                            &mut self.task_title,
-                                            &mut self.task_plan,
-                                            &mut self.task_doc,
-                                            &mut self.task_date,
-                                            &mut self.task_start,
-                                            &mut self.task_end_date,
-                                            &mut self.task_end_hour,
-                                            &mut self.task_hours,
-                                            &mut self.task_assignee,
-                                            &mut self.task_status,
-                                            &mut self.task_kind,
-                                            &mut self.task_on_calendar,
-                                            &mut self.task_remind,
-                                            &mut self.task_editing,
-                                            t,
-                                        );
-                                        *selected = None;
-                                        *editing = false;
-                                    }
-                                    ui.separator();
-                                }
-                            });
-                        });
-                }
-
-                let left_w = if self.left_tab == LeftTab::Calendar {
-                    300.0
-                } else {
-                    280.0
-                };
-                egui::SidePanel::left("list")
-                    .resizable(true)
-                    .default_width(left_w)
-                    .min_width(220.0)
-                    .max_width(420.0)
-                    .frame(theme::left_panel_frame())
-                    .show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(
-                                    self.left_tab == LeftTab::Memos,
-                                    RichText::new("备忘").strong().size(14.0),
-                                )
-                                .clicked()
-                            {
-                                self.left_tab = LeftTab::Memos;
-                                self.cal.selected_task = None;
-                            }
-                            if ui
-                                .selectable_label(
-                                    self.left_tab == LeftTab::Calendar,
-                                    RichText::new("日历").strong().size(14.0),
-                                )
-                                .clicked()
-                            {
-                                self.left_tab = LeftTab::Calendar;
-                                *selected = None;
-                                *editing = false;
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let trash_n = rt.svc.list_trash().len();
-                                let label = if trash_n > 0 {
-                                    format!("回收站 ({trash_n})")
-                                } else {
-                                    "回收站".into()
-                                };
-                                if theme::ghost_button(ui, &label).clicked() {
-                                    *show_trash = true;
-                                    *purge_confirm_id = None;
-                                }
-                            });
-                        });
-                        ui.add_space(6.0);
-
-                        match self.left_tab {
-                            LeftTab::Memos => {
-                                ui.label(
-                                    theme::muted_label("单击打开 · 右键删除").small(),
-                                );
-                                ui.add_space(6.0);
-                                egui::ScrollArea::vertical().show(ui, |ui| {
-                                    if filtered.is_empty() {
-                                        ui.label(theme::muted_label(
-                                            "还没有备忘，点击右上角「新建」即可记下第一笔",
-                                        ));
-                                    }
-                                    for m in &filtered {
-                                        let title_raw = if m.title.is_empty() {
-                                            "(无标题)".to_string()
-                                        } else {
-                                            m.title.clone()
-                                        };
-                                        let summary_raw: String =
-                                            m.content.chars().take(48).collect();
-                                        let sel = selected.as_deref() == Some(m.id.as_str());
-                                        let item_id = m.id.clone();
-                                        let item_title = m.title.clone();
-                                        let item_body = m.content.clone();
-                                        let show_bak = self.cfg.show_backup_status;
-                                        let bak = if show_bak {
-                                            let owner = if m.owner_fp.is_empty() {
-                                                rt.svc.session_fp().to_string()
-                                            } else {
-                                                m.owner_fp.clone()
-                                            };
-                                            Some(rt.engine.backup_status_for(
-                                                &owner,
-                                                &m.id,
-                                                m.version,
-                                                &m.modified_at,
-                                                m.visibility,
-                                            ))
-                                        } else {
-                                            None
-                                        };
-                                        let bak_color = bak.map(|b| match b {
-                                            BackupUiStatus::Synced => theme::success(),
-                                            BackupUiStatus::Queued | BackupUiStatus::Pending => {
-                                                theme::warn()
-                                            }
-                                            BackupUiStatus::Offline | BackupUiStatus::Public => {
-                                                theme::text_muted()
-                                            }
-                                        });
-
-                                        let row_w = ui.available_width().max(40.0);
-                                        let row_h = 52.0_f32;
-                                        let (rect, resp) = ui.allocate_exact_size(
-                                            Vec2::new(row_w, row_h),
-                                            egui::Sense::click(),
-                                        );
-                                        let resp =
-                                            resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-
-                                        if ui.is_rect_visible(rect) {
-                                            let fill = theme::list_row_fill(sel, resp.hovered());
-                                            ui.painter().rect(
-                                                rect,
-                                                Rounding::same(theme::ROUND_CTRL),
-                                                fill,
-                                                Stroke::new(1.0, theme::border()),
-                                            );
-
-                                            let pad_x = 10.0;
-                                            let pad_y = 8.0;
-                                            let badge_font = egui::FontId::proportional(11.0);
-                                            let badge_galley = bak.zip(bak_color).map(|(b, c)| {
-                                                ui.fonts(|f| {
-                                                    f.layout_no_wrap(
-                                                        b.label().to_string(),
-                                                        badge_font.clone(),
-                                                        c,
-                                                    )
-                                                })
-                                            });
-                                            let badge_w = badge_galley
-                                                .as_ref()
-                                                .map(|g| g.size().x + 4.0)
-                                                .unwrap_or(0.0);
-                                            let text_w =
-                                                (rect.width() - pad_x * 2.0 - badge_w).max(12.0);
-                                            let title_font = egui::FontId::proportional(14.5);
-                                            let summary_font = egui::FontId::proportional(12.0);
-                                            let title = ellipsize_ui(
-                                                ui,
-                                                &title_raw,
-                                                title_font.clone(),
-                                                text_w,
-                                            );
-                                            let summary = ellipsize_ui(
-                                                ui,
-                                                &summary_raw,
-                                                summary_font.clone(),
-                                                text_w,
-                                            );
-
-                                            let painter = ui.painter().with_clip_rect(rect);
-                                            painter.text(
-                                                egui::pos2(
-                                                    rect.left() + pad_x,
-                                                    rect.top() + pad_y,
-                                                ),
-                                                egui::Align2::LEFT_TOP,
-                                                &title,
-                                                title_font,
-                                                theme::text(),
-                                            );
-                                            if let (Some(galley), Some(c)) =
-                                                (badge_galley, bak_color)
-                                            {
-                                                let gw = galley.size().x;
-                                                painter.galley(
-                                                    egui::pos2(
-                                                        rect.right() - pad_x - gw,
-                                                        rect.top() + pad_y + 1.0,
-                                                    ),
-                                                    galley,
-                                                    c,
-                                                );
-                                            }
-                                            painter.text(
-                                                egui::pos2(
-                                                    rect.left() + pad_x,
-                                                    rect.top() + pad_y + 20.0,
-                                                ),
-                                                egui::Align2::LEFT_TOP,
-                                                &summary,
-                                                summary_font,
-                                                theme::text_muted(),
-                                            );
-                                        }
-
-                                        if resp.clicked() {
-                                            *selected = Some(item_id.clone());
-                                            *title_draft = item_title.clone();
-                                            *body_draft = item_body.clone();
-                                            *lifecycle_days = match &m.lifecycle {
-                                                MemoLifecycle::Permanent => 0,
-                                                MemoLifecycle::ExpiresAt { .. } => 30,
-                                            };
-                                            *visibility_draft = m.visibility;
-                                            *editing = false;
-                                            self.cal.selected_task = None;
-                                        }
-                                        resp.context_menu(|ui| {
-                                            if ui.button("打开").clicked() {
-                                                *selected = Some(item_id.clone());
-                                                *title_draft = item_title.clone();
-                                                *body_draft = item_body.clone();
-                                                *lifecycle_days = match &m.lifecycle {
-                                                    MemoLifecycle::Permanent => 0,
-                                                    MemoLifecycle::ExpiresAt { .. } => 30,
-                                                };
-                                                *visibility_draft = m.visibility;
-                                                *editing = false;
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            if ui
-                                                .add(egui::Button::new(
-                                                    RichText::new("移入回收站…").color(theme::danger()),
-                                                ))
-                                                .clicked()
-                                            {
-                                                *selected = Some(item_id.clone());
-                                                *title_draft = item_title.clone();
-                                                *body_draft = item_body.clone();
-                                                *editing = false;
-                                                *show_delete = true;
-                                                ui.close_menu();
-                                            }
-                                        });
-                                        ui.add_space(6.0);
-                                    }
-                                });
-                            }
-                            LeftTab::Calendar => {
-                                if let Some(tid) = calendar_view::show_left(
-                                    ui,
-                                    &mut self.cal,
-                                    &tasks_all,
-                                    &persons_all,
-                                    female_current,
-                                    cycle_cfg.as_ref(),
-                                ) {
-                                    if let Some(t) = tasks_all.iter().find(|t| t.id == tid) {
-                                        apply_selected_task(
-                                            &mut self.cal,
-                                            &mut self.task_title,
-                                            &mut self.task_plan,
-                                            &mut self.task_doc,
-                                            &mut self.task_date,
-                                            &mut self.task_start,
-                                            &mut self.task_end_date,
-                                            &mut self.task_end_hour,
-                                            &mut self.task_hours,
-                                            &mut self.task_assignee,
-                                            &mut self.task_status,
-                                            &mut self.task_kind,
-                                            &mut self.task_on_calendar,
-                                            &mut self.task_remind,
-                                            &mut self.task_editing,
-                                            t,
-                                        );
-                                        *selected = None;
-                                    }
-                                }
-                            }
-                        }
-                    });
-
-                let _ = people_view::show_window(ctx, &mut self.people, &rt.svc);
-                if let Some(pid) = self.people.take_history_id() {
-                    match rt.svc.history_for("person", &pid) {
-                        Ok(ev) => {
-                            *history_entity = "person".into();
-                            *history_events = ev;
-                            *history_sel_a = None;
-                            *history_sel_b = None;
-                            *show_history = true;
+                if shell_action.sync {
+                    *peers = rt.engine.connected_peers();
+                    *discovered = rt.engine.discovered_peers();
+                    match rt.svc.republish_private_backups() {
+                        Ok(n) => {
+                            self.last_sync_at = Some(Instant::now());
+                            self.pending_sync_hint = 0;
+                            *status_line = if n > 0 {
+                                format!("已同步：重新推送 {n} 条私人备份")
+                            } else {
+                                "已同步：节点列表已刷新".into()
+                            };
                         }
                         Err(e) => {
-                            *status_line = format!("读取历史失败: {e}");
+                            *status_line = format!("同步失败: {e}");
                         }
                     }
                 }
 
-                egui::CentralPanel::default()
-                    .frame(theme::content_frame())
-                    .show(ctx, |ui| {
-                        if self.left_tab == LeftTab::Calendar {
-                            if self.cal.selected_task.is_some() {
-                                ui.horizontal(|ui| {
-                                    if theme::ghost_button(ui, "← 返回总览").clicked() {
-                                        self.cal.selected_task = None;
-                                        self.task_editing = false;
-                                    }
-                                    ui.label(
-                                        theme::muted_label("任务详情").small(),
-                                    );
-                                });
-                                ui.add_space(6.0);
-                                draw_task_central(
-                                    ui,
-                                    &rt,
-                                    &persons_all,
-                                    &mut self.cal,
-                                    &mut self.task_title,
-                                    &mut self.task_plan,
-                                    &mut self.task_doc,
-                                    &mut self.task_date,
-                                    &mut self.task_start,
-                                    &mut self.task_end_date,
-                                    &mut self.task_end_hour,
-                                    &mut self.task_hours,
-                                    &mut self.task_assignee,
-                                    &mut self.task_status,
-                                    &mut self.task_kind,
-                                    &mut self.task_on_calendar,
-                                    &mut self.task_remind,
-                                    &mut self.task_editing,
-                                    &mut self.show_task_delete,
-                                    &mut self.task_delete_pw,
-                                    status_line,
-                                    show_history,
-                                    history_entity,
-                                    history_events,
-                                    history_sel_a,
-                                    history_sel_b,
-                                    &self.tx,
-                                );
-                            } else if let Some(tid) = calendar_view::show_central_overview(
-                                ui,
-                                &mut self.cal,
-                                &tasks_all,
-                                &persons_all,
-                                cycle_cfg.as_ref(),
-                            ) {
-                                if let Some(t) = tasks_all.iter().find(|t| t.id == tid) {
-                                    apply_selected_task(
-                                        &mut self.cal,
-                                        &mut self.task_title,
-                                        &mut self.task_plan,
-                                        &mut self.task_doc,
-                                        &mut self.task_date,
-                                        &mut self.task_start,
-                                        &mut self.task_end_date,
-                                        &mut self.task_end_hour,
-                                        &mut self.task_hours,
-                                        &mut self.task_assignee,
-                                        &mut self.task_status,
-                                        &mut self.task_kind,
-                                        &mut self.task_on_calendar,
-                                        &mut self.task_remind,
-                                        &mut self.task_editing,
-                                        t,
-                                    );
-                                    *selected = None;
-                                }
-                            }
-                            return;
-                        }
-                        if selected.is_none() {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(
-                                    theme::muted_label(
-                                        "在左侧选择一条备忘查看详情\n默认只读 · 删除将移入回收站",
-                                    )
-                                    .size(15.0),
-                                );
-                            });
-                            return;
-                        }
-                        let id = selected.clone().unwrap();
-                        let meta = filtered.iter().find(|m| m.id == id);
-
-                        let avail_h = ui.available_height();
-                        Frame::none().show(ui, |ui| {
-                                ui.set_min_height(avail_h - 8.0);
-                                ui.set_min_width(ui.available_width());
-                                let title_show = if title_draft.is_empty() {
-                                    "(无标题)"
-                                } else {
-                                    title_draft.as_str()
-                                };
-                                ui.horizontal(|ui| {
-                                    ui.heading(
-                                        RichText::new(title_show).size(24.0).color(theme::text()),
-                                    );
-                                    if *editing {
-                                        ui.label(
-                                            RichText::new("编辑中")
-                                                .small()
-                                                .color(theme::warn()),
-                                        );
-                                    } else {
-                                        ui.label(theme::muted_label("只读").small());
-                                    }
-                                });
-                                if let Some(m) = meta {
-                                    let src = rt.svc.display_name_for(&m.node_id);
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "ID  {}    版本 {}    来源 {}    {}    生命周期 {}",
-                                            m.id,
-                                            m.version,
-                                            src,
-                                            m.visibility.label(),
-                                            m.lifecycle.label()
-                                        ))
-                                        .small()
-                                        .color(theme::text_muted()),
-                                    );
-                                }
-                                if *editing {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new("可见性")
-                                                .small()
-                                                .color(theme::text_muted()),
-                                        );
-                                        ui.radio_value(
-                                            visibility_draft,
-                                            MemoVisibility::Private,
-                                            "私密",
-                                        );
-                                        ui.radio_value(
-                                            visibility_draft,
-                                            MemoVisibility::Public,
-                                            "公开",
-                                        );
-                                        ui.separator();
-                                        ui.label(
-                                            RichText::new("生命周期")
-                                                .small()
-                                                .color(theme::text_muted()),
-                                        );
-                                        egui::ComboBox::from_id_source("memo_lifecycle")
-                                            .selected_text(match *lifecycle_days {
-                                                0 => "永久",
-                                                30 => "30 天",
-                                                90 => "90 天",
-                                                365 => "1 年",
-                                                _ => "自定义",
-                                            })
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(lifecycle_days, 0, "永久");
-                                                ui.selectable_value(lifecycle_days, 30, "30 天");
-                                                ui.selectable_value(lifecycle_days, 90, "90 天");
-                                                ui.selectable_value(lifecycle_days, 365, "1 年");
-                                            });
-                                    });
-                                }
-                                ui.add_space(10.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    if !*editing {
-                                        if theme::primary_button(ui, "编辑").clicked() {
-                                            *editing = true;
-                                            self.memo_doc = doc_editor::Doc::from_store(
-                                                title_draft,
-                                                body_draft,
-                                            );
-                                            *status_line =
-                                                "已进入编辑模式，修改后请点「保存」".into();
-                                        }
-                                    } else {
-                                        if theme::success_button(ui, "保存").clicked() {
-                                            let (t, b) =
-                                                self.memo_doc.to_store("未命名备忘");
-                                            *title_draft = t.clone();
-                                            *body_draft = b.clone();
-                                            let life = if *lifecycle_days <= 0 {
-                                                MemoLifecycle::Permanent
-                                            } else {
-                                                MemoLifecycle::from_days(*lifecycle_days)
-                                            };
-                                            let vis = *visibility_draft;
-                                            let svc = rt.svc.clone();
-                                            let id2 = id.clone();
-                                            let tx = self.tx.clone();
-                                            std::thread::spawn(move || {
-                                                match svc.edit_with_lifecycle(
-                                                    &id2, &t, &b, vis, life,
-                                                ) {
-                                                    Ok(()) => {
-                                                        let _ =
-                                                            tx.send(BgMsg::Info("已保存".into()));
-                                                        let _ = tx.send(BgMsg::Refresh);
-                                                    }
-                                                    Err(e) => {
-                                                        let _ =
-                                                            tx.send(BgMsg::Error(e.to_string()));
-                                                    }
-                                                }
-                                            });
-                                            *editing = false;
-                                        }
-                                        if theme::ghost_button(ui, "取消编辑").clicked() {
-                                            *editing = false;
-                                            if let Some(m) = meta {
-                                                *title_draft = m.title.clone();
-                                                *body_draft = m.content.clone();
-                                                *visibility_draft = m.visibility;
-                                                *lifecycle_days = match &m.lifecycle {
-                                                    MemoLifecycle::Permanent => 0,
-                                                    MemoLifecycle::ExpiresAt { .. } => 30,
-                                                };
-                                                self.memo_doc = doc_editor::Doc::from_store(
-                                                    &m.title,
-                                                    &m.content,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    ui.separator();
-                                    if theme::ghost_button(ui, "复制全文").clicked() {
-                                        let text = format!("{}\n\n{}", title_draft, body_draft);
-                                        ui.output_mut(|o| o.copied_text = text);
-                                        *status_line = "已复制到剪贴板".into();
-                                    }
-                                    if theme::ghost_button(ui, "复制标题").clicked() {
-                                        ui.output_mut(|o| o.copied_text = title_draft.clone());
-                                        *status_line = "标题已复制".into();
-                                    }
-                                    if theme::ghost_button(ui, "导出").clicked() {
-                                        let dir = std::path::PathBuf::from(&rt.cfg.data_dir)
-                                            .join("exports");
-                                        let path = dir.join(format!(
-                                            "memo-{}-{}.txt",
-                                            &id[..8.min(id.len())],
-                                            chrono_like_stamp()
-                                        ));
-                                        *export_ids = Some(vec![id.clone()]);
-                                        *export_path = path.display().to_string();
-                                        export_pw.clear();
-                                        *show_export = true;
-                                    }
-                                    if theme::ghost_button(ui, "历史").clicked() {
-                                        match rt.svc.history_for("memo", &id) {
-                                            Ok(ev) => {
-                                                *history_entity = "memo".into();
-                                                *history_events = ev;
-                                                *history_sel_a = None;
-                                                *history_sel_b = None;
-                                                *show_history = true;
-                                            }
-                                            Err(e) => {
-                                                *status_line = format!("读取历史失败: {e}");
-                                            }
-                                        }
-                                    }
-                                    if theme::ghost_button(ui, "加入日历").clicked() {
-                                        let day = self.cal.selected_day.clone();
-                                        let title = if title_draft.trim().is_empty() {
-                                            "未命名备忘".to_string()
-                                        } else {
-                                            title_draft.trim().to_string()
-                                        };
-                                        let plan = format!("来自备忘\n\n{}", body_draft);
-                                        let assignee = rt
-                                            .svc
-                                            .current_person_id()
-                                            .unwrap_or_default();
-                                        match rt.svc.add_task(
-                                            &title,
-                                            &plan,
-                                            &day,
-                                            9.0,
-                                            &day,
-                                            10.0,
-                                            &assignee,
-                                            TaskStatus::NotStarted,
-                                            TaskKind::Normal,
-                                            true,
-                                            false,
-                                        ) {
-                                            Ok(tid) => {
-                                                self.left_tab = LeftTab::Calendar;
-                                                if let Some(t) = rt.svc.get_task(&tid) {
-                                                    apply_selected_task(
-                                                        &mut self.cal,
-                                                        &mut self.task_title,
-                                                        &mut self.task_plan,
-                                                        &mut self.task_doc,
-                                                        &mut self.task_date,
-                                                        &mut self.task_start,
-                                                        &mut self.task_end_date,
-                                                        &mut self.task_end_hour,
-                                                        &mut self.task_hours,
-                                                        &mut self.task_assignee,
-                                                        &mut self.task_status,
-                                                        &mut self.task_kind,
-                                                        &mut self.task_on_calendar,
-                                                        &mut self.task_remind,
-                                                        &mut self.task_editing,
-                                                        &t,
-                                                    );
-                                                } else {
-                                                    self.cal.selected_task = Some(tid.clone());
-                                                }
-                                                *selected = None;
-                                                *editing = false;
-                                                *status_line =
-                                                    format!("已加入日历任务 {}", &tid[..8.min(tid.len())]);
-                                                let _ = self.tx.send(BgMsg::Refresh);
-                                            }
-                                            Err(e) => {
-                                                *status_line = format!("加入日历失败: {e}");
-                                            }
-                                        }
-                                    }
-                                });
-                                ui.add_space(10.0);
-                                ui.separator();
-                                ui.add_space(8.0);
-
-                                if *editing {
-                                    let (t, b) = self.memo_doc.to_store("未命名备忘");
-                                    *title_draft = t;
-                                    *body_draft = b;
-                                    doc_editor::show_editor(ui, &mut self.memo_doc, "memo");
-                                } else {
-                                    egui::ScrollArea::vertical()
-                                        .auto_shrink([false, false])
-                                        .id_source("memo_body_scroll")
-                                        .show(ui, |ui| {
-                                            ui.set_min_width(ui.available_width());
-                                            doc_editor::show_viewer_body(ui, body_draft);
-                                        });
-                                }
-                            });
-                    });
-
-                if self.show_new_task {
-                    let modal = theme::begin_modal(ctx, "new_task_modal");
-                    let mut open = true;
-                    theme::modal_fixed(ctx, "新建任务", [560.0, 520.0])
-                        .id(modal.window_id)
-                        .open(&mut open)
-                        .show(ctx, |ui| {
-                            let footer_h = 48.0;
-                            let body_h = (ui.available_height() - footer_h).max(160.0);
-                            // 给编辑器固定视口高度，避免 ScrollArea 内 ∞ 高度撑窗
-                            let editor_h = (body_h * 0.42).clamp(160.0, 240.0);
-                            egui::ScrollArea::vertical()
-                                .id_source("new_task_scroll")
-                                .max_height(body_h)
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.label(
-                                        RichText::new("第一行是标题，下面写计划")
-                                            .small()
-                                            .color(theme::text_muted()),
-                                    );
-                                    ui.add_space(4.0);
-                                    {
-                                        let (t, p) = self.task_doc.to_store("未命名任务");
-                                        self.task_title = t;
-                                        self.task_plan = p;
-                                    }
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new(ui.available_width(), editor_h),
-                                        egui::Layout::top_down(egui::Align::Min),
-                                        |ui| {
-                                            doc_editor::show_editor(
-                                                ui,
-                                                &mut self.task_doc,
-                                                "new_task",
-                                            );
-                                        },
-                                    );
-                                    ui.add_space(8.0);
-                                    ui.horizontal(|ui| {
-                                        ui.label("开始日期");
-                                        if ui
-                                            .add(
-                                                egui::TextEdit::singleline(&mut self.task_date)
-                                                    .desired_width(110.0)
-                                                    .hint_text(theme::hint("YYYY-MM-DD")),
-                                            )
-                                            .changed()
-                                        {
-                                            calendar_view::ensure_end_after_start(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &mut self.task_end_date,
-                                                &mut self.task_end_hour,
-                                            );
-                                            if let Ok(h) = memo_core::task::duration_hours(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &self.task_end_date,
-                                                self.task_end_hour,
-                                            ) {
-                                                self.task_hours = h;
-                                            }
-                                        }
-                                        ui.label("开始时");
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut self.task_start)
-                                                    .speed(0.25)
-                                                    .clamp_range(0.0..=23.75),
-                                            )
-                                            .changed()
-                                        {
-                                            calendar_view::ensure_end_after_start(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &mut self.task_end_date,
-                                                &mut self.task_end_hour,
-                                            );
-                                            if let Ok(h) = memo_core::task::duration_hours(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &self.task_end_date,
-                                                self.task_end_hour,
-                                            ) {
-                                                self.task_hours = h;
-                                            }
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("结束日期");
-                                        if ui
-                                            .add(
-                                                egui::TextEdit::singleline(&mut self.task_end_date)
-                                                    .desired_width(110.0)
-                                                    .hint_text(theme::hint("YYYY-MM-DD")),
-                                            )
-                                            .changed()
-                                        {
-                                            calendar_view::ensure_end_after_start(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &mut self.task_end_date,
-                                                &mut self.task_end_hour,
-                                            );
-                                            if let Ok(h) = memo_core::task::duration_hours(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &self.task_end_date,
-                                                self.task_end_hour,
-                                            ) {
-                                                self.task_hours = h;
-                                            }
-                                        }
-                                        ui.label("结束时");
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut self.task_end_hour)
-                                                    .speed(0.25)
-                                                    .clamp_range(0.0..=24.0),
-                                            )
-                                            .changed()
-                                        {
-                                            calendar_view::ensure_end_after_start(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &mut self.task_end_date,
-                                                &mut self.task_end_hour,
-                                            );
-                                            if let Ok(h) = memo_core::task::duration_hours(
-                                                &self.task_date,
-                                                self.task_start,
-                                                &self.task_end_date,
-                                                self.task_end_hour,
-                                            ) {
-                                                self.task_hours = h;
-                                            }
-                                        }
-                                        ui.label("工时");
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut self.task_hours)
-                                                    .speed(0.25)
-                                                    .clamp_range(0.25..=240.0),
-                                            )
-                                            .changed()
-                                        {
-                                            calendar_view::sync_end_from_hours(
-                                                &self.task_date,
-                                                self.task_start,
-                                                self.task_hours,
-                                                &mut self.task_end_date,
-                                                &mut self.task_end_hour,
-                                            );
-                                        }
-                                    });
-                                    ui.label("负责人");
-                                    egui::ComboBox::from_id_source("new_task_assignee")
-                                        .selected_text(
-                                            persons_all
-                                                .iter()
-                                                .find(|p| p.id == self.task_assignee)
-                                                .map(|p| p.name.as_str())
-                                                .unwrap_or("(选择)"),
-                                        )
-                                        .show_ui(ui, |ui| {
-                                            for p in &persons_all {
-                                                ui.selectable_value(
-                                                    &mut self.task_assignee,
-                                                    p.id.clone(),
-                                                    &p.name,
-                                                );
-                                            }
-                                        });
-                                    ui.label("状态");
-                                    egui::ComboBox::from_id_source("new_task_status")
-                                        .selected_text(self.task_status.label())
-                                        .show_ui(ui, |ui| {
-                                            for s in TaskStatus::ALL {
-                                                ui.selectable_value(
-                                                    &mut self.task_status,
-                                                    s,
-                                                    s.label(),
-                                                );
-                                            }
-                                        });
-                                    ui.horizontal(|ui| {
-                                        ui.label("类型");
-                                        let prev = self.task_kind;
-                                        egui::ComboBox::from_id_source("new_task_kind")
-                                            .selected_text(self.task_kind.label())
-                                            .show_ui(ui, |ui| {
-                                                for k in TaskKind::ALL {
-                                                    ui.selectable_value(
-                                                        &mut self.task_kind,
-                                                        k,
-                                                        k.label(),
-                                                    );
-                                                }
-                                            });
-                                        if self.task_kind != prev {
-                                            self.task_on_calendar = true;
-                                            self.task_remind = self.task_kind.default_remind();
-                                        }
-                                        ui.checkbox(&mut self.task_on_calendar, "加入日历");
-                                        ui.checkbox(&mut self.task_remind, "提醒我");
-                                    });
-                                });
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                if theme::success_button(ui, "添加").clicked() {
-                                    let (t, p) = self.task_doc.to_store("未命名任务");
-                                    self.task_title = t;
-                                    self.task_plan = p;
-                                    match rt.svc.add_task(
-                                        &self.task_title,
-                                        &self.task_plan,
-                                        &self.task_date,
-                                        self.task_start,
-                                        &self.task_end_date,
-                                        self.task_end_hour,
-                                        &self.task_assignee,
-                                        self.task_status,
-                                        self.task_kind,
-                                        self.task_on_calendar,
-                                        self.task_remind,
-                                    ) {
-                                        Ok(id) => {
-                                            self.show_new_task = false;
-                                            self.cal.selected_task = Some(id.clone());
-                                            *status_line = format!("已添加任务 {id}");
-                                            let _ = self.tx.send(BgMsg::Refresh);
-                                        }
-                                        Err(e) => *status_line = format!("错误: {e}"),
-                                    }
-                                }
-                                if ui.button("取消").clicked() {
-                                    self.show_new_task = false;
-                                }
-                            });
-                        });
-                    if modal.end(ctx, open) {
-                        self.show_new_task = false;
-                    }
-                }
-
-                if self.show_task_delete {
-                    let modal = theme::begin_modal(ctx, "task_delete_modal");
-                    theme::modal_confirm(ctx, "删除任务")
-                        .id(modal.window_id)
-                        .show(ctx, |ui| {
-                            ui.label("删除任务需要主密码确认。");
-                            let pw_w = (ui.available_width() - 8.0).clamp(200.0, 400.0);
-                            theme::password_field(
-                                ui,
-                                &mut self.task_delete_pw,
-                                "主密码",
-                                pw_w,
-                                34.0,
-                            );
-                            ui.horizontal(|ui| {
-                                if theme::danger_button(ui, "删除").clicked() {
-                                    if let Some(id) = self.cal.selected_task.clone() {
-                                        match rt.svc.delete_task(&id, &self.task_delete_pw) {
-                                            Ok(()) => {
-                                                self.cal.selected_task = None;
-                                                self.show_task_delete = false;
-                                                self.task_delete_pw.clear();
-                                                *status_line = "任务已删除".into();
-                                                let _ = self.tx.send(BgMsg::Refresh);
-                                            }
-                                            Err(e) => *status_line = e.to_string(),
-                                        }
-                                    }
-                                }
-                                if ui.button("取消").clicked() {
-                                    self.show_task_delete = false;
-                                }
-                            });
-                        });
-                    if modal.end(ctx, true) {
-                        self.show_task_delete = false;
-                        self.task_delete_pw.clear();
-                    }
-                }
 
                 if *show_delete {
                     let delete_id = selected.clone().unwrap_or_default();
@@ -2274,106 +911,6 @@ impl eframe::App for MemoApp {
                         if modal.end(ctx, true) {
                             *show_delete = false;
                         }
-                    }
-                }
-
-                if *show_trash {
-                    let modal = theme::begin_modal(ctx, "trash_modal");
-                    let mut open = true;
-                    let mut close_trash = false;
-                    theme::modal_fixed(ctx, "回收站", [480.0, 420.0])
-                        .id(modal.window_id)
-                        .open(&mut open)
-                        .show(ctx, |ui| {
-                            ui.label(
-                                theme::muted_label(format!(
-                                    "已删除备忘保留 {} 天，可恢复或彻底清除（清除后主机备份一并删除）。",
-                                    memo_core::TRASH_RETENTION_DAYS
-                                )),
-                            );
-                            ui.add_space(8.0);
-                            let trash = rt.svc.list_trash();
-                            if trash.is_empty() {
-                                ui.label(theme::muted_label("回收站为空"));
-                            } else {
-                                let list_h = (ui.available_height() - 48.0).max(120.0);
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .max_height(list_h)
-                                    .show(ui, |ui| {
-                                        for m in &trash {
-                                            ui.group(|ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.vertical(|ui| {
-                                                        ui.label(
-                                                            RichText::new(if m.title.is_empty() {
-                                                                "(无标题)"
-                                                            } else {
-                                                                m.title.as_str()
-                                                            })
-                                                            .strong(),
-                                                        );
-                                                        if !m.deleted_at.is_empty() {
-                                                            ui.label(
-                                                                theme::muted_label(format!(
-                                                                    "删除于 {}",
-                                                                    &m.deleted_at
-                                                                        [..m.deleted_at.len().min(19)]
-                                                                ))
-                                                                .small(),
-                                                            );
-                                                        }
-                                                    });
-                                                    ui.with_layout(
-                                                        egui::Layout::right_to_left(
-                                                            egui::Align::Center,
-                                                        ),
-                                                        |ui| {
-                                                            if theme::danger_button(ui, "彻底清除")
-                                                                .clicked()
-                                                            {
-                                                                *purge_confirm_id =
-                                                                    Some(m.id.clone());
-                                                            }
-                                                            if theme::ghost_button(ui, "恢复")
-                                                                .clicked()
-                                                            {
-                                                                let svc = rt.svc.clone();
-                                                                let id = m.id.clone();
-                                                                let tx = self.tx.clone();
-                                                                std::thread::spawn(move || {
-                                                                    match svc.undelete(&id) {
-                                                                        Ok(()) => {
-                                                                            let _ = tx.send(
-                                                                                BgMsg::Refresh,
-                                                                            );
-                                                                        }
-                                                                        Err(e) => {
-                                                                            let _ = tx.send(
-                                                                                BgMsg::Error(
-                                                                                    e.to_string(),
-                                                                                ),
-                                                                            );
-                                                                        }
-                                                                    }
-                                                                });
-                                                            }
-                                                        },
-                                                    );
-                                                });
-                                            });
-                                            ui.add_space(4.0);
-                                        }
-                                    });
-                            }
-                            ui.add_space(8.0);
-                            if ui.button("关闭").clicked() {
-                                close_trash = true;
-                            }
-                        });
-                    if close_trash || modal.end(ctx, open) {
-                        *show_trash = false;
-                        *purge_confirm_id = None;
                     }
                 }
 
@@ -2721,7 +1258,7 @@ impl eframe::App for MemoApp {
                                             settings_item_header(
                                                 ui,
                                                 "主题",
-                                                "控制应用配色。切换后立即生效并自动保存。",
+                                                "浅色 / 深色 / 跟随系统 / 柔美（玫瑰雾面，更舒心）。切换后立即生效并自动保存。",
                                             );
                                             egui::ComboBox::from_id_source("settings_theme")
                                                 .selected_text(theme_pref_label(
@@ -2733,6 +1270,7 @@ impl eframe::App for MemoApp {
                                                         memo_core::ThemePreference::System,
                                                         memo_core::ThemePreference::Light,
                                                         memo_core::ThemePreference::Dark,
+                                                        memo_core::ThemePreference::Blush,
                                                     ] {
                                                         ui.selectable_value(
                                                             &mut settings_draft.theme,
@@ -2776,6 +1314,50 @@ impl eframe::App for MemoApp {
                                                 "可选",
                                                 field_w,
                                             );
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "当前身份性别",
+                                                "可选填写，用于节点展示等；开通「性别私密」无需设置性别。",
+                                            );
+                                            {
+                                                let mut gender = rt.svc.current_person_gender();
+                                                let label = gender.label();
+                                                egui::ComboBox::from_id_source("settings_gender")
+                                                    .selected_text(label)
+                                                    .width(field_w)
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(
+                                                            &mut gender,
+                                                            Gender::Female,
+                                                            Gender::Female.label(),
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut gender,
+                                                            Gender::Male,
+                                                            Gender::Male.label(),
+                                                        );
+                                                    });
+                                                if gender != rt.svc.current_person_gender()
+                                                    && !matches!(gender, Gender::Unknown)
+                                                {
+                                                    match rt.svc.set_current_person_gender(gender)
+                                                    {
+                                                        Ok(()) => {
+                                                            *status_line = format!(
+                                                                "已将当前身份性别设为「{}」",
+                                                                gender.label()
+                                                            );
+                                                            ctx.request_repaint();
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = self
+                                                                .tx
+                                                                .send(BgMsg::Error(e.to_string()));
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             settings_item_gap(ui);
                                             settings_item_header(
                                                 ui,
@@ -2857,28 +1439,36 @@ impl eframe::App for MemoApp {
                                             settings_item_gap(ui);
                                             settings_item_header(
                                                 ui,
-                                                "主机对外广播",
-                                                "仅主机角色有效。关闭后本机不再发送 UDP 发现广播。",
+                                                "局域网自动发现",
+                                                "同网段通过 UDP 17000 发现对端。关闭后只连接下方「对端列表」里手填的地址。",
+                                            );
+                                            ui.checkbox(
+                                                &mut settings_draft.lan_discovery,
+                                                "启用局域网自动发现",
+                                            );
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "显示本节点",
+                                                "显示=对外广播，可被同网段发现；隐藏=不广播，别人扫不到本机。仅主机可改（从机本身不广播）。",
                                             );
                                             ui.add_enabled_ui(
                                                 settings_draft.node_role.is_master(),
                                                 |ui| {
                                                     ui.checkbox(
                                                         &mut settings_draft.node_visible,
-                                                        "主机对外广播",
+                                                        "显示本节点（可被发现）",
                                                     );
                                                 },
                                             );
-                                            settings_item_gap(ui);
-                                            settings_item_header(
-                                                ui,
-                                                "局域网自动发现",
-                                                "通过 UDP 17000 在同网段发现对端节点。",
-                                            );
-                                            ui.checkbox(
-                                                &mut settings_draft.lan_discovery,
-                                                "启用局域网自动发现",
-                                            );
+                                            if !settings_draft.node_role.is_master() {
+                                                ui.label(
+                                                    theme::muted_label(
+                                                        "当前为从机，不会对外广播。",
+                                                    )
+                                                    .small(),
+                                                );
+                                            }
                                             settings_item_gap(ui);
                                             settings_item_header(
                                                 ui,
@@ -3032,538 +1622,9 @@ impl eframe::App for MemoApp {
             }
         }
 
-        Self::draw_help_about_windows(ctx, &mut show_help, &mut show_about);
         self.show_help = show_help;
         self.show_about = show_about;
-    }
-}
-
-fn apply_selected_task(
-    cal: &mut CalUi,
-    task_title: &mut String,
-    task_plan: &mut String,
-    task_doc: &mut doc_editor::Doc,
-    task_date: &mut String,
-    task_start: &mut f32,
-    task_end_date: &mut String,
-    task_end_hour: &mut f32,
-    task_hours: &mut f32,
-    task_assignee: &mut String,
-    task_status: &mut TaskStatus,
-    task_kind: &mut TaskKind,
-    task_on_calendar: &mut bool,
-    task_remind: &mut bool,
-    task_editing: &mut bool,
-    t: &memo_core::TaskView,
-) {
-    cal.selected_task = Some(t.id.clone());
-    *task_title = t.title.clone();
-    *task_plan = t.plan.clone();
-    *task_doc = doc_editor::Doc::from_store(&t.title, &t.plan);
-    *task_date = t.date.clone();
-    *task_start = t.start_hour;
-    *task_end_date = t.end_date.clone();
-    *task_end_hour = t.end_hour;
-    *task_hours = t.hours;
-    *task_assignee = t.assignee_id.clone();
-    *task_status = t.status;
-    *task_kind = t.kind;
-    *task_on_calendar = t.on_calendar;
-    *task_remind = t.remind;
-    *task_editing = false;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_task_central(
-    ui: &mut egui::Ui,
-    rt: &AppRuntime,
-    persons: &[memo_core::PersonView],
-    cal: &mut CalUi,
-    task_title: &mut String,
-    task_plan: &mut String,
-    task_doc: &mut doc_editor::Doc,
-    task_date: &mut String,
-    task_start: &mut f32,
-    task_end_date: &mut String,
-    task_end_hour: &mut f32,
-    task_hours: &mut f32,
-    task_assignee: &mut String,
-    task_status: &mut TaskStatus,
-    task_kind: &mut TaskKind,
-    task_on_calendar: &mut bool,
-    task_remind: &mut bool,
-    task_editing: &mut bool,
-    show_task_delete: &mut bool,
-    _task_delete_pw: &mut String,
-    status_line: &mut String,
-    show_history: &mut bool,
-    history_entity: &mut String,
-    history_events: &mut Vec<HistoryEvent>,
-    history_sel_a: &mut Option<usize>,
-    history_sel_b: &mut Option<usize>,
-    tx: &Sender<BgMsg>,
-) {
-    let Some(tid) = cal.selected_task.clone() else {
-        return;
-    };
-    let meta = rt.svc.get_task(&tid);
-    let avail_h = ui.available_height();
-
-    Frame::none().show(ui, |ui| {
-        ui.set_min_height(avail_h - 8.0);
-        ui.set_min_width(ui.available_width());
-
-        let title_show = if task_title.is_empty() {
-            "(无标题)"
-        } else {
-            task_title.as_str()
-        };
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new(title_show).size(24.0).color(theme::text()));
-            status_badge(ui, *task_status);
-            if *task_editing {
-                ui.label(RichText::new("编辑中").small().color(theme::warn()));
-            } else {
-                ui.label(theme::muted_label("只读").small());
-            }
-        });
-        if let Some(t) = &meta {
-            let assignee = persons
-                .iter()
-                .find(|p| p.id == t.assignee_id)
-                .map(|p| p.name.as_str())
-                .unwrap_or("?");
-            ui.label(
-                RichText::new(format!(
-                    "{}  ·  {:.1}h  ·  {}  ·  {}  ·  v{}",
-                    calendar_view::format_datetime_range(
-                        &t.date,
-                        t.start_hour,
-                        &t.end_date,
-                        t.end_hour
-                    ),
-                    t.hours,
-                    assignee,
-                    t.status.label(),
-                    t.version
-                ))
-                .size(13.0)
-                .color(theme::text_muted()),
-            );
-        }
-        ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
-            if !*task_editing {
-                if theme::primary_button(ui, "编辑").clicked() {
-                    *task_editing = true;
-                    *task_doc = doc_editor::Doc::from_store(task_title, task_plan);
-                }
-            } else {
-                if theme::success_button(ui, "保存").clicked() {
-                    let (t, p) = task_doc.to_store("未命名任务");
-                    *task_title = t;
-                    *task_plan = p;
-                    match rt.svc.update_task(
-                        &tid,
-                        task_title,
-                        task_plan,
-                        task_date,
-                        *task_start,
-                        task_end_date,
-                        *task_end_hour,
-                        task_assignee,
-                        *task_status,
-                        *task_kind,
-                        *task_on_calendar,
-                        *task_remind,
-                    ) {
-                        Ok(()) => {
-                            *task_editing = false;
-                            *status_line = "任务已保存".into();
-                            let _ = tx.send(BgMsg::Refresh);
-                        }
-                        Err(e) => *status_line = format!("错误: {e}"),
-                    }
-                }
-                if theme::ghost_button(ui, "取消编辑").clicked() {
-                    *task_editing = false;
-                    if let Some(t) = &meta {
-                        *task_title = t.title.clone();
-                        *task_plan = t.plan.clone();
-                        *task_doc = doc_editor::Doc::from_store(&t.title, &t.plan);
-                        *task_date = t.date.clone();
-                        *task_start = t.start_hour;
-                        *task_end_date = t.end_date.clone();
-                        *task_end_hour = t.end_hour;
-                        *task_hours = t.hours;
-                        *task_assignee = t.assignee_id.clone();
-                        *task_status = t.status;
-                        *task_kind = t.kind;
-                        *task_on_calendar = t.on_calendar;
-                        *task_remind = t.remind;
-                    }
-                }
-            }
-            ui.separator();
-            if theme::ghost_button(ui, "历史").clicked() {
-                match rt.svc.history_for("task", &tid) {
-                    Ok(ev) => {
-                        *history_entity = "task".into();
-                        *history_events = ev;
-                        *history_sel_a = None;
-                        *history_sel_b = None;
-                        *show_history = true;
-                    }
-                    Err(e) => *status_line = format!("读取历史失败: {e}"),
-                }
-            }
-            if theme::ghost_button(ui, "复制计划").clicked() {
-                let text = format!("{}\n\n{}", task_title, task_plan);
-                ui.output_mut(|o| o.copied_text = text);
-                *status_line = "已复制到剪贴板".into();
-            }
-            if theme::ghost_button(ui, "删除…").clicked() {
-                *show_task_delete = true;
-            }
-        });
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        if *task_editing {
-            {
-                let (t, p) = task_doc.to_store("未命名任务");
-                *task_title = t;
-                *task_plan = p;
-            }
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("开始日期").small().color(theme::text_muted()));
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(task_date)
-                                .desired_width(110.0)
-                                .hint_text(theme::hint("YYYY-MM-DD")),
-                        )
-                        .changed()
-                    {
-                        calendar_view::ensure_end_after_start(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            task_end_hour,
-                        );
-                        if let Ok(h) = memo_core::task::duration_hours(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            *task_end_hour,
-                        ) {
-                            *task_hours = h;
-                        }
-                    }
-                });
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("开始时").small().color(theme::text_muted()));
-                    if ui
-                        .add(
-                            egui::DragValue::new(task_start)
-                                .speed(0.25)
-                                .clamp_range(0.0..=23.75),
-                        )
-                        .changed()
-                    {
-                        calendar_view::ensure_end_after_start(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            task_end_hour,
-                        );
-                        if let Ok(h) = memo_core::task::duration_hours(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            *task_end_hour,
-                        ) {
-                            *task_hours = h;
-                        }
-                    }
-                });
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("结束日期").small().color(theme::text_muted()));
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(task_end_date)
-                                .desired_width(110.0)
-                                .hint_text(theme::hint("YYYY-MM-DD")),
-                        )
-                        .changed()
-                    {
-                        calendar_view::ensure_end_after_start(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            task_end_hour,
-                        );
-                        if let Ok(h) = memo_core::task::duration_hours(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            *task_end_hour,
-                        ) {
-                            *task_hours = h;
-                        }
-                    }
-                });
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("结束时").small().color(theme::text_muted()));
-                    if ui
-                        .add(
-                            egui::DragValue::new(task_end_hour)
-                                .speed(0.25)
-                                .clamp_range(0.0..=24.0),
-                        )
-                        .changed()
-                    {
-                        calendar_view::ensure_end_after_start(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            task_end_hour,
-                        );
-                        if let Ok(h) = memo_core::task::duration_hours(
-                            task_date,
-                            *task_start,
-                            task_end_date,
-                            *task_end_hour,
-                        ) {
-                            *task_hours = h;
-                        }
-                    }
-                });
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("工时").small().color(theme::text_muted()));
-                    if ui
-                        .add(
-                            egui::DragValue::new(task_hours)
-                                .speed(0.25)
-                                .clamp_range(0.25..=240.0),
-                        )
-                        .changed()
-                    {
-                        calendar_view::sync_end_from_hours(
-                            task_date,
-                            *task_start,
-                            *task_hours,
-                            task_end_date,
-                            task_end_hour,
-                        );
-                    }
-                });
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("负责人").small().color(theme::text_muted()));
-                    let label = persons
-                        .iter()
-                        .find(|p| p.id == *task_assignee)
-                        .map(|p| p.name.as_str())
-                        .unwrap_or("(未指定)");
-                    egui::ComboBox::from_id_source("task_assignee")
-                        .selected_text(label)
-                        .show_ui(ui, |ui| {
-                            for p in persons {
-                                ui.selectable_value(task_assignee, p.id.clone(), &p.name);
-                            }
-                        });
-                });
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("状态").small().color(theme::text_muted()));
-                    egui::ComboBox::from_id_source("task_status")
-                        .selected_text(task_status.label())
-                        .show_ui(ui, |ui| {
-                            for s in TaskStatus::ALL {
-                                ui.selectable_value(task_status, s, s.label());
-                            }
-                        });
-                });
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("类型").small().color(theme::text_muted()));
-                    let prev = *task_kind;
-                    egui::ComboBox::from_id_source("task_kind")
-                        .selected_text(task_kind.label())
-                        .show_ui(ui, |ui| {
-                            for k in TaskKind::ALL {
-                                ui.selectable_value(task_kind, k, k.label());
-                            }
-                        });
-                    if *task_kind != prev {
-                        *task_on_calendar = true;
-                        *task_remind = task_kind.default_remind();
-                    }
-                });
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(task_on_calendar, "加入日历");
-                ui.checkbox(task_remind, "提醒我");
-            });
-            ui.add_space(8.0);
-            ui.label(RichText::new("工作计划").strong().size(14.0));
-            ui.add_space(4.0);
-            doc_editor::show_editor(ui, task_doc, "task");
-        } else {
-            // meta chips
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("时段").small().color(theme::text_muted()));
-                ui.label(
-                    RichText::new(calendar_view::format_datetime_range(
-                        task_date,
-                        *task_start,
-                        task_end_date,
-                        *task_end_hour,
-                    ))
-                    .size(14.0)
-                    .color(theme::text()),
-                );
-                ui.add_space(12.0);
-                ui.label(RichText::new("工时").small().color(theme::text_muted()));
-                ui.label(
-                    RichText::new(format!("{:.1} h", *task_hours))
-                        .size(14.0)
-                        .color(theme::text()),
-                );
-                ui.add_space(12.0);
-                ui.label(RichText::new("负责人").small().color(theme::text_muted()));
-                let name = persons
-                    .iter()
-                    .find(|p| p.id == *task_assignee)
-                    .map(|p| p.name.as_str())
-                    .unwrap_or("?");
-                ui.label(RichText::new(name).size(14.0).color(theme::text()));
-                ui.add_space(12.0);
-                ui.label(RichText::new("状态").small().color(theme::text_muted()));
-                status_badge(ui, *task_status);
-                ui.add_space(12.0);
-                ui.label(RichText::new("类型").small().color(theme::text_muted()));
-                ui.label(
-                    RichText::new(task_kind.label())
-                        .size(14.0)
-                        .color(calendar_view::kind_color(*task_kind)),
-                );
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new(if *task_on_calendar {
-                        "已入日历"
-                    } else {
-                        "未入日历"
-                    })
-                    .size(13.0)
-                    .color(theme::text_muted()),
-                );
-                if *task_remind {
-                    ui.label(
-                        RichText::new("提醒")
-                            .size(13.0)
-                            .color(theme::warn()),
-                    );
-                }
-            });
-            ui.add_space(12.0);
-            ui.label(RichText::new("工作计划").strong().size(14.0));
-            ui.add_space(6.0);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .id_source("task_plan_scroll")
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    doc_editor::show_viewer_body(ui, task_plan);
-                });
-        }
-    });
-}
-
-fn gender_chip(ui: &mut egui::Ui, g: Gender) {
-    let (label, color) = match g {
-        Gender::Male => ("男", theme::accent()),
-        Gender::Female => ("女", Color32::from_rgb(0xDB, 0x27, 0x77)),
-        Gender::Unknown => return,
-    };
-    egui::Frame::none()
-        .fill(theme::panel())
-        .rounding(Rounding::same(4.0))
-        .inner_margin(Margin::symmetric(6.0, 2.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new(label).small().strong().color(color));
-        });
-}
-
-fn status_badge(ui: &mut egui::Ui, status: TaskStatus) {
-    let (fg, bg) = status_colors(status);
-    egui::Frame::none()
-        .fill(bg)
-        .rounding(Rounding::same(4.0))
-        .inner_margin(Margin::symmetric(8.0, 3.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new(status.label()).size(12.0).strong().color(fg));
-        });
-}
-
-fn status_colors(status: TaskStatus) -> (Color32, Color32) {
-    match status {
-        TaskStatus::NotStarted => (theme::text_muted(), theme::panel()),
-        TaskStatus::InProgress => (theme::accent(), theme::accent_soft()),
-        TaskStatus::Paused => (theme::warn(), Color32::from_rgb(0xFE, 0xF3, 0xC7)),
-        TaskStatus::Blocked => (
-            Color32::from_rgb(0xC2, 0x41, 0x0C),
-            Color32::from_rgb(0xFF, 0xED, 0xD5),
-        ),
-        TaskStatus::Cancelled => (theme::text_muted(), Color32::from_rgb(0xF1, 0xF5, 0xF9)),
-        TaskStatus::Done => (theme::success(), theme::success_soft()),
-    }
-}
-
-fn chrono_like_stamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{secs}")
-}
-
-/// 单行省略：按像素宽度截断并加省略号，避免列表文字溢出到下一行。
-fn ellipsize_ui(ui: &egui::Ui, text: &str, font_id: egui::FontId, max_width: f32) -> String {
-    let flat: String = text
-        .chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-        .collect();
-    if max_width <= 8.0 {
-        return "…".into();
-    }
-    let fits = |s: &str| {
-        ui.fonts(|f| {
-            f.layout_no_wrap(s.to_owned(), font_id.clone(), Color32::WHITE)
-                .size()
-                .x
-        }) <= max_width
-    };
-    if fits(&flat) {
-        return flat;
-    }
-    let chars: Vec<char> = flat.chars().collect();
-    let mut lo = 0usize;
-    let mut hi = chars.len();
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        let candidate: String = chars[..mid].iter().collect::<String>() + "…";
-        if fits(&candidate) {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    if lo == 0 {
-        "…".into()
-    } else {
-        chars[..lo].iter().collect::<String>() + "…"
+        Self::draw_help_about_windows(ctx, &mut self.show_help, &mut self.show_about);
     }
 }
 
@@ -3591,7 +1652,6 @@ fn unlock_runtime_identity(
             cfg.peers.clone(),
             svc.store(),
             svc.person_store(),
-            svc.task_store(),
             cfg.cluster_salt_hex.clone(),
             cfg.lan_discovery,
             cfg.node_role,
@@ -3602,6 +1662,7 @@ fn unlock_runtime_identity(
             PathBuf::from(&cfg.data_dir),
         );
         engine.set_service(&svc);
+        engine.set_backup_targets(cfg.backup_targets.clone());
         svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
         engine.start();
         (svc, engine)
