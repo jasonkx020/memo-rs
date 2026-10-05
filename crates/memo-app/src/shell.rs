@@ -462,19 +462,25 @@ fn format_last_sync(last_sync_at: Option<std::time::Instant>) -> String {
     }
 }
 
-fn pill(ui: &mut egui::Ui, bg: Color32, fg: Color32, label: &str) -> egui::Response {
-    let ir = Frame::none()
-        .fill(bg)
-        .rounding(Rounding::same(12.0))
-        .inner_margin(Margin::symmetric(10.0, 4.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new(label).size(12.0).color(fg).strong());
-        });
-    ui.interact(
-        ir.response.rect,
-        ui.id().with(label),
-        Sense::click(),
-    )
+fn pill(ui: &mut egui::Ui, bg: Color32, fg: Color32, label: &str, h: f32) -> egui::Response {
+    let font = egui::FontId::proportional(12.0);
+    let text_w = ui.fonts(|f| {
+        f.layout_no_wrap(label.to_owned(), font.clone(), fg)
+            .size()
+            .x
+    });
+    let pad_x = 10.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(text_w + pad_x * 2.0, h), Sense::click());
+    ui.painter()
+        .rect(rect, Rounding::same(h * 0.5), bg, Stroke::NONE);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        fg,
+    );
+    resp
 }
 
 #[derive(Clone, Copy)]
@@ -552,6 +558,15 @@ fn paint_top_icon(painter: &egui::Painter, center: egui::Pos2, kind: TopIcon, co
     }
 }
 
+fn top_icon_color(kind: TopIcon) -> Color32 {
+    match kind {
+        TopIcon::Sync => theme::success(),
+        TopIcon::Nodes => theme::nav_icon_color(NavItem::All),
+        TopIcon::Settings => theme::category_icon_color(MemoCategory::Credentials),
+        TopIcon::Lock => theme::warn(),
+    }
+}
+
 fn top_icon_button(ui: &mut egui::Ui, kind: TopIcon, label: &str) -> egui::Response {
     top_icon_button_on(ui, kind, label, false)
 }
@@ -571,22 +586,23 @@ fn top_icon_button_on(
     let icon_w = 16.0;
     let gap = 5.0;
     let pad_x = 8.0;
-    let h = 28.0;
+    let h = 24.0;
     let w = pad_x * 2.0 + icon_w + gap + text_w;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-    let fg = if on || resp.hovered() {
-        theme::shell_accent()
+    let icon_fg = top_icon_color(kind);
+    let label_fg = if on || resp.hovered() {
+        icon_fg
     } else {
         theme::text()
     };
     let icon_c = egui::pos2(rect.left() + pad_x + icon_w * 0.5, rect.center().y);
-    paint_top_icon(ui.painter(), icon_c, kind, fg);
+    paint_top_icon(ui.painter(), icon_c, kind, icon_fg);
     ui.painter().text(
         egui::pos2(rect.left() + pad_x + icon_w + gap, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         font,
-        fg,
+        label_fg,
     );
     resp
 }
@@ -610,24 +626,37 @@ fn tag_pill(ui: &mut egui::Ui, tag: &str) {
         });
 }
 
-fn done_checkbox(ui: &mut egui::Ui, done: bool) -> egui::Response {
+fn list_category_icon(ui: &mut egui::Ui, cat: MemoCategory, done: bool) -> egui::Response {
     let size = Vec2::splat(20.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let painter = ui.painter();
-    let center = rect.center();
-    if done {
-        painter.circle_filled(center, 9.0, theme::shell_accent());
-        painter.text(
-            center,
-            egui::Align2::CENTER_CENTER,
-            "✓",
-            egui::FontId::proportional(12.0),
-            Color32::WHITE,
-        );
-    } else {
-        painter.circle_stroke(center, 9.0, Stroke::new(1.5, theme::border_strong()));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    resp
+    let cat = cat.canonical();
+    let color = if done {
+        let c = theme::category_icon_color(cat);
+        let m = theme::text_muted();
+        Color32::from_rgb(
+            ((c.r() as u16 + m.r() as u16 * 2) / 3) as u8,
+            ((c.g() as u16 + m.g() as u16 * 2) / 3) as u8,
+            ((c.b() as u16 + m.b() as u16 * 2) / 3) as u8,
+        )
+    } else {
+        theme::category_icon_color(cat)
+    };
+    let g = theme::layout_galley(
+        ui,
+        memo_form::category_icon(cat),
+        egui::FontId::proportional(16.0),
+        color,
+    );
+    ui.painter()
+        .galley(theme::galley_pos_center(rect.center(), &g), g, color);
+    resp.on_hover_text(if done {
+        format!("{} · 点击取消完成", cat.label())
+    } else {
+        format!("{} · 点击标记完成", cat.label())
+    })
 }
 
 fn sync_mark(ui: &mut egui::Ui, draft_empty_title: bool) {
@@ -800,30 +829,32 @@ pub fn show(
 
     // —— 顶栏 ——
     egui::TopBottomPanel::top("shell_top")
-        .exact_height(56.0)
+        .exact_height(44.0)
         .frame(
             Frame::none()
                 .fill(theme::card())
                 .stroke(Stroke::new(1.0, theme::border()))
-                .inner_margin(Margin::symmetric(14.0, 8.0)),
+                .inner_margin(Margin::symmetric(12.0, 4.0)),
         )
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_height(ui.available_height());
                 ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().item_spacing.y = 0.0;
 
                 let letter = avatar_letter(&alias_show);
                 let av_color = theme::avatar_color(0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 16.0, av_color);
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                ui.painter().circle_filled(rect.center(), 13.0, av_color);
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     &letter,
-                    egui::FontId::proportional(14.0),
+                    egui::FontId::proportional(13.0),
                     Color32::WHITE,
                 );
 
-                egui::menu::menu_button(
+                let menu = egui::menu::menu_button(
                     ui,
                     RichText::new(format!("{alias_show} ▾"))
                         .strong()
@@ -863,12 +894,14 @@ pub fn show(
                         }
                     },
                 );
+                let chip_h = menu.response.rect.height().clamp(22.0, 28.0);
 
                 if pill(
                     ui,
                     theme::shell_chip_green(),
                     theme::shell_chip_green_fg(),
                     &format!("{online_count} 节点在线"),
+                    chip_h,
                 )
                 .clicked()
                 {
@@ -879,45 +912,55 @@ pub fn show(
                     theme::shell_chip_gray(),
                     theme::shell_chip_gray_fg(),
                     &format!("{} 后自动锁定", format_auto_lock(auto_lock_remaining)),
+                    chip_h,
                 );
 
                 ui.add_space(8.0);
-                let right_reserve = 380.0;
+                let right_reserve = 300.0;
                 let search_w = (ui.available_width() - right_reserve).clamp(180.0, 420.0);
-                Frame::none()
-                    .fill(theme::bg())
-                    .stroke(Stroke::new(1.0, theme::border()))
-                    .rounding(Rounding::same(16.0))
-                    .inner_margin(Margin::symmetric(12.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(search)
-                                .hint_text(theme::hint("搜索我的备忘…"))
-                                .frame(false)
-                                .desired_width(search_w - 24.0),
-                        );
-                    });
+                let (search_rect, search_click) =
+                    ui.allocate_exact_size(Vec2::new(search_w, chip_h), Sense::click());
+                ui.painter().rect(
+                    search_rect,
+                    Rounding::same(chip_h * 0.5),
+                    theme::bg(),
+                    Stroke::new(1.0, theme::border()),
+                );
+                let font = egui::FontId::proportional(13.0);
+                let line_h = ui.fonts(|f| f.row_height(&font));
+                let text_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        search_rect.left() + 10.0,
+                        search_rect.center().y - line_h * 0.5,
+                    ),
+                    egui::vec2((search_rect.width() - 20.0).max(40.0), line_h),
+                );
+                let te = ui.put(
+                    text_rect,
+                    egui::TextEdit::singleline(search)
+                        .id(egui::Id::new("shell_top_search"))
+                        .hint_text("")
+                        .frame(false)
+                        .margin(egui::vec2(0.0, 0.0))
+                        .desired_width(text_rect.width()),
+                );
+                if search.is_empty() {
+                    ui.painter().text(
+                        egui::pos2(text_rect.left(), search_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "搜索我的备忘…",
+                        font,
+                        theme::text_muted(),
+                    );
+                }
+                if search_click.clicked() {
+                    te.request_focus();
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     if top_icon_button(ui, TopIcon::Lock, "锁定").clicked() {
                         action.switch = true;
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("+ 新建")
-                                    .color(Color32::WHITE)
-                                    .strong()
-                                    .size(13.5),
-                            )
-                            .fill(theme::shell_accent())
-                            .rounding(Rounding::same(theme::ROUND_CTRL))
-                            .min_size(Vec2::new(72.0, 30.0)),
-                        )
-                        .clicked()
-                    {
-                        action.open_new_memo = true;
                     }
                     if top_icon_button(ui, TopIcon::Settings, "设置").clicked() {
                         *show_settings = true;
@@ -1690,12 +1733,12 @@ fn show_split(
     // 必须在 horizontal 之前取高度：horizontal 内 available_height 不可靠
     let full_h = ui.available_height().max(120.0);
     let gap = 8.0;
-    let min_detail = 200.0;
-    let mut list_w = (avail * 0.38).clamp(200.0, 400.0);
+    let min_detail = 240.0;
+    let mut list_w = (avail * 0.38).clamp(160.0, 400.0);
     if list_w + min_detail + gap > avail {
-        list_w = (avail - min_detail - gap).max(160.0);
+        list_w = (avail - min_detail - gap).max(120.0).min(list_w);
     }
-    let detail_w = (avail - list_w - gap).max(160.0);
+    let detail_w = (avail - list_w - gap).max(120.0);
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
@@ -1810,7 +1853,7 @@ fn show_split(
                                                 },
                                             );
                                         } else {
-                                            let cb = done_checkbox(ui, m.done);
+                                            let cb = list_category_icon(ui, m.category, m.done);
                                             if cb.clicked() {
                                                 toggled_done = true;
                                                 let svc = svc.clone();
@@ -1837,10 +1880,13 @@ fn show_split(
                                             m.title.as_str()
                                         })
                                         .strong()
-                                        .size(14.0)
-                                        .color(theme::text());
+                                        .size(14.0);
                                         if m.done && !is_hub {
-                                            title = title.strikethrough();
+                                            title = title
+                                                .strikethrough()
+                                                .color(theme::text_muted());
+                                        } else {
+                                            title = title.color(theme::text());
                                         }
                                         ui.label(title);
 
@@ -2065,10 +2111,12 @@ fn show_detail(
     data_dir: &str,
     tx: &Sender<BgMsg>,
 ) {
+    ui.set_clip_rect(ui.max_rect());
+    ui.set_max_width((ui.max_rect().width() - 6.0).max(80.0));
     if selected.is_none() {
         ui.centered_and_justified(|ui| {
             ui.label(
-                theme::muted_label("在左侧选择一条备忘查看详情\n或点「+ 新建」在此填写")
+                theme::muted_label("在左侧选择一条备忘查看详情\n或点列表标题旁的「+」新建")
                     .size(15.0),
             );
         });
@@ -2253,7 +2301,7 @@ fn show_detail(
         .id_source("shell_memo_body")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width((ui.max_rect().width() - 6.0).max(80.0));
             if creating || *editing {
                 let mode = if creating {
                     FormMode::Create

@@ -97,7 +97,16 @@ fn show_inner(
             .fill(theme::card())
             .stroke(Stroke::new(1.0, theme::border()))
             .rounding(Rounding::same(8.0))
-            .min_size(Vec2::new((ui.available_width() - 52.0).max(120.0), 30.0)),
+            .min_size(Vec2::new(
+                (ui.available_width()
+                    - if allow_clear && !value.trim().is_empty() {
+                        52.0
+                    } else {
+                        0.0
+                    })
+                .max(40.0),
+                30.0,
+            )),
         );
         if btn.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup_id));

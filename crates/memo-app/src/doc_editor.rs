@@ -409,31 +409,39 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
         .iter()
         .any(|b| matches!(b, Block::Items { .. } | Block::Table { .. }));
     let body_h = if has_structure { 260.0 } else { 148.0 };
-    let body_w = ui.available_width().min(1200.0);
     Frame::none()
         .fill(theme::panel())
         .stroke(Stroke::new(1.0, theme::border()))
         .rounding(Rounding::same(8.0))
         .inner_margin(Margin::symmetric(8.0, 6.0))
         .show(ui, |ui| {
-            ui.set_min_width((body_w - 2.0).max(80.0));
+            ui.set_max_width(ui.available_width());
             ui.set_max_height(body_h);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .max_height(body_h)
                 .id_source(format!("{id_salt}_doc_scroll"))
                 .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
+                    ui.set_max_width(ui.available_width());
 
                     // 正文框（合并后的第一段 Paragraph）
                     let body_rows = if has_structure { 5 } else { 7 };
                     if let Some(Block::Paragraph { text }) = doc.blocks.first_mut() {
-                        ui.add(
+                        let empty = text.is_empty();
+                        let resp = ui.add(
                             egui::TextEdit::multiline(text)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(body_rows)
-                                .hint_text(theme::hint("自由书写备注，换行即可编排…")),
+                                .desired_width(ui.available_width())
+                                .desired_rows(body_rows),
                         );
+                        if empty {
+                            ui.painter().text(
+                                egui::pos2(resp.rect.left() + 4.0, resp.rect.top() + 4.0),
+                                egui::Align2::LEFT_TOP,
+                                "自由书写备注，换行即可编排…",
+                                egui::FontId::proportional(14.5),
+                                theme::text_muted(),
+                            );
+                        }
                     }
                     ui.add_space(8.0);
 
@@ -455,7 +463,7 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
                                         ui.add(
                                             egui::TextEdit::singleline(item)
                                                 .desired_width(
-                                                    (ui.available_width() - 70.0).max(80.0),
+                                                    (ui.available_width() - 70.0).max(40.0),
                                                 )
                                                 .hint_text(theme::hint("落实要点")),
                                         );
@@ -487,30 +495,47 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
                                     });
                                     ui.add_space(4.0);
                                     let ncols = headers.len().max(1);
-                                    egui::Grid::new(format!("{id_salt}_tbl_{idx}"))
-                                        .num_columns(ncols)
-                                        .striped(true)
-                                        .spacing([8.0, 4.0])
+                                    let col_gap = 8.0;
+                                    let inner_w = ui.available_width();
+                                    let cell = ((inner_w
+                                        - col_gap * (ncols.saturating_sub(1) as f32))
+                                        / ncols as f32)
+                                        .clamp(72.0, 140.0);
+                                    let need_w = cell * ncols as f32
+                                        + col_gap * (ncols.saturating_sub(1) as f32);
+                                    egui::ScrollArea::horizontal()
+                                        .id_source(format!("{id_salt}_tbl_h_{idx}"))
+                                        .max_width(inner_w)
+                                        .auto_shrink([false, true])
                                         .show(ui, |ui| {
-                                            for h in headers.iter_mut() {
-                                                ui.add(
-                                                    egui::TextEdit::singleline(h)
-                                                        .desired_width(120.0),
-                                                );
-                                            }
-                                            ui.end_row();
-                                            for row in rows.iter_mut() {
-                                                if row.len() < ncols {
-                                                    row.resize(ncols, String::new());
-                                                }
-                                                for c in 0..ncols {
-                                                    ui.add(
-                                                        egui::TextEdit::singleline(&mut row[c])
-                                                            .desired_width(120.0),
-                                                    );
-                                                }
-                                                ui.end_row();
-                                            }
+                                            ui.set_min_width(need_w);
+                                            egui::Grid::new(format!("{id_salt}_tbl_{idx}"))
+                                                .num_columns(ncols)
+                                                .striped(true)
+                                                .spacing([col_gap, 4.0])
+                                                .show(ui, |ui| {
+                                                    for h in headers.iter_mut() {
+                                                        ui.add(
+                                                            egui::TextEdit::singleline(h)
+                                                                .desired_width(cell),
+                                                        );
+                                                    }
+                                                    ui.end_row();
+                                                    for row in rows.iter_mut() {
+                                                        if row.len() < ncols {
+                                                            row.resize(ncols, String::new());
+                                                        }
+                                                        for c in 0..ncols {
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(
+                                                                    &mut row[c],
+                                                                )
+                                                                .desired_width(cell),
+                                                            );
+                                                        }
+                                                        ui.end_row();
+                                                    }
+                                                });
                                         });
                                 })
                             }

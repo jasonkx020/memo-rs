@@ -163,7 +163,7 @@ fn today_ymd() -> String {
         .to_string()
 }
 
-fn category_icon(cat: MemoCategory) -> &'static str {
+pub fn category_icon(cat: MemoCategory) -> &'static str {
     match cat {
         MemoCategory::Todo => "✅",
         MemoCategory::Work | MemoCategory::Office => "💼",
@@ -267,6 +267,38 @@ fn field_label(ui: &mut egui::Ui, text: &str, required: bool) {
     });
 }
 
+fn form_w(ui: &egui::Ui) -> f32 {
+    (ui.available_width() - 8.0).max(0.0)
+}
+
+fn show_due_priority(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    ui.set_width(col_w);
+    ui.set_max_width(col_w);
+    field_label(ui, "到期时间", false);
+    ui.add_space(3.0);
+    date_field::show_datetime(ui, &format!("{id_salt}_due"), &mut state.due_date, true);
+    ui.label(
+        RichText::new("不填=永久有效")
+            .size(11.0)
+            .color(theme::text_muted()),
+    );
+}
+
+fn show_priority_field(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    ui.set_width(col_w);
+    ui.set_max_width(col_w);
+    field_label(ui, "优先级", false);
+    ui.add_space(3.0);
+    egui::ComboBox::from_id_source(format!("{id_salt}_prio"))
+        .width((col_w - 6.0).max(80.0))
+        .selected_text(state.priority.label())
+        .show_ui(ui, |ui| {
+            for &p in MemoPriority::ALL {
+                ui.selectable_value(&mut state.priority, p, p.label());
+            }
+        });
+}
+
 fn show_category_combo(
     ui: &mut egui::Ui,
     id_salt: &str,
@@ -276,7 +308,7 @@ fn show_category_combo(
     state: &mut MemoFormState,
 ) {
     let popup_id = ui.make_persistent_id(("memo_cat_combo", id_salt));
-    let w = ui.available_width();
+    let w = form_w(ui);
     let h = 34.0;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     if resp.hovered() {
@@ -429,6 +461,8 @@ pub fn show_fields(
     if gender_locked {
         state.visibility = MemoVisibility::Private;
     }
+    let w = form_w(ui);
+    ui.set_max_width(w);
 
     // —— 头 ——
     ui.horizontal(|ui| {
@@ -495,41 +529,33 @@ pub fn show_fields(
     ui.add_space(3.0);
     ui.add(
         egui::TextEdit::singleline(&mut state.doc.title)
-            .desired_width(ui.available_width())
+            .desired_width(w)
             .hint_text(theme::hint(title_hint(state.category)))
             .margin(egui::vec2(10.0, 7.0)),
     );
     ui.add_space(8.0);
 
     // —— 到期时间 | 优先级 ——
-    let half = (ui.available_width() - 12.0) * 0.5;
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width(half);
-            field_label(ui, "到期时间", false);
-            ui.add_space(3.0);
-            date_field::show_datetime(ui, &format!("{id_salt}_due"), &mut state.due_date, true);
-            ui.label(
-                RichText::new("不填=永久有效")
-                    .size(11.0)
-                    .color(theme::text_muted()),
-            );
+    if w >= 360.0 {
+        let col = ((w - 12.0) * 0.5).max(80.0);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                show_due_priority(ui, state, id_salt, col);
+            });
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                show_priority_field(ui, state, id_salt, col);
+            });
         });
-        ui.add_space(12.0);
+    } else {
         ui.vertical(|ui| {
-            ui.set_width(half);
-            field_label(ui, "优先级", false);
-            ui.add_space(3.0);
-            egui::ComboBox::from_id_source(format!("{id_salt}_prio"))
-                .width(ui.available_width().max(80.0))
-                .selected_text(state.priority.label())
-                .show_ui(ui, |ui| {
-                    for &p in MemoPriority::ALL {
-                        ui.selectable_value(&mut state.priority, p, p.label());
-                    }
-                });
+            show_due_priority(ui, state, id_salt, w);
         });
-    });
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            show_priority_field(ui, state, id_salt, w);
+        });
+    }
     if !state.due_date.trim().is_empty() {
         ui.add_space(6.0);
         field_label(ui, "提前提醒", false);
@@ -549,7 +575,7 @@ pub fn show_fields(
             state.remind_before_days = 0;
         }
         egui::ComboBox::from_id_source(format!("{id_salt}_remind"))
-            .width(ui.available_width().min(220.0).max(120.0))
+            .width(w.min(220.0).max(80.0))
             .selected_text(remind_label)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut state.remind_before_days, 0, "到期时");
@@ -597,7 +623,7 @@ pub fn show_fields(
     ui.add_space(3.0);
     let tag_resp = ui.add(
         egui::TextEdit::singleline(&mut state.tags)
-            .desired_width(ui.available_width())
+            .desired_width(w)
             .hint_text(theme::hint("逗号或空格分隔；可点下方预设"))
             .margin(egui::vec2(10.0, 7.0)),
     );
@@ -642,13 +668,19 @@ pub fn show_fields(
     // —— 备注（放最后，高度克制，不挡住上方选项）——
     field_label(ui, "备注（可选）", false);
     ui.add_space(3.0);
-    Frame::none()
-        .stroke(Stroke::new(1.0, theme::border()))
-        .rounding(Rounding::same(10.0))
-        .inner_margin(Margin::same(8.0))
-        .show(ui, |ui| {
-            doc_editor::show_editor(ui, &mut state.doc, id_salt);
-        });
+    let notes_w = (ui.available_width() - 10.0).max(48.0);
+    ui.scope(|ui| {
+        ui.set_width(notes_w);
+        ui.set_max_width(notes_w);
+        Frame::none()
+            .stroke(Stroke::new(1.0, theme::border()))
+            .rounding(Rounding::same(10.0))
+            .inner_margin(Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
+                doc_editor::show_editor(ui, &mut state.doc, id_salt);
+            });
+    });
 }
 
 pub fn tags_vec(state: &MemoFormState) -> Vec<String> {
