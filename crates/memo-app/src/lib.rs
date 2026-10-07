@@ -1,3 +1,4 @@
+mod calendar_view;
 mod app_icon;
 mod date_field;
 mod doc_editor;
@@ -120,6 +121,7 @@ enum Screen {
         visibility_draft: MemoVisibility,
         category_draft: MemoCategory,
         due_date_draft: String,
+        end_date_draft: String,
         tags_draft: String,
         done_draft: bool,
         priority_draft: MemoPriority,
@@ -210,6 +212,7 @@ impl MemoApp {
             visibility_draft: MemoVisibility::Private,
             category_draft: MemoCategory::General,
             due_date_draft: String::new(),
+            end_date_draft: String::new(),
             tags_draft: String::new(),
             done_draft: false,
             priority_draft: MemoPriority::Normal,
@@ -346,6 +349,7 @@ impl MemoApp {
                     body,
                     category,
                     due_date,
+                    end_date,
                     priority,
                     tags,
                 } => {
@@ -355,6 +359,7 @@ impl MemoApp {
                         body_draft,
                         category_draft,
                         due_date_draft,
+                        end_date_draft,
                         tags_draft,
                         done_draft,
                         priority_draft,
@@ -368,6 +373,7 @@ impl MemoApp {
                         *body_draft = body.clone();
                         *category_draft = category;
                         *due_date_draft = due_date.clone();
+                        *end_date_draft = end_date.clone();
                         *tags_draft = tags
                             .iter()
                             .map(|t| {
@@ -389,6 +395,7 @@ impl MemoApp {
                             &title,
                             &body,
                             &due_date,
+                            &end_date,
                             priority,
                             tags_draft,
                             false,
@@ -442,6 +449,7 @@ impl MemoApp {
                         visibility_draft,
                         category_draft,
                         due_date_draft,
+                        end_date_draft,
                         tags_draft,
                         done_draft,
                         priority_draft,
@@ -478,6 +486,7 @@ impl MemoApp {
                                     *visibility_draft = m.visibility;
                                     *category_draft = m.category.canonical();
                                     *due_date_draft = m.due_date;
+                                    *end_date_draft = m.end_date;
                                     *tags_draft = m
                                         .tags
                                         .iter()
@@ -617,6 +626,7 @@ impl eframe::App for MemoApp {
                 visibility_draft,
                 category_draft,
                 due_date_draft,
+                end_date_draft,
                 tags_draft,
                 done_draft,
                 priority_draft,
@@ -777,6 +787,7 @@ impl eframe::App for MemoApp {
                     visibility_draft,
                     category_draft,
                     due_date_draft,
+                    end_date_draft,
                     tags_draft,
                     done_draft,
                     priority_draft,
@@ -820,11 +831,13 @@ impl eframe::App for MemoApp {
                     self.cfg.backup_targets = settings_draft.backup_targets.clone();
                 }
                 if shell_action.open_new_memo {
+                    let ymd = self.shell.cal.selected.format("%Y-%m-%d").to_string();
                     shell::begin_new_memo(
                         selected,
                         editing,
                         &mut self.edit_form,
                         self.shell.nav,
+                        Some(ymd.as_str()),
                     );
                     *status_line = "填写新建备忘，保存后写入本机".into();
                 }

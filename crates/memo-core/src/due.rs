@@ -41,6 +41,47 @@ pub fn due_is_due_today(s: &str) -> bool {
     d == Local::now().date_naive()
 }
 
+/// 规范化结束日：无开始日则结束必须空；有开始日则结束>=开始。
+/// 单日（结束=开始或不填）存空字符串，兼容旧数据。
+pub fn normalize_end_date(due: &str, end: &str) -> Result<String, &'static str> {
+    let due = due.trim();
+    let end = end.trim();
+    if due.is_empty() {
+        if end.is_empty() {
+            return Ok(String::new());
+        }
+        return Err("未安排日子时不要填结束日");
+    }
+    let start = due_date_part(due).ok_or("开始日无效")?;
+    let end_d = if end.is_empty() {
+        start
+    } else {
+        due_date_part(end).ok_or("结束日无效")?
+    };
+    if end_d < start {
+        return Err("结束日不能早于开始日");
+    }
+    if end_d == start {
+        return Ok(String::new());
+    }
+    Ok(end_d.format("%Y-%m-%d").to_string())
+}
+
+/// 日历上的结束日；无 due 则无区间。
+pub fn event_end_date(due: &str, end: &str) -> Option<NaiveDate> {
+    let start = due_date_part(due)?;
+    Some(due_date_part(end).unwrap_or(start).max(start))
+}
+
+/// 该备忘是否覆盖某一日历日（含跨天）。
+pub fn covers_calendar_day(due: &str, end: &str, day: NaiveDate) -> bool {
+    let Some(start) = due_date_part(due) else {
+        return false;
+    };
+    let end = event_end_date(due, end).unwrap_or(start);
+    day >= start && day <= end
+}
+
 /// 列表/详情短展示。
 pub fn display_due(s: &str) -> String {
     let s = s.trim();
@@ -51,4 +92,33 @@ pub fn display_due(s: &str) -> String {
         return format!("到期 {}", dt.format("%m-%d %H:%M"));
     }
     format!("到期 {s}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn end_date_empty_when_single_day_or_blank() {
+        assert_eq!(normalize_end_date("", "").unwrap(), "");
+        assert!(normalize_end_date("", "2026-01-02").is_err());
+        assert_eq!(normalize_end_date("2026-01-02 09:00", "").unwrap(), "");
+        assert_eq!(
+            normalize_end_date("2026-01-02 09:00", "2026-01-02").unwrap(),
+            ""
+        );
+        assert_eq!(
+            normalize_end_date("2026-01-02 09:00", "2026-01-05").unwrap(),
+            "2026-01-05"
+        );
+        assert!(normalize_end_date("2026-01-05", "2026-01-02").is_err());
+    }
+
+    #[test]
+    fn covers_span_inclusive() {
+        let d = NaiveDate::from_ymd_opt(2026, 1, 3).unwrap();
+        assert!(covers_calendar_day("2026-01-02", "2026-01-05", d));
+        assert!(!covers_calendar_day("2026-01-04", "2026-01-05", d));
+        assert!(covers_calendar_day("2026-01-03 09:00", "", d));
+    }
 }

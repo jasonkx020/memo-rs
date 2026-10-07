@@ -517,20 +517,78 @@ pub fn category_icon_color(cat: MemoCategory) -> Color32 {
 /// 左侧菜单图标语义色。
 pub fn nav_icon_color(item: NavItem) -> Color32 {
     match item {
-        NavItem::All => {
+        NavItem::Calendar => {
             if dark_icons() {
                 Color32::from_rgb(0x8E, 0xA4, 0xC8)
             } else {
                 Color32::from_rgb(0x3D, 0x5A, 0x80)
             }
         }
-        NavItem::DueToday => warn(),
         NavItem::Trash => text_muted(),
         other => other
             .category()
             .map(category_icon_color)
             .unwrap_or_else(text),
     }
+}
+
+pub fn calendar_past_bg() -> Color32 {
+    if dark_icons() {
+        Color32::from_rgb(0x24, 0x24, 0x28)
+    } else if blush_icons() {
+        Color32::from_rgb(0xF3, 0xEA, 0xEF)
+    } else {
+        Color32::from_rgb(0xE6, 0xE8, 0xED)
+    }
+}
+
+pub fn calendar_past_fg() -> Color32 {
+    if dark_icons() {
+        Color32::from_rgb(0x7A, 0x7A, 0x82)
+    } else if blush_icons() {
+        Color32::from_rgb(0xB8, 0x8F, 0xA3)
+    } else {
+        Color32::from_rgb(0x8B, 0x92, 0x9E)
+    }
+}
+
+pub fn calendar_today_bg() -> Color32 {
+    shell_nav_selected()
+}
+
+pub fn calendar_today_fg() -> Color32 {
+    if dark_icons() {
+        Color32::from_rgb(0x93, 0xC5, 0xFD)
+    } else if blush_icons() {
+        Color32::from_rgb(0xBE, 0x18, 0x5D)
+    } else {
+        Color32::from_rgb(0x1D, 0x4E, 0xD8)
+    }
+}
+
+pub fn calendar_future_bg() -> Color32 {
+    if dark_icons() {
+        Color32::from_rgb(0x3A, 0x3E, 0x3C)
+    } else if blush_icons() {
+        Color32::from_rgb(0xFF, 0xFC, 0xFD)
+    } else {
+        Color32::from_rgb(0xF3, 0xFA, 0xF6)
+    }
+}
+
+pub fn calendar_future_fg() -> Color32 {
+    if dark_icons() {
+        Color32::from_rgb(0xD1, 0xFA, 0xE5)
+    } else if blush_icons() {
+        Color32::from_rgb(0x0F, 0x76, 0x6E)
+    } else {
+        Color32::from_rgb(0x0F, 0x76, 0x6E)
+    }
+}
+
+fn blush_icons() -> bool {
+    let a = c().accent;
+    a.r() > a.b().saturating_add(30)
 }
 
 /// 图标与标签分色排版。

@@ -186,6 +186,9 @@ pub struct MemoItem {
     /// 到期时间本地 `YYYY-MM-DD HH:MM`（兼容旧 `YYYY-MM-DD`）；空=无到期（永久）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub due_date: String,
+    /// 跨天结束日；空=单日
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub end_date: String,
     /// 提前提醒天数；仅 due 非空时有效；0=到期当日该时刻
     #[serde(default)]
     pub remind_before_days: u32,
@@ -295,6 +298,7 @@ impl MemoStore {
         lifecycle: MemoLifecycle,
         category: MemoCategory,
         due_date: &str,
+        end_date: &str,
         done: bool,
         tags: &[String],
         priority: MemoPriority,
@@ -305,6 +309,8 @@ impl MemoStore {
         let prev = items.get(id).cloned();
         let ver = self.tick(0);
         let due = due_date.trim().to_string();
+        let end = crate::due::normalize_end_date(&due, end_date)
+            .map_err(anyhow::Error::msg)?;
         let (remind_before_days, remind_seen_for) = if due.is_empty() {
             (0u32, String::new())
         } else {
@@ -344,6 +350,7 @@ impl MemoStore {
             deleted_at: String::new(),
             category,
             due_date: due,
+            end_date: end,
             remind_before_days,
             remind_seen_for,
             done,

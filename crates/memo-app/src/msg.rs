@@ -16,6 +16,7 @@ pub enum BgMsg {
         body: String,
         category: MemoCategory,
         due_date: String,
+        end_date: String,
         priority: MemoPriority,
         tags: Vec<String>,
     },

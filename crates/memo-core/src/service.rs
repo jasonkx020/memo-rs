@@ -35,6 +35,7 @@ pub struct MemoView {
     pub deleted_at: String,
     pub category: MemoCategory,
     pub due_date: String,
+    pub end_date: String,
     pub remind_before_days: u32,
     pub remind_seen_for: String,
     pub done: bool,
@@ -44,6 +45,23 @@ pub struct MemoView {
 
 /// 回收站宽限期（天）
 pub const TRASH_RETENTION_DAYS: i64 = 30;
+
+fn vis_dates_for_save(
+    category: MemoCategory,
+    visibility: MemoVisibility,
+    due: &str,
+    end: &str,
+) -> (MemoVisibility, String, String) {
+    if category.canonical() == MemoCategory::Credentials {
+        return (MemoVisibility::Private, String::new(), String::new());
+    }
+    let vis = if category.is_gender_private() {
+        MemoVisibility::Private
+    } else {
+        visibility
+    };
+    (vis, due.to_string(), end.to_string())
+}
 
 #[derive(Debug, Clone)]
 pub struct HistorySnapshot {
@@ -207,6 +225,7 @@ impl MemoService {
             MemoLifecycle::Permanent,
             MemoCategory::General,
             "",
+            "",
             &[],
             MemoPriority::Normal,
             0,
@@ -221,15 +240,13 @@ impl MemoService {
         lifecycle: MemoLifecycle,
         category: MemoCategory,
         due_date: &str,
+        end_date: &str,
         tags: &[String],
         priority: MemoPriority,
         remind_before_days: u32,
     ) -> anyhow::Result<String> {
-        let visibility = if category.is_gender_private() {
-            MemoVisibility::Private
-        } else {
-            visibility
-        };
+        let (visibility, due_date, end_date) =
+            vis_dates_for_save(category, visibility, due_date, end_date);
         let _ = lifecycle;
         let lifecycle = MemoLifecycle::Permanent;
         let ct = crypto::encrypt_string(&self.key, content)?;
@@ -245,7 +262,8 @@ impl MemoService {
             &self.session_fp,
             lifecycle,
             category,
-            due_date,
+            &due_date,
+            &end_date,
             false,
             tags,
             priority,
@@ -307,6 +325,7 @@ impl MemoService {
             deleted_at: it.deleted_at,
             category: it.category,
             due_date: it.due_date,
+            end_date: it.end_date,
             remind_before_days: it.remind_before_days,
             remind_seen_for: it.remind_seen_for,
             done: it.done,
@@ -328,6 +347,7 @@ impl MemoService {
             MemoLifecycle::Permanent,
             prev.category,
             &prev.due_date,
+            &prev.end_date,
             prev.done,
             &prev.tags,
             prev.priority,
@@ -345,6 +365,7 @@ impl MemoService {
         lifecycle: MemoLifecycle,
         category: MemoCategory,
         due_date: &str,
+        end_date: &str,
         done: bool,
         tags: &[String],
         priority: MemoPriority,
@@ -358,11 +379,8 @@ impl MemoService {
         if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
             anyhow::bail!("无权编辑他人私密备忘");
         }
-        let visibility = if category.is_gender_private() {
-            MemoVisibility::Private
-        } else {
-            visibility
-        };
+        let (visibility, due_date, end_date) =
+            vis_dates_for_save(category, visibility, due_date, end_date);
         let _ = lifecycle;
         let lifecycle = MemoLifecycle::Permanent;
         let owner_fp = if visibility == MemoVisibility::Private {
@@ -386,7 +404,8 @@ impl MemoService {
             owner_fp,
             lifecycle,
             category,
-            due_date,
+            &due_date,
+            &end_date,
             done,
             tags,
             priority,
@@ -427,6 +446,7 @@ impl MemoService {
             MemoLifecycle::Permanent,
             prev.category,
             &prev.due_date,
+            &prev.end_date,
             prev.done,
             &prev.tags,
             prev.priority,
@@ -455,6 +475,7 @@ impl MemoService {
             MemoLifecycle::Permanent,
             prev.category,
             &prev.due_date,
+            &prev.end_date,
             done,
             &prev.tags,
             prev.priority,
@@ -482,6 +503,7 @@ impl MemoService {
             MemoLifecycle::Permanent,
             view.category,
             &view.due_date,
+            &view.end_date,
             view.done,
             &view.tags,
             view.priority,
@@ -587,6 +609,7 @@ impl MemoService {
                 },
                 category: MemoCategory::General,
                 due_date: String::new(),
+                end_date: String::new(),
                 remind_before_days: 0,
                 remind_seen_for: String::new(),
                 done: false,

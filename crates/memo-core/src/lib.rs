@@ -28,7 +28,10 @@ pub use cycle::{
     PeriodMarkStats,
 };
 pub use disk::{format_bytes, DiskSpace};
-pub use due::{display_due, due_date_part, due_is_due_today, format_due, parse_due_local, remind_at};
+pub use due::{
+    covers_calendar_day, display_due, due_date_part, due_is_due_today, event_end_date, format_due,
+    normalize_end_date, parse_due_local, remind_at,
+};
 pub use identity_keys::{IdentityKeys, IdentityMeta, SCHEMA_VERSION};
 pub use male_health::{MaleHealthConfig, MaleHealthStore};
 pub use person::{Gender, Person, PersonView};

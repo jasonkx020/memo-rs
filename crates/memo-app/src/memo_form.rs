@@ -48,10 +48,32 @@ pub enum FormMode {
     Edit,
 }
 
+/// 表单「这是」：某一天 / 好几天 / 先记着 / 账号密码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateKind {
+    Day,
+    Span,
+    Parked,
+    Credentials,
+}
+
+impl DateKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Day => "某一天",
+            Self::Span => "好几天",
+            Self::Parked => "先记着",
+            Self::Credentials => "账号密码",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoFormState {
     pub category: MemoCategory,
     pub due_date: String,
+    pub end_date: String,
+    pub kind: DateKind,
     pub remind_before_days: u32,
     pub priority: MemoPriority,
     pub tags: String,
@@ -68,6 +90,8 @@ impl Default for MemoFormState {
         Self {
             category: MemoCategory::Todo,
             due_date: String::new(),
+            end_date: String::new(),
+            kind: DateKind::Parked,
             remind_before_days: 0,
             priority: MemoPriority::Normal,
             tags: String::new(),
@@ -86,13 +110,15 @@ impl MemoFormState {
     }
 
     /// 按导航默认分类打开新建草稿并套用模板。
-    /// `due_date` 默认空（永久）；仅「今天到期」导航传入预填到期。
+    /// `prefill_due` 有值时为「某一天」；账号分类强制无日期。
     pub fn begin_create(category: MemoCategory, stamp: &str, prefill_due: Option<&str>) -> Self {
         let mut s = Self {
             category,
             due_date: prefill_due.unwrap_or("").to_string(),
             ..Self::default()
         };
+        s.kind = infer_kind(s.category, &s.due_date, &s.end_date);
+        s.sync_kind_fields();
         s.apply_template(stamp, true);
         s
     }
@@ -102,15 +128,18 @@ impl MemoFormState {
         title: &str,
         body: &str,
         due: &str,
+        end: &str,
         priority: MemoPriority,
         tags: &str,
         done: bool,
         visibility: MemoVisibility,
         remind_before_days: u32,
     ) -> Self {
-        Self {
+        let mut s = Self {
             category,
             due_date: due.to_string(),
+            end_date: end.to_string(),
+            kind: infer_kind(category, due, end),
             remind_before_days,
             priority,
             tags: tags.to_string(),
@@ -119,7 +148,64 @@ impl MemoFormState {
             visibility,
             auto_title: title.to_string(),
             auto_body: body.to_string(),
+        };
+        s.sync_kind_fields();
+        s
+    }
+
+    fn sync_kind_fields(&mut self) {
+        match self.kind {
+            DateKind::Credentials => {
+                self.category = MemoCategory::Credentials;
+                self.due_date.clear();
+                self.end_date.clear();
+                self.visibility = MemoVisibility::Private;
+                self.remind_before_days = 0;
+            }
+            DateKind::Parked => {
+                self.due_date.clear();
+                self.end_date.clear();
+                self.remind_before_days = 0;
+                if self.category.canonical() == MemoCategory::Credentials {
+                    self.category = MemoCategory::Todo;
+                }
+            }
+            DateKind::Day => {
+                self.end_date.clear();
+                if self.due_date.trim().is_empty() {
+                    self.due_date = format!("{} 09:00", today_ymd());
+                }
+                if self.category.canonical() == MemoCategory::Credentials {
+                    self.category = MemoCategory::Todo;
+                }
+            }
+            DateKind::Span => {
+                if self.due_date.trim().is_empty() {
+                    self.due_date = format!("{} 09:00", today_ymd());
+                }
+                if self.end_date.trim().is_empty() {
+                    if let Some(d) = date_field::parse_ymd(&self.due_date) {
+                        self.end_date = date_field::format_ymd(d);
+                    }
+                }
+                if self.category.canonical() == MemoCategory::Credentials {
+                    self.category = MemoCategory::Todo;
+                }
+            }
         }
+    }
+
+    pub fn set_kind(&mut self, kind: DateKind, stamp: &str) {
+        if self.kind == kind {
+            return;
+        }
+        self.kind = kind;
+        if kind == DateKind::Credentials && self.category.canonical() != MemoCategory::Credentials
+        {
+            self.set_category(MemoCategory::Credentials, stamp);
+            return;
+        }
+        self.sync_kind_fields();
     }
 
     fn current_store(&self) -> (String, String) {
@@ -150,9 +236,35 @@ impl MemoFormState {
         }
         self.category = cat;
         self.apply_template(stamp, false);
-        if cat.is_gender_private() {
+        if cat.is_gender_private() || cat.canonical() == MemoCategory::Credentials {
             self.visibility = MemoVisibility::Private;
         }
+        if cat.canonical() == MemoCategory::Credentials {
+            self.kind = DateKind::Credentials;
+        } else if self.kind == DateKind::Credentials {
+            self.kind = if self.due_date.trim().is_empty() {
+                DateKind::Parked
+            } else {
+                DateKind::Day
+            };
+        }
+        self.sync_kind_fields();
+    }
+}
+
+fn infer_kind(category: MemoCategory, due: &str, end: &str) -> DateKind {
+    if category.canonical() == MemoCategory::Credentials {
+        return DateKind::Credentials;
+    }
+    if due.trim().is_empty() {
+        return DateKind::Parked;
+    }
+    match (
+        memo_core::due_date_part(due),
+        memo_core::event_end_date(due, end),
+    ) {
+        (Some(a), Some(b)) if b > a => DateKind::Span,
+        _ => DateKind::Day,
     }
 }
 
@@ -242,10 +354,8 @@ fn append_tag(tags_str: &mut String, tag: &str) {
 }
 
 /// 导航 → 新建默认分类。
-pub fn default_category_for_nav(nav_is_due_today: bool, nav_category: Option<MemoCategory>) -> MemoCategory {
-    if nav_is_due_today {
-        return MemoCategory::Todo;
-    }
+#[allow(dead_code)]
+pub fn default_category_for_nav(nav_category: Option<MemoCategory>) -> MemoCategory {
     match nav_category {
         Some(MemoCategory::General) | None => MemoCategory::Todo,
         Some(c) if c.is_gender_private() => MemoCategory::GenderPrivate,
@@ -274,13 +384,79 @@ fn form_w(ui: &egui::Ui) -> f32 {
 fn show_due_priority(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
     ui.set_width(col_w);
     ui.set_max_width(col_w);
-    field_label(ui, "到期时间", false);
+    field_label(ui, if state.kind == DateKind::Span { "从哪天" } else { "哪一天" }, false);
     ui.add_space(3.0);
     date_field::show_datetime(ui, &format!("{id_salt}_due"), &mut state.due_date, true);
+}
+
+fn show_end_date(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    ui.set_width(col_w);
+    ui.set_max_width(col_w);
+    field_label(ui, "到哪天", false);
+    ui.add_space(3.0);
+    date_field::show(ui, &format!("{id_salt}_end"), &mut state.end_date, true);
+}
+
+fn kind_hint(kind: DateKind) -> &'static str {
+    match kind {
+        DateKind::Day => "出现在选中的那一天。",
+        DateKind::Span => "月历上画一条横跨多天的色条。",
+        DateKind::Parked => "进右侧「未安排」，以后再放到某一天。",
+        DateKind::Credentials => "会放进「账号证件」，只本人可见，不上日历。",
+    }
+}
+
+fn show_kinds(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
+    field_label(ui, "这是", true);
+    ui.add_space(3.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for k in [
+            DateKind::Day,
+            DateKind::Span,
+            DateKind::Parked,
+            DateKind::Credentials,
+        ] {
+            let on = state.kind == k;
+            let fill = if on {
+                theme::shell_nav_selected()
+            } else {
+                theme::card()
+            };
+            let fg = if on {
+                theme::shell_accent()
+            } else {
+                theme::text()
+            };
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(k.label()).size(12.5).color(fg).strong())
+                        .fill(fill)
+                        .stroke(Stroke::new(
+                            1.0,
+                            if on {
+                                Color32::from_rgb(0xBF, 0xDB, 0xFE)
+                            } else {
+                                theme::border()
+                            },
+                        ))
+                        .rounding(Rounding::same(99.0))
+                        .min_size(Vec2::new(64.0, 26.0)),
+                )
+                .clicked()
+            {
+                state.set_kind(k, stamp);
+            }
+        }
+    });
     ui.label(
-        RichText::new("不填=永久有效")
+        RichText::new(kind_hint(state.kind))
             .size(11.0)
-            .color(theme::text_muted()),
+            .color(if state.kind == DateKind::Credentials {
+                theme::shell_accent()
+            } else {
+                theme::text_muted()
+            }),
     );
 }
 
@@ -458,7 +634,9 @@ pub fn show_fields(
     let stamp = today_ymd();
     let cats = form_categories();
     let gender_locked = state.category.is_gender_private();
-    if gender_locked {
+    let cred_locked = state.kind == DateKind::Credentials
+        || state.category.canonical() == MemoCategory::Credentials;
+    if gender_locked || cred_locked {
         state.visibility = MemoVisibility::Private;
     }
     let w = form_w(ui);
@@ -524,6 +702,9 @@ pub fn show_fields(
     }
     ui.add_space(8.0);
 
+    show_kinds(ui, state, &stamp);
+    ui.add_space(8.0);
+
     // —— 标题 ——
     field_label(ui, "标题", true);
     ui.add_space(3.0);
@@ -535,23 +716,47 @@ pub fn show_fields(
     );
     ui.add_space(8.0);
 
-    // —— 到期时间 | 优先级 ——
-    if w >= 360.0 {
-        let col = ((w - 12.0) * 0.5).max(80.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                show_due_priority(ui, state, id_salt, col);
+    // —— 日期 | 优先级 ——
+    let show_dates = matches!(state.kind, DateKind::Day | DateKind::Span);
+    let show_end = state.kind == DateKind::Span;
+    if show_dates {
+        if w >= 360.0 {
+            let col = ((w - 12.0) * 0.5).max(80.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    show_due_priority(ui, state, id_salt, col);
+                });
+                ui.add_space(12.0);
+                ui.vertical(|ui| {
+                    if show_end {
+                        show_end_date(ui, state, id_salt, col);
+                    } else {
+                        show_priority_field(ui, state, id_salt, col);
+                    }
+                });
             });
-            ui.add_space(12.0);
+            if show_end {
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    show_priority_field(ui, state, id_salt, w);
+                });
+            }
+        } else {
             ui.vertical(|ui| {
-                show_priority_field(ui, state, id_salt, col);
+                show_due_priority(ui, state, id_salt, w);
             });
-        });
+            if show_end {
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    show_end_date(ui, state, id_salt, w);
+                });
+            }
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                show_priority_field(ui, state, id_salt, w);
+            });
+        }
     } else {
-        ui.vertical(|ui| {
-            show_due_priority(ui, state, id_salt, w);
-        });
-        ui.add_space(8.0);
         ui.vertical(|ui| {
             show_priority_field(ui, state, id_salt, w);
         });
@@ -603,13 +808,19 @@ pub fn show_fields(
         .inner_margin(Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.add_enabled_ui(!gender_locked, |ui| {
+                ui.add_enabled_ui(!(gender_locked || cred_locked), |ui| {
                     ui.radio_value(&mut state.visibility, MemoVisibility::Private, "私密");
                     ui.radio_value(&mut state.visibility, MemoVisibility::Public, "公开");
                 });
                 if gender_locked {
                     ui.label(
                         RichText::new("性别私密固定为私密")
+                            .size(11.5)
+                            .color(theme::text_muted()),
+                    );
+                } else if cred_locked {
+                    ui.label(
+                        RichText::new("账号证件固定为私密，不上日历")
                             .size(11.5)
                             .color(theme::text_muted()),
                     );
