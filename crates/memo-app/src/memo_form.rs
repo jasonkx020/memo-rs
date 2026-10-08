@@ -6,18 +6,74 @@ use crate::theme;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
 use memo_core::store::{MemoCategory, MemoPriority, MemoVisibility};
 
-/// 表单可选分类（含统一「性别私密」）。
-pub fn form_categories() -> [MemoCategory; 8] {
-    [
-        MemoCategory::Todo,
-        MemoCategory::Work,
-        MemoCategory::Credentials,
-        MemoCategory::Life,
-        MemoCategory::Finance,
-        MemoCategory::Emergency,
-        MemoCategory::Inspiration,
-        MemoCategory::GenderPrivate,
-    ]
+/// 新建弹窗作用域：随主导航收窄分类/类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormScope {
+    /// 编辑：不限制
+    #[default]
+    Open,
+    Calendar,
+    Credentials,
+    GenderPrivate,
+}
+
+pub fn categories_for(scope: FormScope) -> &'static [MemoCategory] {
+    match scope {
+        FormScope::Open => &[
+            MemoCategory::Todo,
+            MemoCategory::Work,
+            MemoCategory::Credentials,
+            MemoCategory::Life,
+            MemoCategory::Finance,
+            MemoCategory::Emergency,
+            MemoCategory::Inspiration,
+            MemoCategory::GenderPrivate,
+        ],
+        FormScope::Calendar => &[
+            MemoCategory::Todo,
+            MemoCategory::Work,
+            MemoCategory::Life,
+            MemoCategory::Finance,
+            MemoCategory::Emergency,
+            MemoCategory::Inspiration,
+        ],
+        FormScope::Credentials => &[MemoCategory::Credentials],
+        FormScope::GenderPrivate => &[MemoCategory::GenderPrivate],
+    }
+}
+
+pub fn kinds_for(scope: FormScope) -> &'static [DateKind] {
+    match scope {
+        FormScope::Open => &[
+            DateKind::Day,
+            DateKind::Span,
+            DateKind::Parked,
+            DateKind::Credentials,
+        ],
+        FormScope::Calendar | FormScope::GenderPrivate => {
+            &[DateKind::Day, DateKind::Span, DateKind::Parked]
+        }
+        FormScope::Credentials => &[DateKind::Credentials],
+    }
+}
+
+fn category_allowed(scope: FormScope, cat: MemoCategory) -> bool {
+    let c = if cat.is_gender_private() {
+        MemoCategory::GenderPrivate
+    } else {
+        cat.canonical()
+    };
+    categories_for(scope).iter().any(|&x| {
+        if x.is_gender_private() {
+            c.is_gender_private()
+        } else {
+            x.canonical() == c
+        }
+    })
+}
+
+fn kind_allowed(scope: FormScope, kind: DateKind) -> bool {
+    kinds_for(scope).contains(&kind)
 }
 
 /// 通用跨分类快捷标签。
@@ -80,6 +136,14 @@ pub struct MemoFormState {
     pub doc: Doc,
     pub done: bool,
     pub visibility: MemoVisibility,
+    /// 新建弹窗导航作用域；编辑为 Open
+    pub scope: FormScope,
+    /// 下一帧聚焦标题框（校验失败时）
+    focus_title: bool,
+    /// 外层 ScrollArea 强制滚到顶部的剩余帧数（标题在表单上部）
+    force_scroll_top: u8,
+    /// 标题输入框闪烁提示剩余帧数
+    flash_title_frames: u8,
     /// 上次自动套用的标题/正文，用于判断是否可随分类刷新模板
     auto_title: String,
     auto_body: String,
@@ -98,6 +162,10 @@ impl Default for MemoFormState {
             doc: Doc::empty(),
             done: false,
             visibility: MemoVisibility::Private,
+            scope: FormScope::Open,
+            focus_title: false,
+            force_scroll_top: 0,
+            flash_title_frames: 0,
             auto_title: String::new(),
             auto_body: String::new(),
         }
@@ -109,15 +177,35 @@ impl MemoFormState {
         *self = Self::default();
     }
 
-    /// 按导航默认分类打开新建草稿并套用模板。
+    /// 按导航作用域打开新建草稿并套用模板。
     /// `prefill_due` 有值时为「某一天」；账号分类强制无日期。
-    pub fn begin_create(category: MemoCategory, stamp: &str, prefill_due: Option<&str>) -> Self {
+    pub fn begin_create(
+        category: MemoCategory,
+        stamp: &str,
+        prefill_due: Option<&str>,
+        scope: FormScope,
+    ) -> Self {
+        let category = if category_allowed(scope, category) {
+            category
+        } else {
+            categories_for(scope)
+                .first()
+                .copied()
+                .unwrap_or(MemoCategory::Todo)
+        };
         let mut s = Self {
             category,
             due_date: prefill_due.unwrap_or("").to_string(),
+            scope,
             ..Self::default()
         };
         s.kind = infer_kind(s.category, &s.due_date, &s.end_date);
+        if !kind_allowed(scope, s.kind) {
+            s.kind = kinds_for(scope)
+                .first()
+                .copied()
+                .unwrap_or(DateKind::Parked);
+        }
         s.sync_kind_fields();
         s.apply_template(stamp, true);
         s
@@ -146,6 +234,10 @@ impl MemoFormState {
             doc: Doc::from_store(title, body),
             done,
             visibility,
+            scope: FormScope::Open,
+            focus_title: false,
+            force_scroll_top: 0,
+            flash_title_frames: 0,
             auto_title: title.to_string(),
             auto_body: body.to_string(),
         };
@@ -166,7 +258,11 @@ impl MemoFormState {
                 self.due_date.clear();
                 self.end_date.clear();
                 self.remind_before_days = 0;
-                if self.category.canonical() == MemoCategory::Credentials {
+                // 勿在私密/账号作用域把分类改成 Todo
+                if self.category.canonical() == MemoCategory::Credentials
+                    && self.scope != FormScope::Credentials
+                    && self.scope != FormScope::GenderPrivate
+                {
                     self.category = MemoCategory::Todo;
                 }
             }
@@ -175,7 +271,10 @@ impl MemoFormState {
                 if self.due_date.trim().is_empty() {
                     self.due_date = format!("{} 09:00", today_ymd());
                 }
-                if self.category.canonical() == MemoCategory::Credentials {
+                if self.category.canonical() == MemoCategory::Credentials
+                    && self.scope != FormScope::Credentials
+                    && self.scope != FormScope::GenderPrivate
+                {
                     self.category = MemoCategory::Todo;
                 }
             }
@@ -188,15 +287,27 @@ impl MemoFormState {
                         self.end_date = date_field::format_ymd(d);
                     }
                 }
-                if self.category.canonical() == MemoCategory::Credentials {
+                if self.category.canonical() == MemoCategory::Credentials
+                    && self.scope != FormScope::Credentials
+                    && self.scope != FormScope::GenderPrivate
+                {
                     self.category = MemoCategory::Todo;
                 }
+            }
+        }
+        // 作用域内强制合法分类
+        if !category_allowed(self.scope, self.category) {
+            if let Some(&c) = categories_for(self.scope).first() {
+                self.category = c;
             }
         }
     }
 
     pub fn set_kind(&mut self, kind: DateKind, stamp: &str) {
         if self.kind == kind {
+            return;
+        }
+        if !kind_allowed(self.scope, kind) {
             return;
         }
         self.kind = kind;
@@ -213,9 +324,20 @@ impl MemoFormState {
     }
 
     fn is_pristine_template(&self) -> bool {
-        let (t, b) = self.current_store();
-        (t.trim().is_empty() && b.trim().is_empty())
-            || (t.trim() == self.auto_title.trim() && b.trim() == self.auto_body.trim())
+        let title = self.doc.title.trim();
+        let serialized = doc_editor::serialize(&self.doc);
+        // 标题为空时 serialize 即为正文，不可再 split（否则会把正文首行当成标题）
+        let body = if title.is_empty() {
+            serialized.trim().to_string()
+        } else {
+            doc_editor::split_note(&serialized, "")
+                .1
+                .trim()
+                .to_string()
+        };
+        let auto_body = self.auto_body.trim();
+        (title.is_empty() && body.is_empty())
+            || (title == self.auto_title.trim() && body == auto_body)
     }
 
     pub fn apply_template(&mut self, stamp: &str, force: bool) {
@@ -223,15 +345,44 @@ impl MemoFormState {
             return;
         }
         let note = doc_editor::memo_template_for(self.category, stamp);
-        let (title, body) = doc_editor::split_note(&note, "未命名备忘");
-        self.doc = Doc::from_store(&title, &body);
-        self.auto_title = title;
+        // 模板首行不再写入标题，留给用户填写；仅套用正文
+        let (_tpl_title, body) = doc_editor::split_note(&note, "");
+        // 必须用 from_store("", body)：旧 join+parse 会把正文首行当成标题
+        self.doc = Doc::from_store("", &body);
+        self.auto_title = String::new();
         self.auto_body = body;
-        // 到期：新建默认永久；编辑保留用户原值，套模板不改动。
+    }
+
+    /// 保存校验失败时：滚到标题、聚焦，并闪烁提示。
+    pub fn request_title_focus(&mut self) {
+        self.focus_title = true;
+        // 多帧重试：外层 ScrollArea 在下一帧才能应用 offset；动画也可能要几帧
+        self.force_scroll_top = 12;
+        // ~3 次亮暗（每相约 8 帧切换），约 0.8s@60fps
+        self.flash_title_frames = 48;
+    }
+
+    /// 外层 ScrollArea 是否应强制滚到顶部（标题附近）。
+    pub fn force_scroll_top(&self) -> bool {
+        self.force_scroll_top > 0
+    }
+
+    /// 消耗一帧强制滚顶计数。
+    pub fn tick_force_scroll_top(&mut self) {
+        self.force_scroll_top = self.force_scroll_top.saturating_sub(1);
+    }
+
+    fn take_focus_title(&mut self) -> bool {
+        let f = self.focus_title;
+        self.focus_title = false;
+        f
     }
 
     pub fn set_category(&mut self, cat: MemoCategory, stamp: &str) {
         if self.category == cat {
+            return;
+        }
+        if !category_allowed(self.scope, cat) {
             return;
         }
         self.category = cat;
@@ -240,13 +391,21 @@ impl MemoFormState {
             self.visibility = MemoVisibility::Private;
         }
         if cat.canonical() == MemoCategory::Credentials {
-            self.kind = DateKind::Credentials;
+            if kind_allowed(self.scope, DateKind::Credentials) {
+                self.kind = DateKind::Credentials;
+            }
         } else if self.kind == DateKind::Credentials {
             self.kind = if self.due_date.trim().is_empty() {
                 DateKind::Parked
             } else {
                 DateKind::Day
             };
+            if !kind_allowed(self.scope, self.kind) {
+                self.kind = kinds_for(self.scope)
+                    .first()
+                    .copied()
+                    .unwrap_or(DateKind::Parked);
+            }
         }
         self.sync_kind_fields();
     }
@@ -407,48 +566,72 @@ fn kind_hint(kind: DateKind) -> &'static str {
 }
 
 fn show_kinds(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
+    let kinds = kinds_for(state.scope);
     field_label(ui, "这是", true);
     ui.add_space(3.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        for k in [
-            DateKind::Day,
-            DateKind::Span,
-            DateKind::Parked,
-            DateKind::Credentials,
-        ] {
-            let on = state.kind == k;
-            let fill = if on {
-                theme::shell_nav_selected()
-            } else {
-                theme::card()
-            };
-            let fg = if on {
-                theme::shell_accent()
-            } else {
-                theme::text()
-            };
-            if ui
-                .add(
-                    egui::Button::new(RichText::new(k.label()).size(12.5).color(fg).strong())
-                        .fill(fill)
-                        .stroke(Stroke::new(
-                            1.0,
-                            if on {
-                                Color32::from_rgb(0xBF, 0xDB, 0xFE)
-                            } else {
-                                theme::border()
-                            },
-                        ))
-                        .rounding(Rounding::same(99.0))
-                        .min_size(Vec2::new(64.0, 26.0)),
-                )
-                .clicked()
-            {
-                state.set_kind(k, stamp);
-            }
+    if kinds.len() <= 1 {
+        let k = kinds.first().copied().unwrap_or(state.kind);
+        if state.kind != k {
+            state.kind = k;
+            state.sync_kind_fields();
         }
-    });
+        ui.horizontal(|ui| {
+            let fill = theme::shell_nav_selected();
+            ui.add(
+                egui::Button::new(
+                    RichText::new(k.label())
+                        .size(12.5)
+                        .color(theme::shell_accent())
+                        .strong(),
+                )
+                .fill(fill)
+                .stroke(Stroke::new(1.0, Color32::from_rgb(0xBF, 0xDB, 0xFE)))
+                .rounding(Rounding::same(99.0))
+                .min_size(Vec2::new(64.0, 26.0)),
+            );
+            ui.label(
+                RichText::new("（当前页固定）")
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
+        });
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for &k in kinds {
+                let on = state.kind == k;
+                let fill = if on {
+                    theme::shell_nav_selected()
+                } else {
+                    theme::card()
+                };
+                let fg = if on {
+                    theme::shell_accent()
+                } else {
+                    theme::text()
+                };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(k.label()).size(12.5).color(fg).strong())
+                            .fill(fill)
+                            .stroke(Stroke::new(
+                                1.0,
+                                if on {
+                                    Color32::from_rgb(0xBF, 0xDB, 0xFE)
+                                } else {
+                                    theme::border()
+                                },
+                            ))
+                            .rounding(Rounding::same(99.0))
+                            .min_size(Vec2::new(64.0, 26.0)),
+                    )
+                    .clicked()
+                {
+                    state.set_kind(k, stamp);
+                }
+            }
+        });
+    }
     ui.label(
         RichText::new(kind_hint(state.kind))
             .size(11.0)
@@ -478,19 +661,27 @@ fn show_priority_field(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &s
 fn show_category_combo(
     ui: &mut egui::Ui,
     id_salt: &str,
-    cats: &[MemoCategory; 8],
+    cats: &[MemoCategory],
     selected_cat: MemoCategory,
     stamp: &str,
     state: &mut MemoFormState,
 ) {
+    let locked = cats.len() <= 1;
     let popup_id = ui.make_persistent_id(("memo_cat_combo", id_salt));
     let w = form_w(ui);
     let h = 34.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-    if resp.hovered() {
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(w, h),
+        if locked {
+            Sense::hover()
+        } else {
+            Sense::click()
+        },
+    );
+    if !locked && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let fill = if resp.hovered() {
+    let fill = if !locked && resp.hovered() {
         theme::c().list_hover
     } else {
         theme::card()
@@ -533,14 +724,27 @@ fn show_category_combo(
         label_g,
         theme::text(),
     );
-    ui.painter().text(
-        egui::pos2(rect.right() - 14.0, cy),
-        egui::Align2::CENTER_CENTER,
-        "▾",
-        egui::FontId::proportional(11.0),
-        theme::text_muted(),
-    );
+    if locked {
+        ui.painter().text(
+            egui::pos2(rect.right() - 14.0, cy),
+            egui::Align2::CENTER_CENTER,
+            "·",
+            egui::FontId::proportional(11.0),
+            theme::text_muted(),
+        );
+    } else {
+        ui.painter().text(
+            egui::pos2(rect.right() - 14.0, cy),
+            egui::Align2::CENTER_CENTER,
+            "▾",
+            egui::FontId::proportional(11.0),
+            theme::text_muted(),
+        );
+    }
 
+    if locked {
+        return;
+    }
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(popup_id));
     }
@@ -632,7 +836,13 @@ pub fn show_fields(
     id_salt: &str,
 ) {
     let stamp = today_ymd();
-    let cats = form_categories();
+    // 编辑用完整列表；新建用 state.scope
+    let scope = if mode == FormMode::Edit {
+        FormScope::Open
+    } else {
+        state.scope
+    };
+    let cats = categories_for(scope);
     let gender_locked = state.category.is_gender_private();
     let cred_locked = state.kind == DateKind::Credentials
         || state.category.canonical() == MemoCategory::Credentials;
@@ -641,43 +851,6 @@ pub fn show_fields(
     }
     let w = form_w(ui);
     ui.set_max_width(w);
-
-    // —— 头 ——
-    ui.horizontal(|ui| {
-        let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-        ui.painter()
-            .circle_filled(icon_rect.center(), 13.0, theme::shell_accent());
-        ui.painter().text(
-            icon_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            if mode == FormMode::Create { "+" } else { "✎" },
-            egui::FontId::proportional(15.0),
-            Color32::WHITE,
-        );
-        ui.add_space(8.0);
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(if mode == FormMode::Create {
-                    "新建备忘"
-                } else {
-                    "编辑备忘"
-                })
-                .size(17.0)
-                .strong()
-                .color(theme::text()),
-            );
-            ui.label(
-                RichText::new(if mode == FormMode::Create {
-                    "填写后保存，将出现在对应分类下"
-                } else {
-                    "修改后保存即可更新本条备忘"
-                })
-                .size(12.0)
-                .color(theme::text_muted()),
-            );
-        });
-    });
-    ui.add_space(10.0);
 
     // —— 分类 ——
     field_label(ui, "选择分类", true);
@@ -702,18 +875,85 @@ pub fn show_fields(
     }
     ui.add_space(8.0);
 
-    show_kinds(ui, state, &stamp);
+    // —— 标题 ——
+    let need_focus = state.take_focus_title();
+    let need_scroll = state.force_scroll_top > 0;
+    let flash_on = state.flash_title_frames > 0 && ((state.flash_title_frames / 8) % 2 == 0);
+    if state.flash_title_frames > 0 {
+        state.flash_title_frames = state.flash_title_frames.saturating_sub(1);
+        ui.ctx().request_repaint();
+    }
+    let title_stroke = if flash_on {
+        Stroke::new(2.0, theme::danger())
+    } else {
+        Stroke::new(1.0, theme::border())
+    };
+    let title_block = ui
+        .vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("标题")
+                        .size(13.0)
+                        .strong()
+                        .color(theme::text()),
+                );
+                ui.label(RichText::new("*").size(13.0).color(theme::danger()));
+                ui.label(
+                    RichText::new("标题是必填字段，一句话说清楚要做什么")
+                        .size(12.0)
+                        .color(theme::danger()),
+                );
+            });
+            ui.add_space(3.0);
+            let title_id = ui.make_persistent_id((id_salt, "memo_title"));
+            let title_resp = Frame::none()
+                .stroke(title_stroke)
+                .rounding(Rounding::same(8.0))
+                .inner_margin(Margin::same(1.0))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.doc.title)
+                            .id(title_id)
+                            .desired_width((w - 2.0).max(40.0))
+                            .hint_text(theme::hint(title_hint(state.category)))
+                            .margin(egui::vec2(10.0, 7.0)),
+                    )
+                })
+                .inner;
+            if need_focus {
+                title_resp.request_focus();
+            }
+            title_resp
+        })
+        .response;
+    if need_focus || need_scroll {
+        // 滚到标题块；外层还会用 vertical_scroll_offset(0) 兜底
+        title_block.scroll_to_me(Some(egui::Align::TOP));
+        ui.scroll_to_rect(title_block.rect, Some(egui::Align::TOP));
+        ui.ctx().request_repaint();
+    }
     ui.add_space(8.0);
 
-    // —— 标题 ——
-    field_label(ui, "标题", true);
+    // —— 备注 ——
+    field_label(ui, "备注（可选）", false);
     ui.add_space(3.0);
-    ui.add(
-        egui::TextEdit::singleline(&mut state.doc.title)
-            .desired_width(w)
-            .hint_text(theme::hint(title_hint(state.category)))
-            .margin(egui::vec2(10.0, 7.0)),
-    );
+    let notes_w = (ui.available_width() - 10.0).max(48.0);
+    ui.scope(|ui| {
+        ui.set_width(notes_w);
+        ui.set_max_width(notes_w);
+        Frame::none()
+            .stroke(Stroke::new(1.0, theme::border()))
+            .rounding(Rounding::same(10.0))
+            .inner_margin(Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
+                doc_editor::show_editor(ui, &mut state.doc, id_salt);
+            });
+    });
+    ui.add_space(8.0);
+
+    // —— 类型 ——
+    show_kinds(ui, state, &stamp);
     ui.add_space(8.0);
 
     // —— 日期 | 优先级 ——
@@ -875,23 +1115,6 @@ pub fn show_fields(
         ui.checkbox(&mut state.done, "已完成");
         ui.add_space(6.0);
     }
-
-    // —— 备注（放最后，高度克制，不挡住上方选项）——
-    field_label(ui, "备注（可选）", false);
-    ui.add_space(3.0);
-    let notes_w = (ui.available_width() - 10.0).max(48.0);
-    ui.scope(|ui| {
-        ui.set_width(notes_w);
-        ui.set_max_width(notes_w);
-        Frame::none()
-            .stroke(Stroke::new(1.0, theme::border()))
-            .rounding(Rounding::same(10.0))
-            .inner_margin(Margin::same(8.0))
-            .show(ui, |ui| {
-                ui.set_max_width(ui.available_width());
-                doc_editor::show_editor(ui, &mut state.doc, id_salt);
-            });
-    });
 }
 
 pub fn tags_vec(state: &MemoFormState) -> Vec<String> {
@@ -899,10 +1122,10 @@ pub fn tags_vec(state: &MemoFormState) -> Vec<String> {
 }
 
 pub fn validate_title(state: &MemoFormState) -> Result<(String, String), String> {
-    let (title, body) = state.current_store();
-    if title.trim().is_empty() {
+    // 必须看 doc.title：to_store 在标题为空时会把正文首行当成标题
+    if state.doc.title.trim().is_empty() {
         Err("请填写标题".into())
     } else {
-        Ok((title, body))
+        Ok(state.current_store())
     }
 }

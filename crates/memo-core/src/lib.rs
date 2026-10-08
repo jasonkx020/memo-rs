@@ -29,8 +29,10 @@ pub use cycle::{
 };
 pub use disk::{format_bytes, DiskSpace};
 pub use due::{
-    covers_calendar_day, display_due, due_date_part, due_is_due_today, event_end_date, format_due,
-    normalize_end_date, parse_due_local, remind_at,
+    covers_calendar_day, days_until_due, deadline_date, display_due, due_date_part,
+    due_is_due_today, due_time_hm, event_end_date, format_due, is_due_soon, is_due_today,
+    is_overdue, normalize_end_date, overdue_days,
+    parse_due_local, remind_at,
 };
 pub use identity_keys::{IdentityKeys, IdentityMeta, SCHEMA_VERSION};
 pub use male_health::{MaleHealthConfig, MaleHealthStore};

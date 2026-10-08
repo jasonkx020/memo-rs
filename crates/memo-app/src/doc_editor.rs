@@ -37,8 +37,19 @@ impl Doc {
         }
     }
 
+    /// 从已拆分的 title/content 装入；标题允许为空（新建留给用户填）。
+    /// 勿再 join 后 parse：标题为空时会把正文首行误当成标题。
     pub fn from_store(title: &str, content: &str) -> Self {
-        parse(&join_note(title, content))
+        let mut blocks = parse_blocks(content);
+        if blocks.is_empty() {
+            blocks.push(Block::Paragraph {
+                text: String::new(),
+            });
+        }
+        Self {
+            title: title.to_string(),
+            blocks,
+        }
     }
 
     pub fn to_store(&self, default_title: &str) -> (String, String) {
@@ -47,6 +58,7 @@ impl Doc {
 }
 
 /// 合并为编辑用全文：第一行标题，其余正文。
+#[allow(dead_code)]
 pub fn join_note(title: &str, content: &str) -> String {
     let title = title.trim_end_matches('\r').trim_end_matches('\n');
     let content = content.trim_start_matches('\r').trim_start_matches('\n');
@@ -79,6 +91,7 @@ pub fn split_note(note: &str, default_title: &str) -> (String, String) {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse(note: &str) -> Doc {
     let (title, content) = split_note(note, "");
     let mut blocks = parse_blocks(&content);
@@ -427,21 +440,14 @@ pub fn show_editor(ui: &mut egui::Ui, doc: &mut Doc, id_salt: &str) {
                     // 正文框（合并后的第一段 Paragraph）
                     let body_rows = if has_structure { 5 } else { 7 };
                     if let Some(Block::Paragraph { text }) = doc.blocks.first_mut() {
-                        let empty = text.is_empty();
-                        let resp = ui.add(
+                        ui.add(
                             egui::TextEdit::multiline(text)
                                 .desired_width(ui.available_width())
-                                .desired_rows(body_rows),
+                                .desired_rows(body_rows)
+                                .hint_text(theme::hint(
+                                    "（一句话说明要做什么；需要时可点上方「事项」或「表格」）",
+                                )),
                         );
-                        if empty {
-                            ui.painter().text(
-                                egui::pos2(resp.rect.left() + 4.0, resp.rect.top() + 4.0),
-                                egui::Align2::LEFT_TOP,
-                                "自由书写备注，换行即可编排…",
-                                egui::FontId::proportional(14.5),
-                                theme::text_muted(),
-                            );
-                        }
                     }
                     ui.add_space(8.0);
 
@@ -641,10 +647,7 @@ pub fn memo_template(stamp: &str) -> String {
 /// 按分类套用新建模板，便于直接填写（纯文本进正文框，不预置事项/表格）。
 pub fn memo_template_for(category: MemoCategory, stamp: &str) -> String {
     match category {
-        MemoCategory::Todo => format!(
-            "待办 {stamp}\n\n\
-             （一句话说明要做什么；需要时可点上方「事项」或「表格」）"
-        ),
+        MemoCategory::Todo => format!("待办 {stamp}"),
         MemoCategory::Credentials => format!(
             "账号证件 {stamp}\n\n\
              （用途：某网站 / 银行卡 / 证件）\n\

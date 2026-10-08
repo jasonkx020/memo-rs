@@ -31,6 +31,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_auto_lock_minutes() -> u32 {
+    3
+}
+
 fn default_schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -137,6 +141,9 @@ pub struct Config {
     /// 外观：浅色 / 深色 / 跟随系统
     #[serde(default)]
     pub theme: ThemePreference,
+    /// 主界面空闲多久后自动锁定（分钟）；0 = 不自动锁定。默认 3。
+    #[serde(default = "default_auto_lock_minutes")]
+    pub auto_lock_minutes: u32,
     /// 备份目标 node_id；空 = 所有可见且 accept_backup 的在线节点
     #[serde(default)]
     pub backup_targets: Vec<String>,
@@ -241,6 +248,7 @@ pub fn default_config() -> anyhow::Result<Config> {
         backup_enabled: true,
         show_backup_status: true,
         theme: ThemePreference::System,
+        auto_lock_minutes: default_auto_lock_minutes(),
         backup_targets: vec![],
         argon2: Argon2Params::default(),
     })
@@ -249,6 +257,9 @@ pub fn default_config() -> anyhow::Result<Config> {
 fn normalize(mut cfg: Config) -> Config {
     cfg.argon2 = Argon2Params::default();
     cfg.schema_version = SCHEMA_VERSION;
+    if cfg.auto_lock_minutes > 120 {
+        cfg.auto_lock_minutes = 120;
+    }
     if cfg.data_dir.trim().is_empty() {
         let drive = default_data_drive();
         cfg.data_dir = memo_data_path(&drive, &cfg.node_id)

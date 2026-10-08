@@ -416,6 +416,92 @@ pub fn danger_soft() -> Color32 {
 pub fn warn() -> Color32 {
     c().warn
 }
+
+/// 日历过期预警：浅红底 / 红字 / 红边。
+pub fn warn_overdue_bg() -> Color32 {
+    Color32::from_rgb(0xFE, 0xF2, 0xF2)
+}
+pub fn warn_overdue_fg() -> Color32 {
+    Color32::from_rgb(0xDC, 0x26, 0x26)
+}
+pub fn warn_overdue_border() -> Color32 {
+    Color32::from_rgb(0xFE, 0xCA, 0xCA)
+}
+/// 日历今天到期预警：浅橙底 / 橙字 / 橙边。
+pub fn warn_due_today_bg() -> Color32 {
+    Color32::from_rgb(0xFF, 0xF7, 0xED)
+}
+pub fn warn_due_today_fg() -> Color32 {
+    Color32::from_rgb(0xEA, 0x58, 0x0C)
+}
+pub fn warn_due_today_border() -> Color32 {
+    Color32::from_rgb(0xFE, 0xD7, 0xAA)
+}
+/// 即将到期（3 天内）：浅琥珀底 / 琥珀字 / 琥珀边。
+pub fn warn_due_soon_bg() -> Color32 {
+    Color32::from_rgb(0xFE, 0xF9, 0xC3)
+}
+pub fn warn_due_soon_fg() -> Color32 {
+    Color32::from_rgb(0xCA, 0x8A, 0x04)
+}
+pub fn warn_due_soon_border() -> Color32 {
+    Color32::from_rgb(0xFE, 0xF0, 0x8A)
+}
+
+/// 月格 chip：浅底 + 分类色字。
+pub fn chip_soft_bg(cat: MemoCategory) -> Color32 {
+    let c = category_icon_color(cat.canonical());
+    Color32::from_rgb(
+        ((c.r() as u16 * 1 + 255 * 4) / 5) as u8,
+        ((c.g() as u16 * 1 + 255 * 4) / 5) as u8,
+        ((c.b() as u16 * 1 + 255 * 4) / 5) as u8,
+    )
+}
+pub fn chip_soft_fg(cat: MemoCategory) -> Color32 {
+    category_icon_color(cat.canonical())
+}
+
+pub fn priority_pill_bg(p: memo_core::MemoPriority) -> Color32 {
+    match p {
+        memo_core::MemoPriority::High => warn_overdue_bg(),
+        memo_core::MemoPriority::Low => panel(),
+        memo_core::MemoPriority::Normal => accent_soft(),
+    }
+}
+pub fn priority_pill_fg(p: memo_core::MemoPriority) -> Color32 {
+    match p {
+        memo_core::MemoPriority::High => warn_overdue_fg(),
+        memo_core::MemoPriority::Low => text_muted(),
+        memo_core::MemoPriority::Normal => shell_accent(),
+    }
+}
+
+/// 标签柔和色轮（按 hash 取）。
+pub fn tag_soft_pair(seed: u64) -> (Color32, Color32) {
+    const PAIRS: [(Color32, Color32); 5] = [
+        (
+            Color32::from_rgb(0xDB, 0xEA, 0xFE),
+            Color32::from_rgb(0x1D, 0x4E, 0xD8),
+        ),
+        (
+            Color32::from_rgb(0xD1, 0xFA, 0xE5),
+            Color32::from_rgb(0x04, 0x78, 0x57),
+        ),
+        (
+            Color32::from_rgb(0xFF, 0xED, 0xD5),
+            Color32::from_rgb(0xC2, 0x41, 0x0C),
+        ),
+        (
+            Color32::from_rgb(0xF3, 0xE8, 0xFF),
+            Color32::from_rgb(0x7E, 0x22, 0xCE),
+        ),
+        (
+            Color32::from_rgb(0xFC, 0xE7, 0xF3),
+            Color32::from_rgb(0xBE, 0x18, 0x5D),
+        ),
+    ];
+    PAIRS[(seed as usize) % PAIRS.len()]
+}
 pub fn mac_bg() -> Color32 {
     c().mac_bg
 }
@@ -1047,6 +1133,38 @@ pub fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong()).fill(danger()),
     )
+}
+
+/// 虚线矩形描边（备注内容卡等）。
+pub fn paint_dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: Stroke) {
+    let dash = 5.0_f32;
+    let gap = 4.0_f32;
+    let paint_h = |y: f32, x0: f32, x1: f32| {
+        let mut x = x0;
+        while x < x1 {
+            let x2 = (x + dash).min(x1);
+            painter.line_segment(
+                [egui::pos2(x, y), egui::pos2(x2, y)],
+                stroke,
+            );
+            x = x2 + gap;
+        }
+    };
+    let paint_v = |x: f32, y0: f32, y1: f32| {
+        let mut y = y0;
+        while y < y1 {
+            let y2 = (y + dash).min(y1);
+            painter.line_segment(
+                [egui::pos2(x, y), egui::pos2(x, y2)],
+                stroke,
+            );
+            y = y2 + gap;
+        }
+    };
+    paint_h(rect.top(), rect.left(), rect.right());
+    paint_h(rect.bottom(), rect.left(), rect.right());
+    paint_v(rect.left(), rect.top(), rect.bottom());
+    paint_v(rect.right(), rect.top(), rect.bottom());
 }
 
 pub fn ghost_button(ui: &mut egui::Ui, label: &str) -> egui::Response {

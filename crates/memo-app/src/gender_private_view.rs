@@ -27,6 +27,8 @@ pub struct GenderPrivateUi {
     pub show_advanced: bool,
     pub care_dismissed: bool,
     pub tab: HubTab,
+    /// 列表预警：「查看过期任务」时滚到过期分组。
+    pub focus_overdue: bool,
 }
 
 impl Default for GenderPrivateUi {
@@ -41,6 +43,7 @@ impl Default for GenderPrivateUi {
             show_advanced: false,
             care_dismissed: false,
             tab: HubTab::Period,
+            focus_overdue: false,
         }
     }
 }
@@ -325,7 +328,10 @@ fn show_body(
     checkup_ymd: &str,
     days_to_checkup: Option<i64>,
 ) {
-    // —— 顶栏 ——
+    let pe = cycle.period_enabled;
+    let ce = health.checkup_enabled;
+
+    // —— 顶栏：标题 + 右上经期/体检分段（对齐效果图）——
     ui.horizontal(|ui| {
         ui.label(
             RichText::new("性别私密")
@@ -333,18 +339,38 @@ fn show_body(
                 .strong()
                 .color(theme::text()),
         );
+        ui.label(
+            RichText::new("🔒")
+                .size(11.0)
+                .color(theme::text_muted()),
+        )
+        .on_hover_text(format!("已加密 · {alias_show}"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            Frame::none()
-                .fill(theme::shell_women_pill())
-                .rounding(Rounding::same(8.0))
-                .inner_margin(Margin::symmetric(8.0, 3.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("已加密 · {alias_show}"))
-                            .size(11.5)
-                            .color(theme::shell_women_pill_fg()),
-                    );
-                });
+            let label = if st.show_advanced { "收起设置" } else { "设置" };
+            if ui.small_button(label).clicked() {
+                st.show_advanced = !st.show_advanced;
+            }
+            ui.add_space(6.0);
+            if pe && ce {
+                // 右到左绘制：先体检再经期，视觉上经期在左
+                segment_tab(ui, st, HubTab::Checkup, "体检");
+                ui.add_space(4.0);
+                segment_tab(ui, st, HubTab::Period, "经期");
+            } else if pe {
+                ui.label(
+                    RichText::new("经期")
+                        .size(13.0)
+                        .strong()
+                        .color(theme::shell_accent()),
+                );
+            } else if ce {
+                ui.label(
+                    RichText::new("体检")
+                        .size(13.0)
+                        .strong()
+                        .color(theme::shell_accent()),
+                );
+            }
         });
     });
 
@@ -364,7 +390,7 @@ fn show_body(
         if let Some(text) = line {
             ui.add_space(4.0);
             Frame::none()
-                .fill(theme::shell_women_pill().linear_multiply(0.85))
+                .fill(theme::accent_soft())
                 .rounding(Rounding::same(8.0))
                 .inner_margin(Margin::symmetric(10.0, 5.0))
                 .show(ui, |ui| {
@@ -372,7 +398,7 @@ fn show_body(
                         ui.label(
                             RichText::new(text)
                                 .size(12.0)
-                                .color(theme::shell_women_pill_fg()),
+                                .color(theme::shell_accent()),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("×").clicked() {
@@ -384,45 +410,6 @@ fn show_body(
         }
     }
 
-    ui.add_space(4.0);
-
-    let pe = cycle.period_enabled;
-    let ce = health.checkup_enabled;
-
-    ui.horizontal(|ui| {
-        if pe && ce {
-            segment_tab(ui, st, HubTab::Period, "经期");
-            ui.add_space(6.0);
-            segment_tab(ui, st, HubTab::Checkup, "体检");
-        } else if pe {
-            ui.label(
-                RichText::new("经期")
-                    .size(13.5)
-                    .strong()
-                    .color(theme::text()),
-            );
-        } else if ce {
-            ui.label(
-                RichText::new("体检")
-                    .size(13.5)
-                    .strong()
-                    .color(theme::text()),
-            );
-        } else {
-            ui.label(
-                RichText::new("未开启模块")
-                    .size(13.5)
-                    .strong()
-                    .color(theme::text_muted()),
-            );
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = if st.show_advanced { "收起设置" } else { "设置" };
-            if ui.small_button(label).clicked() {
-                st.show_advanced = !st.show_advanced;
-            }
-        });
-    });
     ui.add_space(4.0);
 
     if st.show_advanced {
@@ -689,23 +676,22 @@ fn show_period_page(
         legend_chip(ui, legend_period_color(), "经期");
         legend_chip(ui, legend_predict_color(), "预测");
         if cycle.ovulation_offset().is_some() {
-            // 易孕：描边示意（方块描边色）
             legend_chip(ui, legend_fertile_color(), "易孕");
             legend_text(ui, "排");
         }
         legend_dot(ui, legend_note_color(), "点=有备注");
         if let Some(n) = next_period {
-            legend_dot(
-                ui,
-                legend_period_color(),
-                &format!("预计 {}", n.format("%m-%d")),
+            ui.label(
+                RichText::new(format!("预计 {}", n.format("%m-%d")))
+                    .size(11.0)
+                    .color(theme::text_muted()),
             );
         }
     });
     ui.add_space(4.0);
 
-    let bottom_reserve = 168.0;
-    let cal_h = (ui.available_height() - bottom_reserve).clamp(180.0, 420.0);
+    let bottom_reserve = 140.0;
+    let cal_h = (ui.available_height() - bottom_reserve).clamp(160.0, 480.0);
     ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), cal_h),
         egui::Layout::top_down(egui::Align::Min),
@@ -746,12 +732,12 @@ fn show_checkup_page(
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
-        legend_chip(ui, legend_checkup_past_color(), "已过");
-        legend_chip(ui, legend_checkup_blue(), "蓝");
-        legend_chip(ui, legend_checkup_yellow(), "黄");
-        legend_chip(ui, legend_checkup_orange(), "橙");
-        legend_chip(ui, legend_checkup_red(), "红");
-        legend_text(ui, "检 · 台风预警色");
+        legend_dot(ui, legend_checkup_past_color(), "已过");
+        legend_dot(ui, legend_checkup_blue(), "蓝");
+        legend_dot(ui, legend_checkup_yellow(), "黄");
+        legend_dot(ui, legend_checkup_orange(), "橙");
+        legend_dot(ui, legend_checkup_red(), "红");
+        legend_text(ui, "检");
         legend_dot(ui, legend_note_color(), "点=有备注");
         let rd = health.remind_days.max(1);
         let mut seen = String::new();
@@ -770,13 +756,17 @@ fn show_checkup_page(
             } else {
                 format!("已过 {} 天", -d)
             };
-            legend_dot(ui, checkup_date_color(checkup_ymd, rd), &extra);
+            ui.label(
+                RichText::new(extra)
+                    .size(11.0)
+                    .color(checkup_date_color(checkup_ymd, rd)),
+            );
         }
     });
     ui.add_space(4.0);
 
-    let bottom_reserve = 168.0;
-    let cal_h = (ui.available_height() - bottom_reserve).clamp(180.0, 420.0);
+    let bottom_reserve = 140.0;
+    let cal_h = (ui.available_height() - bottom_reserve).clamp(160.0, 480.0);
     let mut dummy_cycle = CycleConfig::default();
     ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), cal_h),
@@ -1085,7 +1075,7 @@ fn show_period_bottom(
         .unwrap_or(false);
 
     Frame::none()
-        .fill(theme::card())
+        .fill(theme::panel())
         .stroke(Stroke::new(1.0, theme::border()))
         .rounding(Rounding::same(12.0))
         .inner_margin(Margin::symmetric(12.0, 10.0))
@@ -1153,7 +1143,12 @@ fn show_period_bottom(
 
                 show_note_editor(ui, svc, st, &ymd, status_line);
             } else {
-                ui.label(theme::muted_label("在日历上点选日期"));
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("在日历上点选日期")
+                        .size(12.0)
+                        .color(theme::text_muted()),
+                );
             }
 
             if !st.tip.is_empty() {
@@ -1175,7 +1170,7 @@ fn show_checkup_bottom(
     let _ = memos;
 
     Frame::none()
-        .fill(theme::card())
+        .fill(theme::panel())
         .stroke(Stroke::new(1.0, theme::border()))
         .rounding(Rounding::same(12.0))
         .inner_margin(Margin::symmetric(12.0, 10.0))
@@ -1254,7 +1249,12 @@ fn show_checkup_bottom(
 
                 show_note_editor(ui, svc, st, &ymd, status_line);
             } else {
-                ui.label(theme::muted_label("在日历上点选日期"));
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("在日历上点选日期")
+                        .size(12.0)
+                        .color(theme::text_muted()),
+                );
             }
 
             if !st.tip.is_empty() {

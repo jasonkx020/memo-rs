@@ -26,7 +26,7 @@ use memo_core::identity_keys::IdentityKeys;
 use memo_core::person::Gender;
 use memo_core::service::HistoryEvent;
 use memo_core::store::{MemoCategory, MemoPriority, MemoVisibility};
-use memo_form::MemoFormState;
+use memo_form::{FormMode, MemoFormState};
 use memo_sync::{EngineBroadcaster, SyncEngine};
 use msg::BgMsg;
 use runtime::AppRuntime;
@@ -36,7 +36,22 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-const AUTO_LOCK: Duration = Duration::from_secs(3 * 60);
+fn auto_lock_after(cfg: &Config) -> Option<Duration> {
+    let m = cfg.auto_lock_minutes;
+    if m == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(u64::from(m) * 60))
+    }
+}
+
+fn auto_lock_label(minutes: u32) -> String {
+    match minutes {
+        0 => "不自动锁定".into(),
+        1 => "1 分钟".into(),
+        n => format!("{n} 分钟"),
+    }
+}
 
 fn settings_item_header(ui: &mut egui::Ui, title: &str, description: &str) {
     ui.label(
@@ -129,6 +144,8 @@ enum Screen {
         show_settings: bool,
         settings_draft: Config,
         show_delete: bool,
+        /// 新建备忘弹窗
+        show_new_memo: bool,
         purge_confirm_id: Option<String>,
         show_export: bool,
         export_pw: String,
@@ -165,7 +182,6 @@ pub struct MemoApp {
     memo_doc: doc_editor::Doc,
     edit_form: MemoFormState,
     last_input_at: Instant,
-    last_sync_at: Option<Instant>,
     pending_sync_hint: usize,
     last_remind_scan: Instant,
 }
@@ -191,7 +207,6 @@ impl MemoApp {
             memo_doc: doc_editor::Doc::empty(),
             edit_form: MemoFormState::default(),
             last_input_at: Instant::now(),
-            last_sync_at: None,
             pending_sync_hint: 0,
             last_remind_scan: Instant::now() - Duration::from_secs(30),
         }
@@ -220,6 +235,7 @@ impl MemoApp {
             show_settings: false,
             settings_draft: cfg.clone(),
             show_delete: false,
+            show_new_memo: false,
             purge_confirm_id: None,
             show_export: false,
             export_pw: String::new(),
@@ -319,7 +335,6 @@ impl MemoApp {
                     self.cfg = cfg.clone();
                     self.shell = ShellUi::default();
                     self.last_input_at = Instant::now();
-                    self.last_sync_at = None;
                     self.pending_sync_hint = 0;
                     self.screen = Self::make_main(rt, &cfg);
                 }
@@ -364,10 +379,12 @@ impl MemoApp {
                         done_draft,
                         priority_draft,
                         editing,
+                        show_new_memo,
                         status_line,
                         ..
                     } = &mut self.screen
                     {
+                        *show_new_memo = false;
                         *selected = Some(id);
                         *title_draft = title.clone();
                         *body_draft = body.clone();
@@ -569,8 +586,10 @@ impl eframe::App for MemoApp {
             if any_input {
                 self.last_input_at = Instant::now();
             }
-            if self.last_input_at.elapsed() >= AUTO_LOCK {
-                self.pending_switch_person = true;
+            if let Some(after) = auto_lock_after(&self.cfg) {
+                if self.last_input_at.elapsed() >= after {
+                    self.pending_switch_person = true;
+                }
             }
             ctx.request_repaint_after(Duration::from_secs(1));
         }
@@ -634,6 +653,7 @@ impl eframe::App for MemoApp {
                 show_settings,
                 settings_draft,
                 show_delete,
+                show_new_memo,
                 purge_confirm_id,
                 show_export,
                 export_pw,
@@ -774,8 +794,8 @@ impl eframe::App for MemoApp {
                         });
                     });
 
-                let auto_lock_remaining =
-                    AUTO_LOCK.saturating_sub(self.last_input_at.elapsed());
+                let auto_lock_remaining = auto_lock_after(&self.cfg)
+                    .map(|after| after.saturating_sub(self.last_input_at.elapsed()));
                 let shell_action: ShellAction = shell::show(
                     ctx,
                     &rt.svc,
@@ -813,7 +833,6 @@ impl eframe::App for MemoApp {
                     rt.cfg.show_backup_status,
                     discovered,
                     peers.len(),
-                    self.last_sync_at,
                     auto_lock_remaining,
                     self.pending_sync_hint,
                     &rt.cfg.node_id,
@@ -833,7 +852,7 @@ impl eframe::App for MemoApp {
                 if shell_action.open_new_memo {
                     let ymd = self.shell.cal.selected.format("%Y-%m-%d").to_string();
                     shell::begin_new_memo(
-                        selected,
+                        show_new_memo,
                         editing,
                         &mut self.edit_form,
                         self.shell.nav,
@@ -849,7 +868,6 @@ impl eframe::App for MemoApp {
                     *discovered = rt.engine.discovered_peers();
                     match rt.svc.republish_private_backups() {
                         Ok(n) => {
-                            self.last_sync_at = Some(Instant::now());
                             self.pending_sync_hint = 0;
                             *status_line = if n > 0 {
                                 format!("已同步：重新推送 {n} 条私人备份")
@@ -863,6 +881,65 @@ impl eframe::App for MemoApp {
                     }
                 }
 
+
+                if *show_new_memo {
+                    let modal = theme::begin_modal(ctx, "new_memo_modal");
+                    let mut open = true;
+                    let mut close_requested = false;
+                    theme::modal_fixed(ctx, "新建备忘", [560.0, 640.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
+                        .show(ctx, |ui| {
+                            let mut scroll = egui::ScrollArea::vertical()
+                                .id_source("new_memo_modal_scroll")
+                                .auto_shrink([false, false])
+                                .max_height(520.0);
+                            // 标题未填保存时强制滚回顶部，露出标题输入栏
+                            if self.edit_form.force_scroll_top() {
+                                scroll = scroll.vertical_scroll_offset(0.0);
+                                self.edit_form.tick_force_scroll_top();
+                            }
+                            scroll.show(ui, |ui| {
+                                memo_form::show_fields(
+                                    ui,
+                                    &mut self.edit_form,
+                                    FormMode::Create,
+                                    "new_memo_modal",
+                                );
+                            });
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if theme::success_button(ui, "✓ 保存备忘").clicked() {
+                                    match memo_form::validate_title(&self.edit_form) {
+                                        Ok(_) => {
+                                            shell::submit_new_memo(
+                                                &rt.svc,
+                                                &self.edit_form,
+                                                &self.tx,
+                                            );
+                                            *status_line = "正在创建…".into();
+                                        }
+                                        Err(e) => {
+                                            *status_line = e;
+                                            self.edit_form.request_title_focus();
+                                        }
+                                    }
+                                }
+                                if theme::ghost_button(ui, "取消").clicked() {
+                                    close_requested = true;
+                                }
+                            });
+                        });
+                    if modal.end(ctx, open) || close_requested || !open {
+                        *show_new_memo = false;
+                        self.edit_form.clear();
+                        if status_line.starts_with("填写新建") {
+                            *status_line = "已取消新建".into();
+                        }
+                    }
+                }
 
                 if *show_delete {
                     let delete_id = selected.clone().unwrap_or_default();
@@ -1302,6 +1379,39 @@ impl eframe::App for MemoApp {
                                             }
 
                                             settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "自动锁定",
+                                                "主界面无操作多久后回到身份选择。更改后立即生效并自动保存。",
+                                            );
+                                            egui::ComboBox::from_id_source("settings_auto_lock")
+                                                .selected_text(auto_lock_label(
+                                                    settings_draft.auto_lock_minutes,
+                                                ))
+                                                .width(field_w)
+                                                .show_ui(ui, |ui| {
+                                                    for m in [0, 1, 3, 5, 10, 15, 30, 60] {
+                                                        ui.selectable_value(
+                                                            &mut settings_draft.auto_lock_minutes,
+                                                            m,
+                                                            auto_lock_label(m),
+                                                        );
+                                                    }
+                                                });
+                                            if settings_draft.auto_lock_minutes
+                                                != self.cfg.auto_lock_minutes
+                                            {
+                                                self.cfg.auto_lock_minutes =
+                                                    settings_draft.auto_lock_minutes;
+                                                self.last_input_at = Instant::now();
+                                                let mut persist = self.cfg.clone();
+                                                persist.auto_lock_minutes =
+                                                    settings_draft.auto_lock_minutes;
+                                                let _ = config::save_settings(&persist);
+                                                ctx.request_repaint();
+                                            }
+
+                                            settings_item_gap(ui);
                                             // —— 本机 ——
                                             settings_section(ui, "本机");
                                             settings_item_header(
@@ -1604,6 +1714,8 @@ impl eframe::App for MemoApp {
                                                 self.cfg.accept_foreign_backup =
                                                     settings_draft.accept_foreign_backup;
                                                 self.cfg.theme = settings_draft.theme;
+                                                self.cfg.auto_lock_minutes =
+                                                    settings_draft.auto_lock_minutes;
                                                 self.last_theme_mode = None;
                                                 let msg = if config::needs_restart(
                                                     &before,
