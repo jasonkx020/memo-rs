@@ -159,6 +159,7 @@ pub fn show(
     picked: &mut Option<String>,
     pick_edit: &mut bool,
     pick_delete: &mut bool,
+    open_sticky: &mut Option<String>,
     tx: &Sender<BgMsg>,
 ) {
     let q = search.trim().to_lowercase();
@@ -200,6 +201,7 @@ pub fn show(
                         picked,
                         pick_edit,
                         pick_delete,
+                        open_sticky,
                         tx,
                     );
                 },
@@ -764,6 +766,7 @@ pub(crate) fn show_day_side(
     picked: &mut Option<String>,
     pick_edit: &mut bool,
     pick_delete: &mut bool,
+    open_sticky: &mut Option<String>,
     tx: &Sender<BgMsg>,
 ) {
     let overdue = collect_overdue(all, q);
@@ -845,6 +848,7 @@ pub(crate) fn show_day_side(
                         picked,
                         pick_edit,
                         pick_delete,
+                        open_sticky,
                         tx,
                     );
                 }
@@ -873,6 +877,7 @@ pub(crate) fn show_day_side(
                         picked,
                         pick_edit,
                         pick_delete,
+                        open_sticky,
                         tx,
                     );
                 }
@@ -904,6 +909,7 @@ pub(crate) fn show_day_side(
                         picked,
                         pick_edit,
                         pick_delete,
+                        open_sticky,
                         tx,
                     );
                 }
@@ -980,6 +986,7 @@ fn warn_task_card(
     picked: &mut Option<String>,
     pick_edit: &mut bool,
     pick_delete: &mut bool,
+    open_sticky: &mut Option<String>,
     tx: &Sender<BgMsg>,
 ) {
     let (bar_c, soft_bg) = match accent {
@@ -1112,6 +1119,7 @@ fn warn_task_card(
             picked,
             pick_edit,
             pick_delete,
+            open_sticky,
             tx,
         );
     });
@@ -1539,6 +1547,7 @@ fn item_menu(
     picked: &mut Option<String>,
     pick_edit: &mut bool,
     pick_delete: &mut bool,
+    open_sticky: &mut Option<String>,
     tx: &Sender<BgMsg>,
 ) {
     if ui.button("打开").clicked() {
@@ -1547,6 +1556,10 @@ fn item_menu(
     }
     if ui.button("编辑").clicked() {
         pick_memo(m, selected, editing, picked, pick_edit, true);
+        ui.close_menu();
+    }
+    if ui.button("生成桌面便签").clicked() {
+        *open_sticky = Some(m.id.clone());
         ui.close_menu();
     }
     let done_l = if m.done { "取消完成" } else { "标记完成" };

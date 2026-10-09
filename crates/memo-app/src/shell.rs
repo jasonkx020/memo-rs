@@ -122,12 +122,14 @@ impl Default for ShellUi {
 }
 
 /// 壳层交互回传。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ShellAction {
     pub switch: bool,
     pub sync: bool,
     pub open_new_memo: bool,
     pub backup_dirty: bool,
+    /// 右键「生成桌面便签」的备忘 id
+    pub open_sticky: Option<String>,
 }
 
 fn status_dot_color(st: PeerStatus) -> Color32 {
@@ -1403,6 +1405,7 @@ fn show_shell_body(
                         &mut picked,
                         &mut pick_edit,
                         &mut pick_delete,
+                        &mut action.open_sticky,
                         tx,
                     );
                     if let Some(id) = picked {
@@ -1481,6 +1484,7 @@ fn show_shell_body(
                     shell.nav,
                     &mut shell.gender,
                     &mut action.open_new_memo,
+                    &mut action.open_sticky,
                     tx,
                 );
             }
@@ -2169,6 +2173,7 @@ fn show_split(
     nav: NavItem,
     gender_ui: &mut GenderPrivateUi,
     open_new_memo: &mut bool,
+    open_sticky: &mut Option<String>,
     tx: &Sender<BgMsg>,
 ) {
     let avail = ui.available_width();
@@ -2688,6 +2693,10 @@ fn show_split(
                                             memo_doc,
                                             edit_form,
                                         );
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("生成桌面便签").clicked() {
+                                        *open_sticky = Some(m.id.clone());
                                         ui.close_menu();
                                     }
                                     if ui

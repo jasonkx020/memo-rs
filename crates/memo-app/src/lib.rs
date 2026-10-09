@@ -17,6 +17,7 @@ mod runtime;
 mod save_dialog;
 mod shell;
 mod single_instance;
+mod sticky_note;
 mod theme;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText};
@@ -31,6 +32,8 @@ use memo_sync::{EngineBroadcaster, SyncEngine};
 use msg::BgMsg;
 use runtime::AppRuntime;
 use shell::{ShellAction, ShellUi};
+use sticky_note::StickyHandle;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -184,6 +187,8 @@ pub struct MemoApp {
     last_input_at: Instant,
     pending_sync_hint: usize,
     last_remind_scan: Instant,
+    /// 桌面便签（memo_id → 共享快照；deferred viewport 需 Send+Sync）
+    stickies: HashMap<String, StickyHandle>,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
@@ -209,6 +214,7 @@ impl MemoApp {
             last_input_at: Instant::now(),
             pending_sync_hint: 0,
             last_remind_scan: Instant::now() - Duration::from_secs(30),
+            stickies: HashMap::new(),
         }
     }
 
@@ -565,6 +571,7 @@ impl eframe::App for MemoApp {
         self.pump(ctx);
 
         if self.pending_switch_person {
+            self.stickies.clear();
             let mut gate = IdentityGateState::from_cfg(&self.cfg);
             gate.skip_auto_unlock = true;
             self.screen = Screen::IdentityGate(gate);
@@ -859,6 +866,17 @@ impl eframe::App for MemoApp {
                         Some(ymd.as_str()),
                     );
                     *status_line = "填写新建备忘，保存后写入本机".into();
+                }
+                if let Some(id) = shell_action.open_sticky {
+                    let list = rt.svc.list();
+                    if let Some(existing) = self.stickies.get(&id) {
+                        existing.lock().request_focus = true;
+                        *status_line = "已聚焦桌面便签".into();
+                    } else if let Some(m) = list.iter().find(|m| m.id == id) {
+                        self.stickies
+                            .insert(id, sticky_note::StickyNote::from_memo(m));
+                        *status_line = "已生成桌面便签".into();
+                    }
                 }
                 if shell_action.switch {
                     self.pending_switch_person = true;
@@ -1743,6 +1761,23 @@ impl eframe::App for MemoApp {
                     if modal.end(ctx, open) {
                         *show_settings = false;
                     }
+                }
+
+                // 桌面便签：deferred 视口，主窗最小化后仍可独立拖动
+                let sticky_ids: Vec<String> = self.stickies.keys().cloned().collect();
+                let mut sticky_closed = Vec::new();
+                for sid in sticky_ids {
+                    let Some(note) = self.stickies.get(&sid) else {
+                        continue;
+                    };
+                    if note.lock().closed {
+                        sticky_closed.push(sid);
+                        continue;
+                    }
+                    sticky_note::show_viewport(ctx, note);
+                }
+                for sid in sticky_closed {
+                    self.stickies.remove(&sid);
                 }
             }
         }
