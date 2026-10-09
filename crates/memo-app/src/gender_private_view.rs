@@ -330,8 +330,9 @@ fn show_body(
 ) {
     let pe = cycle.period_enabled;
     let ce = health.checkup_enabled;
+    let _ = alias_show;
 
-    // —— 顶栏：标题 + 右上经期/体检分段（对齐效果图）——
+    // —— 顶栏：标题 + 灰圆标 + 经期/体检分段 + 展开/收起设置 ——
     ui.horizontal(|ui| {
         ui.label(
             RichText::new("性别私密")
@@ -339,37 +340,51 @@ fn show_body(
                 .strong()
                 .color(theme::text()),
         );
-        ui.label(
-            RichText::new("🔒")
-                .size(11.0)
-                .color(theme::text_muted()),
-        )
-        .on_hover_text(format!("已加密 · {alias_show}"));
+        // 效果图小灰圆标（加密提示）
+        let (badge, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+        ui.painter()
+            .circle_filled(badge.center(), 8.0, theme::panel());
+        ui.painter().circle_stroke(
+            badge.center(),
+            8.0,
+            Stroke::new(1.0, theme::border()),
+        );
+        ui.painter().text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            "0",
+            egui::FontId::proportional(10.0),
+            theme::text_muted(),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = if st.show_advanced { "收起设置" } else { "设置" };
-            if ui.small_button(label).clicked() {
+            let settings_label = if st.show_advanced {
+                "收起设置 ∧"
+            } else {
+                "展开设置 ∨"
+            };
+            let settings_btn = ui.add(
+                egui::Button::new(
+                    RichText::new(settings_label)
+                        .size(12.5)
+                        .color(theme::text()),
+                )
+                .fill(theme::card())
+                .stroke(Stroke::new(1.0, theme::border()))
+                .rounding(Rounding::same(8.0))
+                .min_size(Vec2::new(88.0, 28.0)),
+            );
+            if settings_btn.clicked() {
                 st.show_advanced = !st.show_advanced;
             }
             ui.add_space(6.0);
             if pe && ce {
-                // 右到左绘制：先体检再经期，视觉上经期在左
                 segment_tab(ui, st, HubTab::Checkup, "体检");
                 ui.add_space(4.0);
                 segment_tab(ui, st, HubTab::Period, "经期");
             } else if pe {
-                ui.label(
-                    RichText::new("经期")
-                        .size(13.0)
-                        .strong()
-                        .color(theme::shell_accent()),
-                );
+                segment_tab(ui, st, HubTab::Period, "经期");
             } else if ce {
-                ui.label(
-                    RichText::new("体检")
-                        .size(13.0)
-                        .strong()
-                        .color(theme::shell_accent()),
-                );
+                segment_tab(ui, st, HubTab::Checkup, "体检");
             }
         });
     });
@@ -478,31 +493,90 @@ fn show_body(
 
 fn segment_tab(ui: &mut egui::Ui, st: &mut GenderPrivateUi, tab: HubTab, label: &str) {
     let selected = st.tab == tab;
+    // 效果图：选中实心蓝底白字；未选白底灰边
     let fill = if selected {
-        theme::shell_accent_soft()
+        theme::shell_accent()
     } else {
-        theme::panel()
+        theme::card()
     };
     let stroke = if selected {
-        Stroke::new(2.0, theme::shell_accent())
+        Stroke::NONE
     } else {
         Stroke::new(1.0, theme::border())
     };
     let text_c = if selected {
-        theme::shell_accent()
+        Color32::WHITE
     } else {
         theme::text()
     };
     let btn = ui.add(
-        egui::Button::new(RichText::new(label).size(13.5).strong().color(text_c))
+        egui::Button::new(RichText::new(label).size(13.0).strong().color(text_c))
             .fill(fill)
             .stroke(stroke)
             .rounding(Rounding::same(8.0))
-            .min_size(Vec2::new(72.0, 28.0)),
+            .min_size(Vec2::new(64.0, 28.0)),
     );
     if btn.clicked() {
         st.tab = tab;
     }
+}
+
+/// 设置卡内大号开关按钮（开启态：蓝边 + 圆点；关闭态：灰边虚开）。
+fn settings_toggle_btn(ui: &mut egui::Ui, on_label: &str, off_label: &str, enabled: bool) -> bool {
+    let label = if enabled { on_label } else { off_label };
+    let stroke = if enabled {
+        Stroke::new(1.5, theme::shell_accent())
+    } else {
+        Stroke::new(1.2, theme::border())
+    };
+    let text_c = if enabled {
+        theme::shell_accent()
+    } else {
+        theme::text_muted()
+    };
+    let resp = Frame::none()
+        .fill(theme::card())
+        .stroke(stroke)
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(14.0, 10.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).size(13.0).strong().color(text_c));
+                ui.add_space(8.0);
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                if enabled {
+                    ui.painter().circle_stroke(
+                        r.center(),
+                        7.0,
+                        Stroke::new(1.5, theme::shell_accent()),
+                    );
+                    ui.painter()
+                        .circle_filled(r.center(), 3.5, theme::shell_accent());
+                } else {
+                    ui.painter()
+                        .circle_stroke(r.center(), 7.0, Stroke::new(1.2, theme::border()));
+                }
+            });
+        })
+        .response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .interact(Sense::click());
+    resp.clicked()
+}
+
+fn checkup_status_chip(ui: &mut egui::Ui, label: &str, ymd: &str, color: Color32) {
+    Frame::none()
+        .fill(theme::card())
+        .stroke(Stroke::new(1.0, color))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(8.0, 4.0))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!("{label} {ymd}"))
+                    .size(12.0)
+                    .color(color),
+            );
+        });
 }
 
 fn show_empty_enable(ui: &mut egui::Ui) {
@@ -535,46 +609,67 @@ fn show_hub_settings(
     status_line: &mut String,
 ) {
     Frame::none()
-        .fill(theme::card())
+        .fill(theme::panel())
         .stroke(Stroke::new(1.0, theme::border()))
-        .rounding(Rounding::same(10.0))
-        .inner_margin(Margin::symmetric(12.0, 8.0))
+        .rounding(Rounding::same(12.0))
+        .inner_margin(Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
             ui.label(
                 RichText::new("经期与体检可同时开启，互不影响。")
-                    .size(12.0)
+                    .size(12.5)
                     .color(theme::text_muted()),
             );
-            ui.add_space(8.0);
+            ui.add_space(10.0);
 
-            ui.horizontal_wrapped(|ui| {
-                if cycle.period_enabled {
-                    if theme::ghost_button(ui, "关闭经期记录").clicked() {
-                        cycle.period_enabled = false;
-                        save_cycle(svc, cycle);
-                        *status_line = "已关闭经期记录（标记仍保留）".into();
-                    }
-                } else if theme::primary_button(ui, "开启经期记录").clicked() {
-                    cycle.period_enabled = true;
-                    save_cycle(svc, cycle);
-                    *status_line = "已开启经期记录".into();
-                }
-                ui.add_space(8.0);
-                if health.checkup_enabled {
-                    if theme::ghost_button(ui, "关闭体检提醒").clicked() {
-                        health.checkup_enabled = false;
-                        save_health(svc, health);
-                        *status_line = "已关闭体检提醒（日期仍保留）".into();
-                    }
-                } else if theme::primary_button(ui, "开启体检提醒").clicked() {
-                    health.checkup_enabled = true;
-                    save_health(svc, health);
-                    *status_line = "已开启体检提醒".into();
-                }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let half = ((ui.available_width() - 10.0) * 0.5).max(140.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(half, 44.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(half);
+                        if settings_toggle_btn(
+                            ui,
+                            "关闭经期记录",
+                            "开启经期记录",
+                            cycle.period_enabled,
+                        ) {
+                            cycle.period_enabled = !cycle.period_enabled;
+                            save_cycle(svc, cycle);
+                            *status_line = if cycle.period_enabled {
+                                "已开启经期记录".into()
+                            } else {
+                                "已关闭经期记录（标记仍保留）".into()
+                            };
+                        }
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    Vec2::new(half, 44.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(half);
+                        if settings_toggle_btn(
+                            ui,
+                            "关闭体检提醒",
+                            "开启体检提醒",
+                            health.checkup_enabled,
+                        ) {
+                            health.checkup_enabled = !health.checkup_enabled;
+                            save_health(svc, health);
+                            *status_line = if health.checkup_enabled {
+                                "已开启体检提醒".into()
+                            } else {
+                                "已关闭体检提醒（日期仍保留）".into()
+                            };
+                        }
+                    },
+                );
             });
 
             if cycle.period_enabled {
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 if cycle.can_predict() {
                     let mut line = format!(
                         "周期与排卵均由手标自动推算（周期约 {} 天，经期约 {} 天）",
@@ -583,11 +678,7 @@ fn show_hub_settings(
                     if let Some(ov) = cycle.ovulation_offset() {
                         line.push_str(&format!("；排卵约在开始后第 {} 天", ov + 1));
                     }
-                    ui.label(
-                        RichText::new(line)
-                            .size(12.0)
-                            .color(theme::text_muted()),
-                    );
+                    ui.label(RichText::new(line).size(12.0).color(theme::text_muted()));
                 } else {
                     ui.label(
                         RichText::new("再完整标记至少一次经期后，即可自动推算下次经期与易孕窗。")
@@ -598,34 +689,43 @@ fn show_hub_settings(
             }
 
             if health.checkup_enabled {
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let rd = health.remind_days.max(1);
                     let mut shown = false;
-                    for y in [&health.last_checkup, &health.next_checkup] {
-                        if y.is_empty() {
-                            continue;
-                        }
+                    if !health.last_checkup.is_empty() {
                         shown = true;
-                        let rd = health.remind_days.max(1);
-                        ui.label(
-                            RichText::new(checkup_proximity_label(y, rd))
-                                .size(12.0)
-                                .color(theme::text_muted()),
+                        checkup_status_chip(
+                            ui,
+                            checkup_proximity_label(&health.last_checkup, rd),
+                            &health.last_checkup,
+                            checkup_date_color(&health.last_checkup, rd),
                         );
-                        let mut date_txt = y.to_string();
-                        if let Some(cd) = checkup_countdown_short(y) {
-                            if cd != "今" {
-                                date_txt.push_str(&format!(" 还有{cd}天"));
-                            } else {
-                                date_txt.push_str(" 今天");
+                    }
+                    if !health.next_checkup.is_empty() {
+                        shown = true;
+                        checkup_status_chip(
+                            ui,
+                            checkup_proximity_label(&health.next_checkup, rd),
+                            &health.next_checkup,
+                            checkup_date_color(&health.next_checkup, rd),
+                        );
+                        if let Some(d) = checkup_days_until(&health.next_checkup) {
+                            if d > 0 {
+                                ui.label(
+                                    RichText::new(format!("还有 {d} 天"))
+                                        .size(12.5)
+                                        .color(theme::text_muted()),
+                                );
+                            } else if d == 0 {
+                                ui.label(
+                                    RichText::new("今天")
+                                        .size(12.5)
+                                        .color(theme::warn_due_today_fg()),
+                                );
                             }
                         }
-                        ui.label(
-                            RichText::new(date_txt)
-                                .size(12.0)
-                                .color(checkup_date_color(y, rd)),
-                        );
-                        ui.add_space(10.0);
                     }
                     if !shown {
                         ui.label(
@@ -633,25 +733,44 @@ fn show_hub_settings(
                                 .size(12.0)
                                 .color(theme::text_muted()),
                         );
-                        ui.add_space(10.0);
                     }
+                    ui.add_space(6.0);
                     ui.label(
                         RichText::new("提前提醒")
                             .size(12.0)
                             .color(theme::text_muted()),
                     );
                     let mut d = health.remind_days as i32;
-                    if ui
-                        .add(egui::DragValue::new(&mut d).clamp_range(1..=90).suffix(" 天"))
-                        .changed()
-                    {
+                    let dv = ui.add(
+                        egui::DragValue::new(&mut d)
+                            .clamp_range(1..=90)
+                            .prefix(" ")
+                            .suffix(" "),
+                    );
+                    ui.label(RichText::new("天").size(12.0).color(theme::text_muted()));
+                    if dv.changed() {
                         health.remind_days = d as u32;
                         save_health(svc, health);
                     }
                 });
             }
 
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            let (sep_rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            let mut x = sep_rect.left();
+            while x < sep_rect.right() {
+                let x2 = (x + 5.0).min(sep_rect.right());
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(x, sep_rect.center().y),
+                        egui::pos2(x2, sep_rect.center().y),
+                    ],
+                    Stroke::new(1.0, theme::border()),
+                );
+                x = x2 + 4.0;
+            }
+            ui.add_space(8.0);
             ui.label(
                 RichText::new("推算与提醒仅供参考，不能替代就医。关闭后数据仍保留，可随时再开启。")
                     .size(11.0)
@@ -730,38 +849,47 @@ fn show_checkup_page(
     days_to_checkup: Option<i64>,
     status_line: &mut String,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.y = 4.0;
-        legend_dot(ui, legend_checkup_past_color(), "已过");
-        legend_dot(ui, legend_checkup_blue(), "蓝");
-        legend_dot(ui, legend_checkup_yellow(), "黄");
-        legend_dot(ui, legend_checkup_orange(), "橙");
-        legend_dot(ui, legend_checkup_red(), "红");
-        legend_text(ui, "检");
-        legend_dot(ui, legend_note_color(), "点=有备注");
-        let rd = health.remind_days.max(1);
-        let mut seen = String::new();
-        for y in [health.last_checkup.as_str(), checkup_ymd] {
-            if y.is_empty() || y == seen {
-                continue;
+    ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            legend_dot(ui, legend_checkup_past_color(), "已过");
+            legend_dot(ui, legend_checkup_blue(), "蓝");
+            legend_dot(ui, legend_checkup_yellow(), "黄");
+            legend_dot(ui, legend_checkup_orange(), "橙");
+            legend_dot(ui, legend_checkup_red(), "红");
+            legend_text(ui, "检");
+            legend_dot(ui, legend_note_color(), "点=有备注");
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let rd = health.remind_days.max(1);
+            let mut parts = Vec::new();
+            if !last_checkup_ymd.is_empty() {
+                parts.push(checkup_mmdd(last_checkup_ymd).to_string());
             }
-            seen = y.to_string();
-            legend_dot(ui, checkup_date_color(y, rd), checkup_mmdd(y));
-        }
-        if let Some(d) = days_to_checkup.filter(|_| !checkup_ymd.is_empty()) {
-            let extra = if d > 0 {
-                format!("还有 {d} 天")
-            } else if d == 0 {
-                "今天".into()
-            } else {
-                format!("已过 {} 天", -d)
-            };
-            ui.label(
-                RichText::new(extra)
-                    .size(11.0)
-                    .color(checkup_date_color(checkup_ymd, rd)),
-            );
-        }
+            if !checkup_ymd.is_empty() {
+                parts.push(checkup_mmdd(checkup_ymd).to_string());
+            }
+            if let Some(d) = days_to_checkup.filter(|_| !checkup_ymd.is_empty()) {
+                if d > 0 {
+                    parts.push(format!("还有 {d} 天"));
+                } else if d == 0 {
+                    parts.push("今天".into());
+                } else {
+                    parts.push(format!("已过 {} 天", -d));
+                }
+            }
+            if !parts.is_empty() {
+                ui.label(
+                    RichText::new(parts.join(" "))
+                        .size(11.5)
+                        .color(if checkup_ymd.is_empty() {
+                            theme::text_muted()
+                        } else {
+                            checkup_date_color(checkup_ymd, rd)
+                        }),
+                );
+            }
+        });
     });
     ui.add_space(4.0);
 
@@ -830,7 +958,16 @@ fn show_calendar_frame(
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("今天").clicked() {
+                    let today_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new("今天").size(12.0).color(theme::text()),
+                        )
+                        .fill(theme::panel())
+                        .stroke(Stroke::new(1.0, theme::border()))
+                        .rounding(Rounding::same(8.0))
+                        .min_size(Vec2::new(48.0, 26.0)),
+                    );
+                    if today_btn.clicked() {
                         let t = chrono::Local::now().date_naive();
                         st.year = t.year();
                         st.month = t.month();
@@ -987,6 +1124,8 @@ fn draw_month_grid(
 
                 let fg = if fg_mark {
                     Color32::WHITE
+                } else if is_sel {
+                    theme::shell_accent()
                 } else if in_month {
                     theme::text()
                 } else {
@@ -1169,99 +1308,93 @@ fn show_checkup_bottom(
     let ymd = st.selected_day.clone();
     let _ = memos;
 
-    Frame::none()
-        .fill(theme::panel())
-        .stroke(Stroke::new(1.0, theme::border()))
-        .rounding(Rounding::same(12.0))
-        .inner_margin(Margin::symmetric(12.0, 10.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let title = ymd
-                    .as_deref()
-                    .map(|d| {
-                        if d.len() >= 10 {
-                            format!("{} 日", &d[5..])
-                        } else {
-                            d.to_string()
-                        }
-                    })
-                    .unwrap_or_else(|| "未选择日期".into());
-                ui.label(
-                    RichText::new(title)
-                        .strong()
-                        .size(13.5)
-                        .color(theme::text()),
-                );
-                ui.label(
-                    RichText::new("左键选日 · 标为体检（已过/未到自动区分）")
-                        .size(11.0)
-                        .color(theme::text_muted()),
-                );
-            });
+    // 效果图：顶部分隔线 + 标题/说明；无选中时不强调灰底大卡
+    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(6.0);
+    let title = ymd
+        .as_deref()
+        .map(|d| {
+            if d.len() >= 10 {
+                format!("{} 日", &d[5..])
+            } else {
+                d.to_string()
+            }
+        })
+        .unwrap_or_else(|| "未选择日期".into());
+    ui.label(
+        RichText::new(title)
+            .strong()
+            .size(14.0)
+            .color(theme::text()),
+    );
+    ui.label(
+        RichText::new("左键选日 · 标为体检（已过/未到自动区分）")
+            .size(12.0)
+            .color(theme::text_muted()),
+    );
 
-            if let Some(ymd) = ymd.clone() {
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    let is_marked = health.last_checkup == ymd || health.next_checkup == ymd;
-                    if is_marked {
-                        if theme::ghost_button(ui, "取消体检").clicked() {
-                            match male_view::ensure_male_person(svc) {
-                                Ok(pid) => {
-                                    if health.last_checkup == ymd {
-                                        health.last_checkup.clear();
-                                    }
-                                    if health.next_checkup == ymd {
-                                        health.next_checkup.clear();
-                                        health.remind_seen_for.clear();
-                                    }
-                                    match svc.set_male_health(&pid, health.clone()) {
-                                        Ok(()) => {
-                                            *status_line = format!("已取消体检 {ymd}");
-                                            st.tip.clear();
-                                        }
-                                        Err(e) => *status_line = format!("保存失败: {e}"),
-                                    }
+    if let Some(ymd) = ymd.clone() {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            let is_marked = health.last_checkup == ymd || health.next_checkup == ymd;
+            if is_marked {
+                if theme::ghost_button(ui, "取消体检").clicked() {
+                    match male_view::ensure_male_person(svc) {
+                        Ok(pid) => {
+                            if health.last_checkup == ymd {
+                                health.last_checkup.clear();
+                            }
+                            if health.next_checkup == ymd {
+                                health.next_checkup.clear();
+                                health.remind_seen_for.clear();
+                            }
+                            match svc.set_male_health(&pid, health.clone()) {
+                                Ok(()) => {
+                                    *status_line = format!("已取消体检 {ymd}");
+                                    st.tip.clear();
                                 }
-                                Err(e) => *status_line = e,
+                                Err(e) => *status_line = format!("保存失败: {e}"),
                             }
                         }
-                    } else if theme::ghost_button(ui, "标为体检").clicked() {
-                        match male_view::ensure_male_person(svc) {
-                            Ok(pid) => {
-                                if ymd.as_str() < today_ymd().as_str() {
-                                    health.last_checkup = ymd.clone();
-                                } else {
-                                    health.next_checkup = ymd.clone();
-                                    health.remind_seen_for.clear();
-                                }
-                                match svc.set_male_health(&pid, health.clone()) {
-                                    Ok(()) => {
-                                        *status_line = format!("已标体检 {ymd}");
-                                        st.tip.clear();
-                                    }
-                                    Err(e) => *status_line = format!("保存失败: {e}"),
-                                }
+                        Err(e) => *status_line = e,
+                    }
+                }
+            } else if theme::ghost_button(ui, "标为体检").clicked() {
+                match male_view::ensure_male_person(svc) {
+                    Ok(pid) => {
+                        if ymd.as_str() < today_ymd().as_str() {
+                            health.last_checkup = ymd.clone();
+                        } else {
+                            health.next_checkup = ymd.clone();
+                            health.remind_seen_for.clear();
+                        }
+                        match svc.set_male_health(&pid, health.clone()) {
+                            Ok(()) => {
+                                *status_line = format!("已标体检 {ymd}");
+                                st.tip.clear();
                             }
-                            Err(e) => *status_line = e,
+                            Err(e) => *status_line = format!("保存失败: {e}"),
                         }
                     }
-                });
-
-                show_note_editor(ui, svc, st, &ymd, status_line);
-            } else {
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new("在日历上点选日期")
-                        .size(12.0)
-                        .color(theme::text_muted()),
-                );
-            }
-
-            if !st.tip.is_empty() {
-                ui.add_space(4.0);
-                ui.label(RichText::new(&st.tip).small().color(theme::warn()));
+                    Err(e) => *status_line = e,
+                }
             }
         });
+        show_note_editor(ui, svc, st, &ymd, status_line);
+    } else {
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new("在日历上点选日期")
+                .size(12.0)
+                .color(theme::text_muted()),
+        );
+    }
+
+    if !st.tip.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(&st.tip).small().color(theme::warn()));
+    }
 }
 
 fn show_note_editor(
