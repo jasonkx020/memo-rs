@@ -1,6 +1,9 @@
 mod calendar_view;
 mod app_icon;
+mod autostart;
 mod date_field;
+mod huangli;
+mod tray;
 mod doc_editor;
 mod fonts;
 mod gender_private_view;
@@ -34,7 +37,7 @@ use runtime::AppRuntime;
 use shell::{ShellAction, ShellUi};
 use sticky_note::StickyHandle;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -187,17 +190,27 @@ pub struct MemoApp {
     last_input_at: Instant,
     pending_sync_hint: usize,
     last_remind_scan: Instant,
-    /// 桌面便签（memo_id → 共享快照；deferred viewport 需 Send+Sync）
+    /// 桌面便签（memo_id → 共享句柄；deferred viewport 需 Send+Sync）
     stickies: HashMap<String, StickyHandle>,
+    /// 系统托盘（持有句柄防 drop）
+    _tray: Option<tray::TrayHandle>,
+    /// 真正退出（托盘菜单）；否则关主窗只隐藏
+    quit_requested: bool,
+    /// 主窗已藏到托盘（用于忽略残留的 close_requested，避免显示后立刻再藏）
+    main_hidden: bool,
+    /// 开机 `--tray`：首帧隐藏主窗
+    start_hidden: bool,
+    last_sticky_session_save: Instant,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 impl MemoApp {
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(cfg: Config, start_hidden: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         let gate = IdentityGateState::from_cfg(&cfg);
+        let _tray = tray::create();
         Self {
             cfg,
             screen: Screen::IdentityGate(gate),
@@ -215,6 +228,91 @@ impl MemoApp {
             pending_sync_hint: 0,
             last_remind_scan: Instant::now() - Duration::from_secs(30),
             stickies: HashMap::new(),
+            _tray,
+            quit_requested: false,
+            main_hidden: start_hidden,
+            start_hidden,
+            last_sticky_session_save: Instant::now() - Duration::from_secs(60),
+        }
+    }
+
+    fn save_sticky_session_now(&mut self) {
+        // 仅在主界面落盘；锁定后 stickies 已空，勿覆盖会话文件
+        let Screen::Main { rt, .. } = &self.screen else {
+            return;
+        };
+        let fp = rt.svc.session_fp().to_string();
+        let pairs: Vec<_> = self
+            .stickies
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let session = sticky_note::session_from_handles(&fp, &pairs);
+        let _ = sticky_note::save_session(Path::new(&self.cfg.data_dir), &session);
+        self.last_sticky_session_save = Instant::now();
+    }
+
+    fn close_all_sticky_viewports(&mut self, ctx: &egui::Context) {
+        for (id, h) in &self.stickies {
+            h.lock().closed = true;
+            sticky_note::force_hide_viewport(ctx, id);
+        }
+    }
+
+    fn restore_stickies_from_session(&mut self, rt: &AppRuntime) {
+        let Some(session) = sticky_note::load_session(Path::new(&self.cfg.data_dir)) else {
+            return;
+        };
+        if session.person_fp != rt.svc.session_fp() {
+            return;
+        }
+        let list = rt.svc.list();
+        for g in session.notes {
+            if self.stickies.contains_key(&g.id) {
+                continue;
+            }
+            let Some(m) = list.iter().find(|m| m.id == g.id) else {
+                continue;
+            };
+            self.stickies.insert(
+                g.id.clone(),
+                sticky_note::StickyNote::from_memo_geom(
+                    m,
+                    Some([g.x, g.y]),
+                    Some([g.w, g.h]),
+                ),
+            );
+        }
+    }
+
+    fn flush_dirty_stickies(&mut self, rt: &AppRuntime, status_line: &mut String) {
+        let mut to_save = Vec::new();
+        for (id, h) in &self.stickies {
+            let n = h.lock();
+            if n.needs_save() {
+                to_save.push((id.clone(), n.title.clone(), n.body.clone()));
+            }
+        }
+        for (id, title, body) in to_save {
+            match rt.svc.edit(&id, &title, &body) {
+                Ok(()) => {
+                    if let Some(h) = self.stickies.get(&id) {
+                        h.lock().clear_dirty();
+                    }
+                }
+                Err(e) => {
+                    *status_line = format!("便签保存失败: {e}");
+                }
+            }
+        }
+    }
+
+    fn refresh_stickies_from_list(&mut self, rt: &AppRuntime) {
+        let list = rt.svc.list();
+        for (id, h) in &self.stickies {
+            if let Some(m) = list.iter().find(|m| m.id == *id) {
+                h.lock().apply_memo_if_clean(m);
+            }
         }
     }
 
@@ -342,6 +440,7 @@ impl MemoApp {
                     self.shell = ShellUi::default();
                     self.last_input_at = Instant::now();
                     self.pending_sync_hint = 0;
+                    self.restore_stickies_from_session(&rt);
                     self.screen = Self::make_main(rt, &cfg);
                 }
                 BgMsg::UnlockResult(Err(e)) => {
@@ -565,12 +664,77 @@ fn chrono_like_stamp() -> String {
 }
 
 impl eframe::App for MemoApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         theme::sync(ctx, self.cfg.theme, &mut self.last_theme_mode);
         sanitize_cjk_ime_events(ctx);
+        tray::bind_context(ctx);
+        tray::capture_main_hwnd(frame);
         self.pump(ctx);
 
+        // 开机 --tray：用 Win32 隐藏，避免 Visible(false) 冻死事件循环
+        if self.start_hidden {
+            if tray::has_main_hwnd() {
+                tray::hide_main_window();
+                self.main_hidden = true;
+                self.start_hidden = false;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+
+        let (tray_show, tray_quit) = tray::poll();
+        if tray_show {
+            self.main_hidden = false;
+            // 托盘回调里已 ShowWindow；此处再同步一次并聚焦
+            tray::show_main_window();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.last_input_at = Instant::now();
+            ctx.request_repaint();
+        }
+        if tray_quit {
+            self.quit_requested = true;
+        }
+
+        // 关主窗 → Win32 隐藏到托盘（真正退出仅托盘「退出」）
+        // 切勿 Visible(false)：Windows 上会导致无法再显示（egui#5229）
+        if !self.quit_requested
+            && !self.main_hidden
+            && ctx.input(|i| i.viewport().close_requested())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            tray::hide_main_window();
+            self.main_hidden = true;
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        if self.quit_requested {
+            let rt_for_flush = if let Screen::Main { rt, .. } = &self.screen {
+                Some(rt.clone())
+            } else {
+                None
+            };
+            if let Some(rt) = rt_for_flush {
+                let mut dummy = String::new();
+                self.flush_dirty_stickies(&rt, &mut dummy);
+            }
+            self.save_sticky_session_now();
+            self.close_all_sticky_viewports(ctx);
+            self.stickies.clear();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         if self.pending_switch_person {
+            let rt_for_flush = if let Screen::Main { rt, .. } = &self.screen {
+                Some(rt.clone())
+            } else {
+                None
+            };
+            if let Some(rt) = rt_for_flush {
+                let mut dummy = String::new();
+                self.flush_dirty_stickies(&rt, &mut dummy);
+            }
+            self.save_sticky_session_now();
+            self.close_all_sticky_viewports(ctx);
             self.stickies.clear();
             let mut gate = IdentityGateState::from_cfg(&self.cfg);
             gate.skip_auto_unlock = true;
@@ -929,7 +1093,7 @@ impl eframe::App for MemoApp {
                             ui.separator();
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
-                                if theme::success_button(ui, "✓ 保存备忘").clicked() {
+                                if theme::success_button(ui, "保存备忘").clicked() {
                                     match memo_form::validate_title(&self.edit_form) {
                                         Ok(_) => {
                                             shell::submit_new_memo(
@@ -1430,6 +1594,55 @@ impl eframe::App for MemoApp {
                                             }
 
                                             settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "开机自启动",
+                                                if autostart::supported() {
+                                                    "开机后在托盘启动本程序；仍需解锁身份后才显示便签。"
+                                                } else {
+                                                    "当前系统不支持写入开机启动项。"
+                                                },
+                                            );
+                                            ui.add_enabled_ui(autostart::supported(), |ui| {
+                                                if ui
+                                                    .checkbox(
+                                                        &mut settings_draft.start_on_boot,
+                                                        "开机时启动 Memo",
+                                                    )
+                                                    .changed()
+                                                {
+                                                    self.cfg.start_on_boot =
+                                                        settings_draft.start_on_boot;
+                                                    let mut persist = self.cfg.clone();
+                                                    persist.start_on_boot =
+                                                        settings_draft.start_on_boot;
+                                                    let _ = config::save_settings(&persist);
+                                                    match autostart::apply(
+                                                        settings_draft.start_on_boot,
+                                                    ) {
+                                                        Ok(()) => {
+                                                            *status_line = if settings_draft
+                                                                .start_on_boot
+                                                            {
+                                                                "已开启开机自启动".into()
+                                                            } else {
+                                                                "已关闭开机自启动".into()
+                                                            };
+                                                        }
+                                                        Err(e) => {
+                                                            *status_line =
+                                                                format!("开机自启动设置失败: {e}");
+                                                            settings_draft.start_on_boot =
+                                                                !settings_draft.start_on_boot;
+                                                            self.cfg.start_on_boot =
+                                                                settings_draft.start_on_boot;
+                                                        }
+                                                    }
+                                                    ctx.request_repaint();
+                                                }
+                                            });
+
+                                            settings_item_gap(ui);
                                             // —— 本机 ——
                                             settings_section(ui, "本机");
                                             settings_item_header(
@@ -1763,23 +1976,71 @@ impl eframe::App for MemoApp {
                     }
                 }
 
-                // 桌面便签：deferred 视口，主窗最小化后仍可独立拖动
-                let sticky_ids: Vec<String> = self.stickies.keys().cloned().collect();
-                let mut sticky_closed = Vec::new();
-                for sid in sticky_ids {
-                    let Some(note) = self.stickies.get(&sid) else {
-                        continue;
-                    };
-                    if note.lock().closed {
-                        sticky_closed.push(sid);
-                        continue;
-                    }
-                    sticky_note::show_viewport(ctx, note);
-                }
-                for sid in sticky_closed {
-                    self.stickies.remove(&sid);
+            }
+        }
+
+        // 便签：须在 match 外处理，避免与 screen 字段借用冲突
+        if matches!(self.screen, Screen::Main { .. }) {
+            let rt = if let Screen::Main { rt, .. } = &self.screen {
+                rt.clone()
+            } else {
+                unreachable!()
+            };
+            let mut sticky_status = String::new();
+            self.flush_dirty_stickies(&rt, &mut sticky_status);
+            self.refresh_stickies_from_list(&rt);
+            if !sticky_status.is_empty() {
+                if let Screen::Main { status_line, .. } = &mut self.screen {
+                    *status_line = sticky_status;
                 }
             }
+            let sticky_ids: Vec<String> = self.stickies.keys().cloned().collect();
+            let mut sticky_closed = Vec::new();
+            for sid in sticky_ids {
+                let Some(note) = self.stickies.get(&sid) else {
+                    continue;
+                };
+                if note.lock().closed {
+                    // 再注册一帧：回调里 Visible(false)，避免黑框残留
+                    sticky_note::show_viewport(ctx, note);
+                    sticky_note::force_hide_viewport(ctx, &sid);
+                    sticky_closed.push(sid);
+                    continue;
+                }
+                sticky_note::show_viewport(ctx, note);
+            }
+            let mut need_session_save = !sticky_closed.is_empty();
+            for sid in sticky_closed {
+                if let Some(h) = self.stickies.get(&sid) {
+                    let mut n = h.lock();
+                    n.flush_now = true;
+                    let title = n.title.clone();
+                    let body = n.body.clone();
+                    let dirty = n.dirty;
+                    drop(n);
+                    if dirty {
+                        let _ = rt.svc.edit(&sid, &title, &body);
+                    }
+                }
+                sticky_note::force_hide_viewport(ctx, &sid);
+                self.stickies.remove(&sid);
+            }
+            if self.last_sticky_session_save.elapsed() >= Duration::from_secs(5) {
+                need_session_save = true;
+            }
+            if need_session_save {
+                self.save_sticky_session_now();
+            }
+            if self.main_hidden
+                || !ctx.input(|i| i.viewport().focused.unwrap_or(false))
+            {
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+        }
+
+        // 主窗藏托盘 / 身份门：保持低频刷新，便签与托盘退出才能响应
+        if self.main_hidden || matches!(self.screen, Screen::IdentityGate(_)) {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
 
         self.show_help = show_help;
@@ -1837,10 +2098,14 @@ fn unlock_runtime_identity(
 }
 
 pub fn run_gui(cfg: Config) -> eframe::Result<()> {
+    run_gui_with_opts(cfg, false)
+}
+
+/// `start_hidden`：开机 `--tray` 时主窗先隐藏，仅托盘常驻。
+pub fn run_gui_with_opts(cfg: Config, start_hidden: bool) -> eframe::Result<()> {
     if single_instance::try_acquire(std::path::Path::new(&cfg.data_dir))
         == single_instance::AcquireResult::AlreadyRunning
     {
-        // 已激活既有窗口；本进程安静退出
         return Ok(());
     }
     let options = eframe::NativeOptions {
@@ -1855,9 +2120,9 @@ pub fn run_gui(cfg: Config) -> eframe::Result<()> {
     eframe::run_native(
         "分布式备忘录",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             fonts::configure_cjk_fonts(&cc.egui_ctx);
-            Box::new(MemoApp::new(cfg))
+            Box::new(MemoApp::new(cfg, start_hidden))
         }),
     )
 }

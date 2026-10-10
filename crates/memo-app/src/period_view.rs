@@ -527,9 +527,9 @@ pub fn show(
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let title = if period.show_guide {
-                                    "▾ 怎么记录与推算（点击收起）"
+                                    "v 怎么记录与推算（点击收起）"
                                 } else {
-                                    "▸ 怎么记录与推算（点击展开）"
+                                    "> 怎么记录与推算（点击展开）"
                                 };
                                 if ui
                                     .add(
@@ -932,9 +932,9 @@ fn show_side_panel(
 
             ui.add_space(8.0);
             let ov_title = if period.show_override {
-                "▾ 特例调整（月经不调等）"
+                "v 特例调整（月经不调等）"
             } else {
-                "▸ 特例调整（月经不调等）"
+                "> 特例调整（月经不调等）"
             };
             if ui
                 .add(

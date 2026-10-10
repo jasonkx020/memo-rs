@@ -736,7 +736,7 @@ fn show_category_combo(
         ui.painter().text(
             egui::pos2(rect.right() - 14.0, cy),
             egui::Align2::CENTER_CENTER,
-            "▾",
+            "v",
             egui::FontId::proportional(11.0),
             theme::text_muted(),
         );

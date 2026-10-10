@@ -144,6 +144,9 @@ pub struct Config {
     /// 主界面空闲多久后自动锁定（分钟）；0 = 不自动锁定。默认 3。
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: u32,
+    /// 开机自启动（本机；Windows 写 Run 注册表）
+    #[serde(default)]
+    pub start_on_boot: bool,
     /// 备份目标 node_id；空 = 所有可见且 accept_backup 的在线节点
     #[serde(default)]
     pub backup_targets: Vec<String>,
@@ -249,6 +252,7 @@ pub fn default_config() -> anyhow::Result<Config> {
         show_backup_status: true,
         theme: ThemePreference::System,
         auto_lock_minutes: default_auto_lock_minutes(),
+        start_on_boot: false,
         backup_targets: vec![],
         argon2: Argon2Params::default(),
     })

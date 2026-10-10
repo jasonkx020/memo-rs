@@ -569,7 +569,13 @@ fn private_section_header(ui: &mut egui::Ui, title: &str, n: usize, fg: Color32,
         .inner_margin(Margin::symmetric(8.0, 4.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(title).size(12.0).strong().color(fg));
+                let g = theme::layout_galley(ui, title, egui::FontId::proportional(12.0), fg);
+                let (rect, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+                ui.painter().galley(
+                    theme::galley_pos_left_center(rect.left_center(), &g),
+                    g,
+                    fg,
+                );
                 ui.label(RichText::new(format!("{n}")).size(11.0).color(fg));
             });
         });
@@ -781,12 +787,30 @@ fn list_category_icon(ui: &mut egui::Ui, cat: MemoCategory, done: bool) -> egui:
 }
 
 fn sync_mark(ui: &mut egui::Ui, draft_empty_title: bool) {
-    let (color, glyph) = if draft_empty_title {
-        (theme::warn(), "●")
+    let color = if draft_empty_title {
+        theme::warn()
     } else {
-        (theme::success(), "✓")
+        theme::success()
     };
-    ui.label(RichText::new(glyph).size(13.0).color(color));
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+    if draft_empty_title {
+        ui.painter().circle_filled(rect.center(), 3.5, color);
+    } else {
+        // 用笔画勾代替 ✓，避免 dingbat 在部分 CJK 字体下落成空方框
+        let c = rect.center();
+        let stroke = Stroke::new(1.8, color);
+        ui.painter().line_segment(
+            [egui::pos2(c.x - 4.0, c.y), egui::pos2(c.x - 1.0, c.y + 3.0)],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(c.x - 1.0, c.y + 3.0),
+                egui::pos2(c.x + 4.5, c.y - 3.5),
+            ],
+            stroke,
+        );
+    }
 }
 
 fn show_status_strip(ui: &mut egui::Ui, online: usize, connected: usize, pending: usize) {
@@ -964,7 +988,7 @@ pub fn show(
 
                 let menu = egui::menu::menu_button(
                     ui,
-                    RichText::new(format!("{alias_show} ▾"))
+                    RichText::new(format!("{alias_show} v"))
                         .strong()
                         .size(14.0)
                         .color(theme::text()),

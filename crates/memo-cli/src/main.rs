@@ -17,6 +17,9 @@ struct Args {
     /// 无 UI 守护节点（REPL）
     #[arg(long)]
     headless: bool,
+    /// 开机自启动：主窗隐藏，仅托盘（仍需解锁身份）
+    #[arg(long)]
+    tray: bool,
     /// 身份指纹（headless 必填，或配合 --identity-file）
     #[arg(long)]
     identity: Option<String>,
@@ -50,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     if args.headless {
         run_headless(cfg, args)
     } else {
-        memo_app::run_gui(cfg).map_err(|e| anyhow::anyhow!("{e}"))
+        memo_app::run_gui_with_opts(cfg, args.tray).map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
 

@@ -1,10 +1,10 @@
-//! 为 egui 注入系统 CJK 字体，避免中文显示为方框。
+//! 为 egui 注入系统 CJK / 符号字体，避免中文与 ☐✓◀ 等显示为方框。
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 use std::fs;
 use std::path::PathBuf;
 
-fn candidate_fonts() -> Vec<PathBuf> {
+fn candidate_cjk_fonts() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     #[cfg(windows)]
@@ -51,33 +51,97 @@ fn candidate_fonts() -> Vec<PathBuf> {
     paths
 }
 
+/// 符号 / emoji 回退（排在 CJK 之后），补齐 ☐✓◀⚠ 等 CJK 常缺字形。
+fn candidate_symbol_fonts() -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+
+    #[cfg(windows)]
+    {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let fonts = PathBuf::from(windir).join("Fonts");
+        for (key, name) in [
+            ("segoe_emoji", "seguiemj.ttf"),
+            ("segoe_symbol", "seguisym.ttf"),
+        ] {
+            out.push((key.to_owned(), fonts.join(name)));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        out.push((
+            "apple_emoji".into(),
+            PathBuf::from("/System/Library/Fonts/Apple Color Emoji.ttc"),
+        ));
+        out.push((
+            "apple_symbol".into(),
+            PathBuf::from("/System/Library/Fonts/Apple Symbols.ttf"),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for (key, p) in [
+            (
+                "noto_emoji",
+                "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+            ),
+            (
+                "noto_symbols",
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+            ),
+        ] {
+            out.push((key.into(), PathBuf::from(p)));
+        }
+    }
+
+    out
+}
+
+fn push_family_font(fonts: &mut FontDefinitions, family: FontFamily, name: &str, at: usize) {
+    let list = fonts.families.entry(family).or_default();
+    if !list.iter().any(|n| n == name) {
+        list.insert(at.min(list.len()), name.to_owned());
+    }
+}
+
 pub fn configure_cjk_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let mut loaded = false;
 
-    for path in candidate_fonts() {
+    for path in candidate_cjk_fonts() {
         if !path.exists() {
             continue;
         }
         if let Ok(data) = fs::read(&path) {
-            let font_data = FontData::from_owned(data);
-            fonts.font_data.insert("cjk".to_owned(), font_data);
             fonts
-                .families
-                .entry(FontFamily::Proportional)
-                .or_default()
-                .insert(0, "cjk".to_owned());
-            fonts
-                .families
-                .entry(FontFamily::Monospace)
-                .or_default()
-                .insert(0, "cjk".to_owned());
-            loaded = true;
+                .font_data
+                .insert("cjk".to_owned(), FontData::from_owned(data));
+            push_family_font(&mut fonts, FontFamily::Proportional, "cjk", 0);
+            push_family_font(&mut fonts, FontFamily::Monospace, "cjk", 0);
             break;
         }
     }
 
-    let _ = loaded;
+    // CJK 之后插入系统符号字体，避免 ☐✓◀ 等落到 CJK 缺字方框且无法回退。
+    let mut insert_at = if fonts.font_data.contains_key("cjk") {
+        1
+    } else {
+        0
+    };
+    for (key, path) in candidate_symbol_fonts() {
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(data) = fs::read(&path) {
+            fonts
+                .font_data
+                .insert(key.clone(), FontData::from_owned(data));
+            push_family_font(&mut fonts, FontFamily::Proportional, &key, insert_at);
+            push_family_font(&mut fonts, FontFamily::Monospace, &key, insert_at);
+            insert_at += 1;
+        }
+    }
+
     ctx.set_fonts(fonts);
 
     let mut style = (*ctx.style()).clone();

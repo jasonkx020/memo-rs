@@ -79,12 +79,12 @@ fn show_inner(
         if parse_due(value).is_some() {
             value.trim().to_string()
         } else {
-            format!("{} ⚠", value.trim())
+            format!("{} (无效)", value.trim())
         }
     } else if parse_ymd(value).is_some() {
         value.trim().chars().take(10).collect()
     } else {
-        format!("{} ⚠", value.trim())
+        format!("{} (无效)", value.trim())
     };
 
     ui.horizontal(|ui| {
@@ -145,7 +145,8 @@ fn show_inner(
     changed
 }
 
-fn show_picker_body(
+/// 弹层内日历本体；选日或改时分时返回 `true`（不负责关闭弹层）。
+pub fn show_picker_body(
     ui: &mut egui::Ui,
     id_salt: &str,
     value: &mut String,
@@ -165,7 +166,7 @@ fn show_picker_body(
     let mut picked = false;
 
     ui.horizontal(|ui| {
-        if ui.small_button("◀").clicked() {
+        if ui.small_button("<").clicked() {
             if view.1 <= 1 {
                 view.0 -= 1;
                 view.1 = 12;
@@ -178,7 +179,7 @@ fn show_picker_body(
                 .strong()
                 .color(theme::text()),
         );
-        if ui.small_button("▶").clicked() {
+        if ui.small_button(">").clicked() {
             if view.1 >= 12 {
                 view.0 += 1;
                 view.1 = 1;

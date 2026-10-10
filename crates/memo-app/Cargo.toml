@@ -11,8 +11,13 @@ image = { version = "=0.24.9", default-features = false, features = ["png"] }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+lunar_rust = { workspace = true }
+chrono-tz = { workspace = true }
+tray-icon = { workspace = true }
+raw-window-handle = "0.6"
 # 钉住传递依赖，阻止 Cargo 拉 edition2024 包
 url = { workspace = true }
 idna = { workspace = true }
