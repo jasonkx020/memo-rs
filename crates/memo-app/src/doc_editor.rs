@@ -644,59 +644,20 @@ pub fn memo_template(stamp: &str) -> String {
     memo_template_for(MemoCategory::Work, stamp)
 }
 
-/// 按分类套用新建模板，便于直接填写（纯文本进正文框，不预置事项/表格）。
+/// 按分类套用新建模板（仅分类标识行；正文留空由用户填写）。
 pub fn memo_template_for(category: MemoCategory, stamp: &str) -> String {
     match category {
         MemoCategory::Todo => format!("待办 {stamp}"),
-        MemoCategory::Credentials => format!(
-            "账号证件 {stamp}\n\n\
-             （用途：某网站 / 银行卡 / 证件）\n\
-             名称或机构：\n\
-             账号或卡号：\n\
-             密码或口令：\n\
-             有效期：\n\
-             其它备注："
-        ),
-        MemoCategory::Work | MemoCategory::Office => format!(
-            "工作学习 {stamp}\n\n\
-             （情况说明，自由书写即可）"
-        ),
-        MemoCategory::Life => format!(
-            "生活家庭 {stamp}\n\n\
-             （发生了什么 / 想记下来的事）"
-        ),
-        MemoCategory::Finance => format!(
-            "财务订阅 {stamp}\n\n\
-             （账单 / 订阅 / 收支说明）\n\
-             名称：\n\
-             金额：\n\
-             周期：\n\
-             下次扣款或到期：\n\
-             备注："
-        ),
+        MemoCategory::Credentials => format!("备忘 {stamp}"),
+        MemoCategory::Work | MemoCategory::Office => format!("工作学习 {stamp}"),
+        MemoCategory::Life => format!("生活家庭 {stamp}"),
+        MemoCategory::Finance => format!("财务订阅 {stamp}"),
         MemoCategory::GenderPrivate | MemoCategory::WomenPrivate | MemoCategory::MalePrivate => {
-            format!(
-                "性别私密备注 {stamp}\n\n\
-             （仅本人可见。可记经期感受、体检、用药保健、情绪，或为伴侣留下的笔记）\n\n\
-             经期日与体检日请在「性别私密」专属页设置；系统提醒仅供参考，不能替代就医。"
-            )
+            format!("性别私密备注 {stamp}")
         }
-        MemoCategory::Emergency => format!(
-            "应急 {stamp}\n\n\
-             （紧急情况一句话描述）\n\
-             联系人：\n\
-             电话：\n\
-             地址或集合点：\n\
-             立即要做："
-        ),
-        MemoCategory::Inspiration => format!(
-            "灵感 {stamp}\n\n\
-             （先写下那一点想法，不用完美）"
-        ),
-        MemoCategory::General => format!(
-            "备忘 {stamp}\n\n\
-             （在此填写）"
-        ),
+        MemoCategory::Emergency => format!("应急 {stamp}"),
+        MemoCategory::Inspiration => format!("灵感 {stamp}"),
+        MemoCategory::General => format!("备忘 {stamp}"),
     }
 }
 

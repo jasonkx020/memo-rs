@@ -105,7 +105,7 @@ impl MemoCategory {
         match self {
             Self::General => "全部",
             Self::Todo => "待办提醒",
-            Self::Credentials => "账号证件",
+            Self::Credentials => "备忘",
             Self::Work | Self::Office => "工作学习",
             Self::Life => "生活家庭",
             Self::Finance => "财务订阅",

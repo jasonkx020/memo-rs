@@ -104,7 +104,7 @@ pub enum FormMode {
     Edit,
 }
 
-/// 表单「这是」：某一天 / 好几天 / 先记着 / 账号密码。
+/// 表单「这是」：某一天 / 好几天 / 先记着 / 备忘。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateKind {
     Day,
@@ -119,7 +119,7 @@ impl DateKind {
             Self::Day => "某一天",
             Self::Span => "好几天",
             Self::Parked => "先记着",
-            Self::Credentials => "账号密码",
+            Self::Credentials => "备忘",
         }
     }
 }
@@ -561,7 +561,7 @@ fn kind_hint(kind: DateKind) -> &'static str {
         DateKind::Day => "出现在选中的那一天。",
         DateKind::Span => "月历上画一条横跨多天的色条。",
         DateKind::Parked => "进右侧「未安排」，以后再放到某一天。",
-        DateKind::Credentials => "会放进「账号证件」，只本人可见，不上日历。",
+        DateKind::Credentials => "会放进「备忘」，只本人可见，不上日历。",
     }
 }
 
@@ -1060,7 +1060,7 @@ pub fn show_fields(
                     );
                 } else if cred_locked {
                     ui.label(
-                        RichText::new("账号证件固定为私密，不上日历")
+                        RichText::new("备忘固定为私密，不上日历")
                             .size(11.5)
                             .color(theme::text_muted()),
                     );

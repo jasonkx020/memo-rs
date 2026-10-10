@@ -1,4 +1,4 @@
-//! 顶栏业务页签：日历 / 账号证件 / 私密 / 回收站。
+//! 顶栏业务页签：任务 / 备忘 / 私密 / 回收站。
 
 use memo_core::store::MemoCategory;
 
@@ -13,8 +13,8 @@ pub enum NavItem {
 impl NavItem {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Calendar => "日历",
-            Self::Credentials => "账号证件",
+            Self::Calendar => "任务",
+            Self::Credentials => "备忘",
             Self::GenderPrivate => "私密",
             Self::Trash => "回收站",
         }
