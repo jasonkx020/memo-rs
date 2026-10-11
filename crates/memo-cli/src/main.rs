@@ -4,7 +4,7 @@
 
 use clap::Parser;
 use memo_core::config::{self, Config};
-use memo_core::identity_keys::IdentityKeys;
+use memo_core::identity_keys::{self, IdentityKeys};
 use memo_core::store::MemoVisibility;
 use memo_sync::{EngineBroadcaster, SyncEngine};
 use std::io::{self, Write};
@@ -46,6 +46,23 @@ fn ensure_console_if_needed() {
 #[cfg(not(windows))]
 fn ensure_console_if_needed() {}
 
+fn read_password_prompt(prompt: &str) -> String {
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+    rpassword::read_password().unwrap_or_default()
+}
+
+fn read_and_confirm_local_password() -> anyhow::Result<String> {
+    loop {
+        let a = read_password_prompt("设置登录密码（至少 6 位）: ");
+        let b = read_password_prompt("确认登录密码: ");
+        match identity_keys::validate_local_password(&a, &b) {
+            Ok(()) => return Ok(a.trim().to_string()),
+            Err(e) => eprintln!("{e}"),
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     ensure_console_if_needed();
     let args = Args::parse();
@@ -58,35 +75,59 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_headless(cfg: Config, args: Args) -> anyhow::Result<()> {
-    let identity = if let Some(path) = args.identity_file.as_deref() {
-        eprint!("若密钥包有保险口令请输入（可空）: ");
-        let _ = io::stderr().flush();
-        let pass = rpassword::read_password().unwrap_or_default();
-        IdentityKeys::import_file(PathBuf::from(path).as_path(), &pass)?
-    } else if let Some(fp) = args.identity.as_deref() {
-        IdentityKeys::load(PathBuf::from(&cfg.data_dir).as_path(), fp)?
+    let data = PathBuf::from(&cfg.data_dir);
+    let (identity, local_password) = if let Some(path) = args.identity_file.as_deref() {
+        let p = PathBuf::from(path);
+        let enc = IdentityKeys::peek_encrypted(p.as_path()).unwrap_or(false);
+        let id = if enc {
+            let pack_pass = read_password_prompt("旧版加密包口令: ");
+            if pack_pass.trim().is_empty() {
+                anyhow::bail!("请输入旧版加密包口令");
+            }
+            IdentityKeys::import_file(p.as_path(), pack_pass.trim())?
+        } else {
+            IdentityKeys::import_file(p.as_path(), "")?
+        };
+        eprintln!("请为本机设置登录密码（与密钥包无关）");
+        let local = read_and_confirm_local_password()?;
+        (id, local)
     } else {
-        let list = IdentityKeys::list(PathBuf::from(&cfg.data_dir).as_path())?;
-        if list.is_empty() {
-            anyhow::bail!("无身份。请先用 GUI 初始化，或指定 --identity / --identity-file");
+        let fp = if let Some(fp) = args.identity.as_deref() {
+            fp.to_string()
+        } else {
+            let list = IdentityKeys::list(data.as_path())?;
+            if list.is_empty() {
+                anyhow::bail!("无身份。请先用 GUI 初始化，或指定 --identity / --identity-file");
+            }
+            eprintln!("可用身份:");
+            for m in &list {
+                eprintln!("  {}  {}", m.fingerprint, m.alias);
+            }
+            eprint!("输入指纹: ");
+            let _ = io::stderr().flush();
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            line.trim().to_string()
+        };
+        if IdentityKeys::needs_password_setup(data.as_path(), &fp) {
+            eprintln!("此身份尚未设置登录密码，请先设置：");
+            let local = read_and_confirm_local_password()?;
+            let id = IdentityKeys::load(data.as_path(), &fp, "")?;
+            (id, local)
+        } else {
+            let local = read_password_prompt("登录密码: ");
+            if local.trim().is_empty() {
+                anyhow::bail!("请输入登录密码");
+            }
+            let id = IdentityKeys::load(data.as_path(), &fp, local.trim())?;
+            (id, local.trim().to_string())
         }
-        eprintln!("可用身份:");
-        for m in &list {
-            eprintln!("  {}  {}", m.fingerprint, m.alias);
-        }
-        eprint!("输入指纹: ");
-        let _ = io::stderr().flush();
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        IdentityKeys::load(
-            PathBuf::from(&cfg.data_dir).as_path(),
-            line.trim(),
-        )?
     };
 
     let rt = tokio::runtime::Runtime::new()?;
     let _enter = rt.enter();
-    let (svc, _) = memo_core::service::unlock_with_identity(cfg.clone(), &identity)?;
+    let (svc, _) =
+        memo_core::service::unlock_with_identity(cfg.clone(), &identity, &local_password)?;
     let _ = svc.restore_from_hosted();
     let _ = svc.purge_expired_trash();
 

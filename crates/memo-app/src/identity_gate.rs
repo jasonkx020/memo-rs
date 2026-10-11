@@ -18,12 +18,18 @@ pub struct IdentityGateState {
     pub init_alias: String,
     pub init_drive: String,
     pub init_import_path: String,
-    pub init_import_pass: String,
     pub init_export_path: String,
-    pub init_export_pass: String,
+    /// 旧版加密 .memokey 的解密口令（新明文包不需要）
+    pub init_legacy_pack_pass: String,
+    /// 生成/导入时设置的本机登录密码
+    pub init_local_pass: String,
+    pub init_local_pass2: String,
+    /// 选择已有身份时的登录密码（设密时与 confirm 成对）
+    pub select_pass: String,
+    pub select_pass2: String,
     pub init_mode_import: bool,
     pub pending_identity: Option<IdentityKeys>,
-    /// 用户主动退出后为 true：即使只有一个身份也不自动进入
+    /// 用户主动退出后为 true（保留字段；单身份不再自动进入）
     pub skip_auto_unlock: bool,
 }
 
@@ -47,9 +53,12 @@ impl IdentityGateState {
             init_alias: String::new(),
             init_drive: config::default_data_drive(),
             init_import_path: String::new(),
-            init_import_pass: String::new(),
             init_export_path: String::new(),
-            init_export_pass: String::new(),
+            init_legacy_pack_pass: String::new(),
+            init_local_pass: String::new(),
+            init_local_pass2: String::new(),
+            select_pass: String::new(),
+            select_pass2: String::new(),
             init_mode_import: false,
             pending_identity: None,
             skip_auto_unlock: false,
@@ -71,7 +80,29 @@ pub enum GateAction {
         identity: IdentityKeys,
         export_path: Option<String>,
         export_pass: String,
+        /// 本机登录密码（密封 secret.key / 迁移设密）
+        local_password: String,
     },
+}
+
+fn local_password_fields(ui: &mut egui::Ui, pass: &mut String, pass2: &mut String, setup: bool) {
+    let w = ui.available_width();
+    if setup {
+        field_label(ui, "登录密码（至少 6 位）");
+        theme::password_field(ui, pass, "设置登录密码", w, 34.0);
+        ui.add_space(8.0);
+        field_label(ui, "确认登录密码");
+        theme::password_field(ui, pass2, "再输入一次", w, 34.0);
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("用于进入本机并加密数据备份；.memokey 密钥包本身无口令（靠签名验真，请妥善保管文件）。")
+                .size(11.5)
+                .color(theme::mac_text_secondary()),
+        );
+    } else {
+        field_label(ui, "登录密码");
+        theme::password_field(ui, pass, "输入登录密码", w, 34.0);
+    }
 }
 
 fn paint_flat_bg(ui: &egui::Ui) {
@@ -336,8 +367,8 @@ fn draw_init_create(
                 st.status.clear();
             }
         }
-        if let Some(name) = IdentityKeys::peek_alias(PathBuf::from(st.init_import_path.trim()).as_path())
-        {
+        let import_path = PathBuf::from(st.init_import_path.trim());
+        if let Some(name) = IdentityKeys::peek_alias(import_path.as_path()) {
             ui.add_space(6.0);
             ui.label(
                 RichText::new(format!("将使用包内名称：{name}"))
@@ -345,18 +376,26 @@ fn draw_init_create(
                     .color(theme::mac_text_secondary()),
             );
         }
+        let enc = IdentityKeys::peek_encrypted(import_path.as_path()).unwrap_or(false);
         ui.add_space(10.0);
-        field_label(ui, "保险口令（可选，明文便于核对）");
-        ui.add(
-            egui::TextEdit::singleline(&mut st.init_import_pass)
-                .desired_width(ui.available_width())
-                .hint_text(theme::hint("若导出时设置过请填写；可留空")),
-        );
-        ui.label(
-            RichText::new("明文显示便于确认；公共场合请勿久留屏幕。")
-                .size(11.5)
-                .color(theme::mac_text_secondary()),
-        );
+        if enc {
+            field_label(ui, "旧版加密包口令");
+            theme::password_field(
+                ui,
+                &mut st.init_legacy_pack_pass,
+                "仅旧版加密 .memokey 需要",
+                ui.available_width(),
+                34.0,
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("新版密钥包无导出密码；此框仅用于兼容旧版加密包。")
+                    .size(11.5)
+                    .color(theme::mac_text_secondary()),
+            );
+            ui.add_space(10.0);
+        }
+        local_password_fields(ui, &mut st.init_local_pass, &mut st.init_local_pass2, true);
         ui.add_space(8.0);
     }
 
@@ -373,7 +412,27 @@ fn draw_init_create(
                 st.status = "请选择密钥文件".into();
                 return None;
             }
-            match IdentityKeys::import_file(PathBuf::from(path).as_path(), &st.init_import_pass) {
+            let p = PathBuf::from(path);
+            let enc = IdentityKeys::peek_encrypted(p.as_path()).unwrap_or(false);
+            if let Err(e) = identity_keys::validate_local_password(
+                &st.init_local_pass,
+                &st.init_local_pass2,
+            ) {
+                st.status = e.to_string();
+                return None;
+            }
+            let local_pw = st.init_local_pass.trim().to_string();
+            let import_pass = if enc {
+                let legacy = st.init_legacy_pack_pass.trim();
+                if legacy.is_empty() {
+                    st.status = "请输入旧版加密包口令".into();
+                    return None;
+                }
+                legacy
+            } else {
+                ""
+            };
+            match IdentityKeys::import_file(p.as_path(), import_pass) {
                 Ok(id) => {
                     cfg.data_dir = config::memo_data_path(&st.init_drive, &cfg.node_id)
                         .to_string_lossy()
@@ -386,6 +445,7 @@ fn draw_init_create(
                         identity: id,
                         export_path: None,
                         export_pass: String::new(),
+                        local_password: local_pw,
                     });
                 }
                 Err(e) => st.status = e.to_string(),
@@ -401,6 +461,8 @@ fn draw_init_create(
                     .into_owned();
                 let _ = config::save_settings(cfg);
                 st.pending_identity = Some(id);
+                st.init_local_pass.clear();
+                st.init_local_pass2.clear();
                 st.status = String::new();
             }
         }
@@ -447,15 +509,10 @@ fn draw_init_export(
             st.status.clear();
         }
     }
-    ui.add_space(10.0);
-    field_label(ui, "导出保险口令（可选，明文便于核对）");
-    ui.add(
-        egui::TextEdit::singleline(&mut st.init_export_pass)
-            .desired_width(ui.available_width())
-            .hint_text(theme::hint("可留空；建议设置并自行抄写保存")),
-    );
+    ui.add_space(12.0);
+    local_password_fields(ui, &mut st.init_local_pass, &mut st.init_local_pass2, true);
     ui.label(
-        RichText::new("明文显示便于核对，无需二次输入；公共场合请勿久留屏幕。")
+        RichText::new("密钥包无导出密码（含签名防篡改）；请把文件存到安全位置。上方密码仅用于本机登录。")
             .size(11.5)
             .color(theme::mac_text_secondary()),
     );
@@ -469,6 +526,13 @@ fn draw_init_export(
         "导出并进入"
     };
     if theme::mac_primary_button(ui, label, !st.busy).clicked() {
+        if let Err(e) =
+            identity_keys::validate_local_password(&st.init_local_pass, &st.init_local_pass2)
+        {
+            st.status = e.to_string();
+            return None;
+        }
+        let local_pw = st.init_local_pass.trim().to_string();
         let mut export_path = st.init_export_path.trim().to_string();
         if export_path.is_empty() {
             let default_name = default_memokey_name(st);
@@ -494,7 +558,8 @@ fn draw_init_export(
                     cfg: cfg.clone(),
                     identity: id,
                     export_path: Some(export_path),
-                    export_pass: st.init_export_pass.clone(),
+                    export_pass: String::new(),
+                    local_password: local_pw,
                 });
             }
         }
@@ -528,30 +593,14 @@ fn draw_select(
     st: &mut IdentityGateState,
     action: &mut GateAction,
 ) {
-    // 冷启动仅一个身份：自动进入（退出后再进则 skip_auto_unlock 阻止）
-    if !st.busy && !st.skip_auto_unlock && st.identities.len() == 1 {
-        let fp = st.identities[0].fingerprint.clone();
-        st.selected = Some(fp.clone());
-        match IdentityKeys::load(PathBuf::from(&cfg.data_dir).as_path(), &fp) {
-            Ok(id) => {
-                st.busy = true;
-                st.status = "正在打开…".into();
-                *action = GateAction::Unlock {
-                    cfg: cfg.clone(),
-                    identity: id,
-                    export_path: None,
-                    export_pass: String::new(),
-                };
-            }
-            Err(e) => {
-                st.status = e.to_string();
-                st.skip_auto_unlock = true;
-            }
-        }
-    }
-
     let accent = theme::shell_accent();
     let card_w = ui.available_width().min(420.0);
+    let data = PathBuf::from(&cfg.data_dir);
+    let needs_setup = st
+        .selected
+        .as_ref()
+        .map(|fp| IdentityKeys::needs_password_setup(&data, fp))
+        .unwrap_or(false);
 
     // 深色全屏底 + 居中白卡片
     let screen = ui.ctx().screen_rect();
@@ -687,16 +736,39 @@ fn draw_select(
                                     );
                                     if resp.clicked() {
                                         st.selected = Some(m.fingerprint.clone());
+                                        st.select_pass.clear();
+                                        st.select_pass2.clear();
+                                        st.status.clear();
                                     }
                                 });
                             ui.add_space(8.0);
                         }
                     });
 
-                ui.add_space(16.0);
+                ui.add_space(12.0);
+                if st.selected.is_some() {
+                    if needs_setup {
+                        ui.label(
+                            RichText::new("此身份尚未设置登录密码，请先设置后再进入。")
+                                .size(12.5)
+                                .color(Color32::from_rgb(0xC9, 0x5A, 0x2C)),
+                        );
+                        ui.add_space(8.0);
+                    }
+                    local_password_fields(
+                        ui,
+                        &mut st.select_pass,
+                        &mut st.select_pass2,
+                        needs_setup,
+                    );
+                    ui.add_space(12.0);
+                }
+
                 let can = st.selected.is_some() && !st.busy;
                 let btn_label = if st.busy {
                     "打开中…"
+                } else if needs_setup {
+                    "设置密码并进入"
                 } else {
                     "进入备忘录"
                 };
@@ -716,7 +788,28 @@ fn draw_select(
                     .clicked()
                 {
                     if let Some(fp) = st.selected.clone() {
-                        match IdentityKeys::load(PathBuf::from(&cfg.data_dir).as_path(), &fp) {
+                        let local_pw = if needs_setup {
+                            match identity_keys::validate_local_password(
+                                &st.select_pass,
+                                &st.select_pass2,
+                            ) {
+                                Ok(()) => st.select_pass.trim().to_string(),
+                                Err(e) => {
+                                    st.status = e.to_string();
+                                    return;
+                                }
+                            }
+                        } else {
+                            let p = st.select_pass.trim().to_string();
+                            if p.is_empty() {
+                                st.status = "请输入登录密码".into();
+                                return;
+                            }
+                            p
+                        };
+                        // 明文迁移：先空密加载再密封；已加密：用登录密码解密
+                        let load_pw = if needs_setup { "" } else { local_pw.as_str() };
+                        match IdentityKeys::load(data.as_path(), &fp, load_pw) {
                             Ok(id) => {
                                 st.busy = true;
                                 st.status = "正在打开…".into();
@@ -725,6 +818,7 @@ fn draw_select(
                                     identity: id,
                                     export_path: None,
                                     export_pass: String::new(),
+                                    local_password: local_pw,
                                 };
                             }
                             Err(e) => st.status = e.to_string(),

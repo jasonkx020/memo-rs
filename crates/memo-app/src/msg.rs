@@ -5,7 +5,8 @@ use memo_core::store::{MemoCategory, MemoPriority};
 use std::sync::Arc;
 
 pub enum BgMsg {
-    UnlockResult(Result<Arc<AppRuntime>, String>),
+    /// 成功时附带会话登录密码
+    UnlockResult(Result<(Arc<AppRuntime>, String), String>),
     Error(String),
     Info(String),
     Refresh,

@@ -201,6 +201,12 @@ pub struct MemoApp {
     /// 开机 `--tray`：首帧隐藏主窗
     start_hidden: bool,
     last_sticky_session_save: Instant,
+    /// 当前会话登录密码（锁定/切换身份时清空）
+    session_login_password: Option<String>,
+    /// 设置中改密草稿
+    change_pw_old: String,
+    change_pw_new: String,
+    change_pw_new2: String,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
@@ -233,6 +239,10 @@ impl MemoApp {
             main_hidden: start_hidden,
             start_hidden,
             last_sticky_session_save: Instant::now() - Duration::from_secs(60),
+            session_login_password: None,
+            change_pw_old: String::new(),
+            change_pw_new: String::new(),
+            change_pw_new2: String::new(),
         }
     }
 
@@ -434,12 +444,16 @@ impl MemoApp {
     fn pump(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                BgMsg::UnlockResult(Ok(rt)) => {
+                BgMsg::UnlockResult(Ok((rt, local_password))) => {
                     let cfg = rt.cfg.clone();
                     self.cfg = cfg.clone();
                     self.shell = ShellUi::default();
                     self.last_input_at = Instant::now();
                     self.pending_sync_hint = 0;
+                    self.session_login_password = Some(local_password);
+                    self.change_pw_old.clear();
+                    self.change_pw_new.clear();
+                    self.change_pw_new2.clear();
                     self.restore_stickies_from_session(&rt);
                     self.screen = Self::make_main(rt, &cfg);
                 }
@@ -736,6 +750,10 @@ impl eframe::App for MemoApp {
             self.save_sticky_session_now();
             self.close_all_sticky_viewports(ctx);
             self.stickies.clear();
+            self.session_login_password = None;
+            self.change_pw_old.clear();
+            self.change_pw_new.clear();
+            self.change_pw_new2.clear();
             let mut gate = IdentityGateState::from_cfg(&self.cfg);
             gate.skip_auto_unlock = true;
             self.screen = Screen::IdentityGate(gate);
@@ -780,6 +798,7 @@ impl eframe::App for MemoApp {
                         identity,
                         export_path,
                         export_pass,
+                        local_password,
                     } => {
                         st.busy = true;
                         st.status = if export_path.is_some() {
@@ -788,19 +807,23 @@ impl eframe::App for MemoApp {
                             "正在打开…".into()
                         };
                         let tx = self.tx.clone();
+                        let session_pw = local_password.clone();
                         ctx.request_repaint();
                         std::thread::spawn(move || {
-                            let res = (|| {
+                            let res: Result<(Arc<AppRuntime>, String), String> = (|| {
                                 if let Some(path) = export_path.as_ref() {
                                     let p = PathBuf::from(path);
-                                    identity.export_file(&p, &export_pass)?;
+                                    // .memokey 明文+签名，无导出口令（export_pass 忽略）
+                                    let _ = export_pass;
+                                    identity.export_file(&p, "")?;
                                 }
                                 config::ensure_data_dir(&cfg)?;
                                 let mut id = identity;
-                                id.mark_exported(PathBuf::from(&cfg.data_dir).as_path())?;
-                                unlock_runtime_identity(cfg, id)
+                                id.exported_once = true;
+                                let rt = unlock_runtime_identity(cfg, id, &local_password)?;
+                                Ok((rt, session_pw))
                             })()
-                            .map_err(|e| e.to_string());
+                            .map_err(|e: anyhow::Error| e.to_string());
                             let _ = tx.send(BgMsg::UnlockResult(res));
                         });
                     }
@@ -1261,13 +1284,13 @@ impl eframe::App for MemoApp {
                         .show(ctx, |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(
-                                RichText::new("导出为明文 TXT，请输入主密码确认，并选择保存位置。")
+                                RichText::new("导出为明文 TXT，请输入登录密码确认，并选择保存位置。")
                                     .strong(),
                             );
                             ui.add_space(8.0);
-                            ui.label("主密码");
+                            ui.label("登录密码");
                             let pw_w = ui.available_width().max(120.0);
-                            theme::password_field(ui, export_pw, "输入主密码", pw_w, 34.0);
+                            theme::password_field(ui, export_pw, "输入登录密码", pw_w, 34.0);
                             ui.add_space(8.0);
                             ui.label("保存路径");
                             ui.horizontal(|ui| {
@@ -1310,6 +1333,8 @@ impl eframe::App for MemoApp {
                                 {
                                     let svc = rt.svc.clone();
                                     let pw = export_pw.clone();
+                                    let session_pw =
+                                        self.session_login_password.clone().unwrap_or_default();
                                     let path =
                                         std::path::PathBuf::from(export_path.trim());
                                     let ids = export_ids.clone();
@@ -1317,8 +1342,11 @@ impl eframe::App for MemoApp {
                                     *show_export = false;
                                     export_pw.clear();
                                     std::thread::spawn(move || {
-                                        if let Err(e) = svc.verify_password(&pw) {
-                                            let _ = tx.send(BgMsg::Error(e.to_string()));
+                                        if pw.trim().is_empty() || pw.trim() != session_pw.trim()
+                                        {
+                                            let _ = tx.send(BgMsg::Error(
+                                                "登录密码错误".into(),
+                                            ));
                                             return;
                                         }
                                         let path_disp = path.display().to_string();
@@ -1397,17 +1425,31 @@ impl eframe::App for MemoApp {
                             ui.set_width(ui.available_width());
                             ui.label(
                                 RichText::new(if *backup_import {
-                                    "选择 .memobak 文件并输入备份时使用的密码。"
+                                    "选择 .memobak 文件并输入备份时使用的登录密码。"
                                 } else {
-                                    "将全部备忘加密导出为 .memobak（可用独立备份密码）。"
+                                    "将全部备忘加密导出为 .memobak（使用当前登录密码加密）。"
                                 })
                                 .weak(),
                             );
                             ui.add_space(8.0);
-                            ui.label("备份密码");
-                            let pw_w = ui.available_width().max(120.0);
-                            theme::password_field(ui, backup_pw, "备份密码", pw_w, 34.0);
-                            ui.add_space(6.0);
+                            if *backup_import {
+                                ui.label("登录密码（备份时使用的）");
+                                let pw_w = ui.available_width().max(120.0);
+                                // 默认填入当前会话密码，可改
+                                if backup_pw.is_empty() {
+                                    if let Some(p) = self.session_login_password.as_ref() {
+                                        *backup_pw = p.clone();
+                                    }
+                                }
+                                theme::password_field(
+                                    ui,
+                                    backup_pw,
+                                    "登录密码",
+                                    pw_w,
+                                    34.0,
+                                );
+                                ui.add_space(6.0);
+                            }
                             ui.label("文件路径");
                             ui.horizontal(|ui| {
                                 let browse_w = 64.0;
@@ -1448,8 +1490,12 @@ impl eframe::App for MemoApp {
                             });
                             ui.add_space(10.0);
                             ui.horizontal(|ui| {
-                                let can =
-                                    !backup_pw.is_empty() && !backup_path.trim().is_empty();
+                                let session_ok = self.session_login_password.is_some();
+                                let can = if *backup_import {
+                                    !backup_pw.is_empty() && !backup_path.trim().is_empty()
+                                } else {
+                                    session_ok && !backup_path.trim().is_empty()
+                                };
                                 let btn = if *backup_import { "确认导入" } else { "确认备份" };
                                 if ui
                                     .add_enabled(
@@ -1462,13 +1508,23 @@ impl eframe::App for MemoApp {
                                     .clicked()
                                 {
                                     let svc = rt.svc.clone();
-                                    let pw = backup_pw.clone();
+                                    let pw = if *backup_import {
+                                        backup_pw.clone()
+                                    } else {
+                                        self.session_login_password.clone().unwrap_or_default()
+                                    };
                                     let path =
                                         std::path::PathBuf::from(backup_path.trim());
                                     let import = *backup_import;
                                     let tx = self.tx.clone();
                                     *show_backup = false;
                                     backup_pw.clear();
+                                    if pw.trim().is_empty() {
+                                        let _ = self.tx.send(BgMsg::Error(
+                                            "无登录密码，请重新登录后再备份".into(),
+                                        ));
+                                        return;
+                                    }
                                     std::thread::spawn(move || {
                                         let res = if import {
                                             svc.import_backup(&path, &pw).map(|n| {
@@ -1708,6 +1764,91 @@ impl eframe::App for MemoApp {
                                                             let _ = self
                                                                 .tx
                                                                 .send(BgMsg::Error(e.to_string()));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "修改登录密码",
+                                                "用于进入本机并加密数据备份；不加密 .memokey。",
+                                            );
+                                            {
+                                                let pw_w = field_w.min(ui.available_width());
+                                                ui.label(
+                                                    RichText::new("当前密码")
+                                                        .size(12.0)
+                                                        .color(theme::text_muted()),
+                                                );
+                                                theme::password_field(
+                                                    ui,
+                                                    &mut self.change_pw_old,
+                                                    "当前登录密码",
+                                                    pw_w,
+                                                    32.0,
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    RichText::new("新密码（至少 6 位）")
+                                                        .size(12.0)
+                                                        .color(theme::text_muted()),
+                                                );
+                                                theme::password_field(
+                                                    ui,
+                                                    &mut self.change_pw_new,
+                                                    "新登录密码",
+                                                    pw_w,
+                                                    32.0,
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    RichText::new("确认新密码")
+                                                        .size(12.0)
+                                                        .color(theme::text_muted()),
+                                                );
+                                                theme::password_field(
+                                                    ui,
+                                                    &mut self.change_pw_new2,
+                                                    "再输入一次",
+                                                    pw_w,
+                                                    32.0,
+                                                );
+                                                ui.add_space(6.0);
+                                                if theme::success_button(ui, "保存新密码").clicked()
+                                                {
+                                                    let old = self.change_pw_old.clone();
+                                                    let new = self.change_pw_new.clone();
+                                                    let new2 = self.change_pw_new2.clone();
+                                                    match memo_core::identity_keys::validate_local_password(
+                                                        &new, &new2,
+                                                    ) {
+                                                        Ok(()) => {
+                                                            let data = PathBuf::from(&rt.cfg.data_dir);
+                                                            let fp = rt.svc.session_fp().to_string();
+                                                            match memo_core::identity_keys::IdentityKeys::change_local_password(
+                                                                data.as_path(),
+                                                                &fp,
+                                                                &old,
+                                                                &new,
+                                                            ) {
+                                                                Ok(()) => {
+                                                                    self.session_login_password =
+                                                                        Some(new.trim().to_string());
+                                                                    self.change_pw_old.clear();
+                                                                    self.change_pw_new.clear();
+                                                                    self.change_pw_new2.clear();
+                                                                    *status_line =
+                                                                        "登录密码已更新".into();
+                                                                }
+                                                                Err(e) => {
+                                                                    *status_line =
+                                                                        format!("改密失败: {e}");
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            *status_line = e.to_string();
                                                         }
                                                     }
                                                 }
@@ -2052,6 +2193,7 @@ impl eframe::App for MemoApp {
 fn unlock_runtime_identity(
     cfg: Config,
     identity: IdentityKeys,
+    local_password: &str,
 ) -> anyhow::Result<Arc<AppRuntime>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -2063,7 +2205,7 @@ fn unlock_runtime_identity(
         let (svc, engine) = {
         let _guard = rt.enter();
         let (svc, _audit) =
-            memo_core::service::unlock_with_identity(cfg.clone(), &identity)?;
+            memo_core::service::unlock_with_identity(cfg.clone(), &identity, local_password)?;
         let _ = svc.restore_from_hosted();
         let _ = svc.purge_expired_trash();
         svc.ensure_session_person()?;

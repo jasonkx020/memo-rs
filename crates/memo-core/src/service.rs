@@ -1195,11 +1195,12 @@ impl MemoService {
 }
 
 
-/// 用身份密钥对打开库（无主密码）。
+/// 用身份密钥对打开库；`local_password` 用于密封/校验本机私钥。
 /// 身份元数据在节点根 `data_dir`；加密业务数据在 `vaults/{fingerprint}/`。
 pub fn unlock_with_identity(
     cfg: Config,
     identity: &IdentityKeys,
+    local_password: &str,
 ) -> anyhow::Result<(Arc<MemoService>, Arc<AuditLog>)> {
     crate::config::ensure_data_dir(&cfg)?;
     let data_dir = PathBuf::from(&cfg.data_dir);
@@ -1209,7 +1210,7 @@ pub fn unlock_with_identity(
         );
     }
     identity_keys::write_schema_marker(&data_dir)?;
-    identity.save(&data_dir)?;
+    identity.ensure_sealed(&data_dir, local_password)?;
 
     let vault = IdentityKeys::vault_dir(&data_dir, &identity.fingerprint);
     fs::create_dir_all(&vault)?;
