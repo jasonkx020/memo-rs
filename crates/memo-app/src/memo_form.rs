@@ -436,7 +436,7 @@ fn today_ymd() -> String {
 
 pub fn category_icon(cat: MemoCategory) -> &'static str {
     match cat {
-        MemoCategory::Todo => "✅",
+        MemoCategory::Todo => "📌",
         MemoCategory::Work | MemoCategory::Office => "💼",
         MemoCategory::Credentials => "🔑",
         MemoCategory::Life => "🏠",

@@ -559,12 +559,18 @@ fn dark_icons() -> bool {
     (r as u16) + (g as u16) + (b as u16) < 380
 }
 
-/// 分类图标语义色（待办绿、应急红等）。
+/// 分类图标语义色（待办强调色、应急红等；待办不用成功绿，以免像「已完成」）。
 pub fn category_icon_color(cat: MemoCategory) -> Color32 {
     let dark = dark_icons();
     match cat {
-        MemoCategory::Todo => success(),
-        MemoCategory::Work | MemoCategory::Office => shell_accent(),
+        MemoCategory::Todo => shell_accent(),
+        MemoCategory::Work | MemoCategory::Office => {
+            if dark {
+                Color32::from_rgb(0x6B, 0x9B, 0xD4)
+            } else {
+                Color32::from_rgb(0x2F, 0x6F, 0xAD)
+            }
+        }
         MemoCategory::Credentials => {
             if dark {
                 Color32::from_rgb(0x7E, 0xB6, 0xD9)

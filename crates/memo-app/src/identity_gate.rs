@@ -27,6 +27,8 @@ pub struct IdentityGateState {
     /// 选择已有身份时的登录密码（设密时与 confirm 成对）
     pub select_pass: String,
     pub select_pass2: String,
+    /// 选中身份后，下一帧让密码框获取焦点
+    pub focus_select_pass: bool,
     pub init_mode_import: bool,
     pub pending_identity: Option<IdentityKeys>,
     /// 用户主动退出后为 true（保留字段；单身份不再自动进入）
@@ -59,6 +61,7 @@ impl IdentityGateState {
             init_local_pass2: String::new(),
             select_pass: String::new(),
             select_pass2: String::new(),
+            focus_select_pass: false,
             init_mode_import: false,
             pending_identity: None,
             skip_auto_unlock: false,
@@ -85,23 +88,43 @@ pub enum GateAction {
     },
 }
 
-fn local_password_fields(ui: &mut egui::Ui, pass: &mut String, pass2: &mut String, setup: bool) {
+/// 绘制密码框；若在密码框上回车则返回 `true`（用于提交登录）。
+fn local_password_fields(
+    ui: &mut egui::Ui,
+    pass: &mut String,
+    pass2: &mut String,
+    setup: bool,
+    focus_first: bool,
+) -> bool {
     let w = ui.available_width();
+    let enter = |ui: &egui::Ui, r: &egui::Response| {
+        r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+    };
     if setup {
         field_label(ui, "登录密码（至少 6 位）");
-        theme::password_field(ui, pass, "设置登录密码", w, 34.0);
+        let r = theme::password_field(ui, pass, "设置登录密码", w, 34.0);
+        if focus_first {
+            r.request_focus();
+        }
+        let mut submit = enter(ui, &r);
         ui.add_space(8.0);
         field_label(ui, "确认登录密码");
-        theme::password_field(ui, pass2, "再输入一次", w, 34.0);
+        let r2 = theme::password_field(ui, pass2, "再输入一次", w, 34.0);
+        submit |= enter(ui, &r2);
         ui.add_space(4.0);
         ui.label(
             RichText::new("用于进入本机并加密数据备份；.memokey 密钥包本身无口令（靠签名验真，请妥善保管文件）。")
                 .size(11.5)
                 .color(theme::mac_text_secondary()),
         );
+        submit
     } else {
         field_label(ui, "登录密码");
-        theme::password_field(ui, pass, "输入登录密码", w, 34.0);
+        let r = theme::password_field(ui, pass, "输入登录密码", w, 34.0);
+        if focus_first {
+            r.request_focus();
+        }
+        enter(ui, &r)
     }
 }
 
@@ -395,7 +418,7 @@ fn draw_init_create(
             );
             ui.add_space(10.0);
         }
-        local_password_fields(ui, &mut st.init_local_pass, &mut st.init_local_pass2, true);
+        local_password_fields(ui, &mut st.init_local_pass, &mut st.init_local_pass2, true, false);
         ui.add_space(8.0);
     }
 
@@ -510,7 +533,7 @@ fn draw_init_export(
         }
     }
     ui.add_space(12.0);
-    local_password_fields(ui, &mut st.init_local_pass, &mut st.init_local_pass2, true);
+    local_password_fields(ui, &mut st.init_local_pass, &mut st.init_local_pass2, true, false);
     ui.label(
         RichText::new("密钥包无导出密码（含签名防篡改）；请把文件存到安全位置。上方密码仅用于本机登录。")
             .size(11.5)
@@ -739,6 +762,7 @@ fn draw_select(
                                         st.select_pass.clear();
                                         st.select_pass2.clear();
                                         st.status.clear();
+                                        st.focus_select_pass = true;
                                     }
                                 });
                             ui.add_space(8.0);
@@ -755,73 +779,78 @@ fn draw_select(
                         );
                         ui.add_space(8.0);
                     }
-                    local_password_fields(
+                    let focus = st.focus_select_pass;
+                    let enter_submit = local_password_fields(
                         ui,
                         &mut st.select_pass,
                         &mut st.select_pass2,
                         needs_setup,
+                        focus,
                     );
+                    if focus {
+                        st.focus_select_pass = false;
+                    }
                     ui.add_space(12.0);
-                }
 
-                let can = st.selected.is_some() && !st.busy;
-                let btn_label = if st.busy {
-                    "打开中…"
-                } else if needs_setup {
-                    "设置密码并进入"
-                } else {
-                    "进入备忘录"
-                };
-                let text = RichText::new(btn_label)
-                    .color(Color32::WHITE)
-                    .strong()
-                    .size(15.0);
-                let w = ui.available_width().clamp(120.0, 400.0);
-                if ui
-                    .add_enabled(
-                        can,
-                        egui::Button::new(text)
-                            .fill(accent)
-                            .rounding(egui::Rounding::same(theme::MAC_ROUND_PILL))
-                            .min_size(Vec2::new(w, 38.0)),
-                    )
-                    .clicked()
-                {
-                    if let Some(fp) = st.selected.clone() {
-                        let local_pw = if needs_setup {
-                            match identity_keys::validate_local_password(
-                                &st.select_pass,
-                                &st.select_pass2,
-                            ) {
-                                Ok(()) => st.select_pass.trim().to_string(),
-                                Err(e) => {
-                                    st.status = e.to_string();
+                    let can = !st.busy;
+                    let btn_label = if st.busy {
+                        "打开中…"
+                    } else if needs_setup {
+                        "设置密码并进入"
+                    } else {
+                        "进入备忘录"
+                    };
+                    let text = RichText::new(btn_label)
+                        .color(Color32::WHITE)
+                        .strong()
+                        .size(15.0);
+                    let w = ui.available_width().clamp(120.0, 400.0);
+                    let btn_clicked = ui
+                        .add_enabled(
+                            can,
+                            egui::Button::new(text)
+                                .fill(accent)
+                                .rounding(egui::Rounding::same(theme::MAC_ROUND_PILL))
+                                .min_size(Vec2::new(w, 38.0)),
+                        )
+                        .clicked();
+                    if (btn_clicked || enter_submit) && can {
+                        if let Some(fp) = st.selected.clone() {
+                            let local_pw = if needs_setup {
+                                match identity_keys::validate_local_password(
+                                    &st.select_pass,
+                                    &st.select_pass2,
+                                ) {
+                                    Ok(()) => st.select_pass.trim().to_string(),
+                                    Err(e) => {
+                                        st.status = e.to_string();
+                                        return;
+                                    }
+                                }
+                            } else {
+                                let p = st.select_pass.trim().to_string();
+                                if p.is_empty() {
+                                    st.status = "请输入登录密码".into();
                                     return;
                                 }
+                                p
+                            };
+                            // 明文迁移：先空密加载再密封；已加密：用登录密码解密
+                            let load_pw = if needs_setup { "" } else { local_pw.as_str() };
+                            match IdentityKeys::load(data.as_path(), &fp, load_pw) {
+                                Ok(id) => {
+                                    st.busy = true;
+                                    st.status = "正在打开…".into();
+                                    *action = GateAction::Unlock {
+                                        cfg: cfg.clone(),
+                                        identity: id,
+                                        export_path: None,
+                                        export_pass: String::new(),
+                                        local_password: local_pw,
+                                    };
+                                }
+                                Err(e) => st.status = e.to_string(),
                             }
-                        } else {
-                            let p = st.select_pass.trim().to_string();
-                            if p.is_empty() {
-                                st.status = "请输入登录密码".into();
-                                return;
-                            }
-                            p
-                        };
-                        // 明文迁移：先空密加载再密封；已加密：用登录密码解密
-                        let load_pw = if needs_setup { "" } else { local_pw.as_str() };
-                        match IdentityKeys::load(data.as_path(), &fp, load_pw) {
-                            Ok(id) => {
-                                st.busy = true;
-                                st.status = "正在打开…".into();
-                                *action = GateAction::Unlock {
-                                    cfg: cfg.clone(),
-                                    identity: id,
-                                    export_path: None,
-                                    export_pass: String::new(),
-                                    local_password: local_pw,
-                                };
-                            }
-                            Err(e) => st.status = e.to_string(),
                         }
                     }
                 }

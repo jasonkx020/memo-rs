@@ -46,7 +46,7 @@ impl Default for CalendarUi {
             year: t.year(),
             month: t.month(),
             selected: t,
-            filter: DayFilter::Open,
+            filter: DayFilter::All,
             more_popup_day: None,
             focus_overdue: false,
         }
@@ -148,6 +148,19 @@ fn weekday_zh(d: NaiveDate) -> &'static str {
 
 fn format_md(d: NaiveDate) -> String {
     format!("{}月{}日", d.month(), d.day())
+}
+
+fn format_mmdd(d: NaiveDate) -> String {
+    format!("{:02}-{:02}", d.month(), d.day())
+}
+
+fn content_excerpt(m: &MemoView, max_chars: usize) -> Option<String> {
+    let t = m.content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = t.trim();
+    if t.is_empty() {
+        return None;
+    }
+    Some(truncate_title(t, max_chars))
 }
 
 pub fn show(
@@ -318,6 +331,7 @@ pub(crate) fn show_month(
                     cell_h,
                     selected,
                     editing,
+                    open_new,
                     picked,
                 );
             }
@@ -410,6 +424,7 @@ fn day_cell(
     cell_h: f32,
     selected: &mut Option<String>,
     editing: &mut bool,
+    open_new: &mut bool,
     picked: &mut Option<String>,
 ) {
     let t = today();
@@ -527,7 +542,9 @@ fn day_cell(
             );
             let start = due_date_part(&m.due_date);
             let end = event_end_date(&m.due_date, &m.end_date);
-            let fill_c = if memo_overdue(m) {
+            let fill_c = if m.done {
+                theme::text_muted().linear_multiply(0.55)
+            } else if memo_overdue(m) {
                 theme::warn_overdue_fg()
             } else {
                 theme::category_icon_color(m.category.canonical())
@@ -552,13 +569,21 @@ fn day_cell(
             } else {
                 format!("{} (续)", truncate_title(&m.title, 10))
             };
+            let label_fg = if m.done {
+                Color32::from_white_alpha(180)
+            } else {
+                Color32::WHITE
+            };
             ui.painter().text(
                 egui::pos2(bar.left() + 4.0, bar.center().y),
                 egui::Align2::LEFT_CENTER,
                 label,
                 egui::FontId::proportional(10.0),
-                Color32::WHITE,
+                label_fg,
             );
+            if m.done {
+                paint_strike_line(ui, bar, label_fg);
+            }
             // 点备忘条只选中当天，不打开详情（与点格子空白一致）
             let id = ui.id().with(("span", day, &m.id));
             let r = ui.interact(bar, id, Sense::click());
@@ -566,13 +591,15 @@ fn day_cell(
                 chip_hit = true;
                 select_calendar_day(cal, day, selected, editing);
             }
+            day_cell_new_memo_menu(&r, cal, day, selected, editing, open_new);
             y += 16.0;
             shown += 1;
         }
     }
 
-    let open: Vec<_> = singles.iter().copied().filter(|m| !m.done).collect();
-    let chip_src = if open.is_empty() { singles } else { open };
+    // 未完成优先占格，已完成仍显示（灰字+划线），不直接隐藏
+    let mut chip_src: Vec<_> = singles.iter().copied().filter(|m| !m.done).collect();
+    chip_src.extend(singles.iter().copied().filter(|m| m.done));
     // 矮格子少画几条，把空间留给「+N 更多」
     let slots = if h < 48.0 {
         0
@@ -593,7 +620,9 @@ fn day_cell(
             egui::pos2(rect.left() + 4.0, y),
             Vec2::new(rect.width() - 8.0, 13.0),
         );
-        let (bg, fg) = if memo_overdue(m) {
+        let (bg, fg) = if m.done {
+            (theme::panel(), theme::text_muted())
+        } else if memo_overdue(m) {
             (theme::warn_overdue_bg(), theme::warn_overdue_fg())
         } else if memo_due_today(m) {
             (theme::warn_due_today_bg(), theme::warn_due_today_fg())
@@ -611,12 +640,16 @@ fn day_cell(
             egui::FontId::proportional(10.0),
             fg,
         );
+        if m.done {
+            paint_strike_line(ui, bar, fg);
+        }
         let id = ui.id().with(("chip", day, &m.id));
         let r = ui.interact(bar, id, Sense::click());
         if r.clicked() {
             chip_hit = true;
             select_calendar_day(cal, day, selected, editing);
         }
+        day_cell_new_memo_menu(&r, cal, day, selected, editing, open_new);
         y += 15.0;
         shown += 1;
     }
@@ -641,6 +674,7 @@ fn day_cell(
             cal.selected = day;
             cal.more_popup_day = Some(day);
         }
+        day_cell_new_memo_menu(&r, cal, day, selected, editing, open_new);
         if cal.more_popup_day == Some(day) {
             show_more_popup(ui, cal, &on, day, more_rect, selected, editing, picked);
         }
@@ -651,6 +685,25 @@ fn day_cell(
     if resp.clicked() && !chip_hit {
         select_calendar_day(cal, day, selected, editing);
     }
+    day_cell_new_memo_menu(&resp, cal, day, selected, editing, open_new);
+}
+
+/// 日格子任意位置（空白 / 备忘条 / 更多）右键 → 新建备忘（关联该日）。
+fn day_cell_new_memo_menu(
+    resp: &egui::Response,
+    cal: &mut CalendarUi,
+    day: NaiveDate,
+    selected: &mut Option<String>,
+    editing: &mut bool,
+    open_new: &mut bool,
+) {
+    resp.context_menu(|ui| {
+        if ui.button("新建备忘").clicked() {
+            select_calendar_day(cal, day, selected, editing);
+            *open_new = true;
+            ui.close_menu();
+        }
+    });
 }
 
 /// 选中日历某一天并收起详情（不打开备忘）。
@@ -682,6 +735,16 @@ fn truncate_title(title: &str, max_chars: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+/// 日历色块上的完成划线（painter 文本无 strikethrough）。
+fn paint_strike_line(ui: &egui::Ui, bar: egui::Rect, color: Color32) {
+    let y = bar.center().y;
+    ui.painter().hline(
+        (bar.left() + 3.0)..=(bar.right() - 3.0),
+        y,
+        Stroke::new(1.0, color.linear_multiply(0.85)),
+    );
 }
 
 fn show_more_popup(
@@ -725,14 +788,20 @@ fn show_more_popup(
                                 } else {
                                     m.title.as_str()
                                 };
+                                let mut title_rt = RichText::new(format!("    {title}"))
+                                    .size(12.5)
+                                    .color(if m.done {
+                                        theme::text_muted()
+                                    } else {
+                                        theme::text()
+                                    });
+                                if m.done {
+                                    title_rt = title_rt.strikethrough();
+                                }
                                 let r = ui.add(
-                                    egui::Button::new(
-                                        RichText::new(format!("    {title}"))
-                                            .size(12.5)
-                                            .color(theme::text()),
-                                    )
-                                    .fill(Color32::TRANSPARENT)
-                                    .frame(false),
+                                    egui::Button::new(title_rt)
+                                        .fill(Color32::TRANSPARENT)
+                                        .frame(false),
                                 );
                                 if r.clicked() {
                                     *selected = Some(m.id.clone());
@@ -1017,6 +1086,7 @@ fn show_huangli_for_day(ui: &mut egui::Ui, day: NaiveDate) {
 }
 
 fn show_huangli_card(ui: &mut egui::Ui, al: Option<&huangli::DayAlmanac>, lunar_line: &str) {
+    let licensed = huangli::is_licensed();
     Frame::none()
         .fill(theme::card())
         .stroke(Stroke::new(1.0, theme::border()))
@@ -1024,14 +1094,24 @@ fn show_huangli_card(ui: &mut egui::Ui, al: Option<&huangli::DayAlmanac>, lunar_
         .inner_margin(Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(
-                RichText::new(lunar_line)
-                    .size(12.0)
-                    .color(theme::text()),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(lunar_line)
+                        .size(12.0)
+                        .color(theme::text()),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new("上班宜忌")
+                            .size(11.0)
+                            .color(theme::text_muted()),
+                    );
+                });
+            });
             ui.add_space(4.0);
             match al {
                 Some(al) => {
+                    let (yi, ji, show_upsell) = al.display_yi_ji_text(licensed, 48);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new("宜")
@@ -1039,11 +1119,7 @@ fn show_huangli_card(ui: &mut egui::Ui, al: Option<&huangli::DayAlmanac>, lunar_
                                 .strong()
                                 .color(theme::success()),
                         );
-                        ui.label(
-                            RichText::new(al.yi_text(40))
-                                .size(12.0)
-                                .color(theme::success()),
-                        );
+                        ui.label(RichText::new(yi).size(12.0).color(theme::success()));
                     });
                     ui.add_space(2.0);
                     ui.horizontal_wrapped(|ui| {
@@ -1054,15 +1130,23 @@ fn show_huangli_card(ui: &mut egui::Ui, al: Option<&huangli::DayAlmanac>, lunar_
                                 .color(theme::danger()),
                         );
                         ui.label(
-                            RichText::new(al.ji_text(40))
+                            RichText::new(ji)
                                 .size(12.0)
                                 .color(theme::danger().linear_multiply(0.85)),
                         );
                     });
+                    if show_upsell {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("商业版可看完整上班宜忌")
+                                .size(10.5)
+                                .color(theme::text_muted()),
+                        );
+                    }
                 }
                 None => {
                     ui.label(
-                        RichText::new("宜忌加载中…")
+                        RichText::new("上班宜忌加载中…")
                             .size(12.0)
                             .color(theme::text_muted()),
                     );
@@ -1091,132 +1175,107 @@ fn warn_task_card(
     open_sticky: &mut Option<String>,
     tx: &Sender<BgMsg>,
 ) {
-    let (bar_c, soft_bg) = match accent {
-        TaskAccent::Overdue => (theme::warn_overdue_fg(), theme::warn_overdue_bg()),
-        TaskAccent::DueToday => (theme::warn_due_today_fg(), theme::warn_due_today_bg()),
-        TaskAccent::Normal => (theme::shell_accent(), theme::card()),
+    let bar_c = if m.done {
+        theme::border()
+    } else {
+        match accent {
+            TaskAccent::Overdue => theme::warn_overdue_fg(),
+            TaskAccent::DueToday => theme::warn_due_today_fg(),
+            TaskAccent::Normal => theme::shell_accent(),
+        }
     };
+    let ring_c = if m.done {
+        theme::success()
+    } else {
+        match accent {
+            TaskAccent::Overdue => theme::warn_overdue_fg(),
+            TaskAccent::DueToday => theme::warn_due_today_fg(),
+            TaskAccent::Normal => theme::shell_accent(),
+        }
+    };
+    let title_fg = if m.done {
+        theme::text_muted()
+    } else if matches!(accent, TaskAccent::Overdue) {
+        theme::warn_overdue_fg()
+    } else {
+        theme::text()
+    };
+    let excerpt = content_excerpt(m, 28);
+    let deadline = deadline_date(&m.due_date, &m.end_date);
+
     let mut consumed = false;
     let outer = Frame::none()
-        .fill(soft_bg)
+        .fill(theme::card())
         .stroke(Stroke::new(1.0, theme::border()))
-        .rounding(Rounding::same(8.0))
-        .inner_margin(Margin::symmetric(10.0, 8.0))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(12.0, 10.0))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                if warn_card_category_icon(ui, m.category, m.done).clicked() {
+                ui.add_space(4.0);
+                if task_done_checkbox(ui, m.done, ring_c).clicked() {
                     toggle_done(svc, m, tx);
                     consumed = true;
                 }
-                ui.vertical(|ui| {
-                    let title = if m.title.is_empty() {
-                        "(无标题)"
-                    } else {
-                        m.title.as_str()
-                    };
-                    ui.label(
-                        RichText::new(title)
-                            .size(13.5)
+                ui.add_space(8.0);
+
+                let right_w = 118.0_f32;
+                let mid_w = (ui.available_width() - right_w - 6.0).max(80.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(mid_w, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_max_width(mid_w);
+                        let title = if m.title.is_empty() {
+                            "(无标题)"
+                        } else {
+                            m.title.as_str()
+                        };
+                        let mut title_rt = RichText::new(title)
+                            .size(14.0)
                             .strong()
-                            .color(if m.done {
-                                theme::text_muted()
-                            } else {
-                                theme::text()
-                            }),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        match accent {
-                            TaskAccent::Overdue => {
-                                let days = overdue_days(&m.due_date, &m.end_date, m.done)
-                                    .unwrap_or(1)
-                                    .max(1);
-                                status_badge(
-                                    ui,
-                                    &format!("已过期 {days} 天"),
-                                    Color32::WHITE,
-                                    theme::warn_overdue_fg(),
-                                    theme::warn_overdue_border(),
-                                );
-                                if let Some(d) = deadline_date(&m.due_date, &m.end_date) {
-                                    ui.label(
-                                        RichText::new(format!("截止 {}", format_md(d)))
-                                            .size(11.0)
-                                            .color(theme::text_muted()),
-                                    );
-                                }
-                            }
-                            TaskAccent::DueToday => {
-                                let badge = if let Some(hm) = due_time_hm(&m.due_date) {
-                                    format!("今天 {hm} 截止")
-                                } else {
-                                    "今天到期".into()
-                                };
-                                status_badge(
-                                    ui,
-                                    &badge,
-                                    Color32::WHITE,
-                                    theme::warn_due_today_fg(),
-                                    theme::warn_due_today_border(),
-                                );
-                            }
-                            TaskAccent::Normal => {
-                                if is_span(m) {
-                                    if let (Some(a), Some(b)) = (
-                                        due_date_part(&m.due_date),
-                                        event_end_date(&m.due_date, &m.end_date),
-                                    ) {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} - {}",
-                                                format_md(a),
-                                                format_md(b)
-                                            ))
-                                            .size(11.0)
-                                            .color(theme::shell_accent()),
-                                        );
-                                    }
-                                } else {
-                                    ui.label(
-                                        RichText::new(if m.done { "已完成" } else { "未完成" })
-                                            .size(11.0)
-                                            .color(theme::text_muted()),
-                                    );
-                                }
-                            }
+                            .color(title_fg);
+                        if m.done {
+                            title_rt = title_rt.strikethrough();
                         }
-                    });
-                    if !m.tags.is_empty() {
-                        ui.add_space(2.0);
-                        ui.horizontal_wrapped(|ui| {
-                            for (i, tag) in m.tags.iter().enumerate() {
-                                let (bg, fg) = theme::tag_soft_pair(i as u64 + tag.len() as u64);
-                                let label = if tag.starts_with('#') {
-                                    tag.clone()
-                                } else {
-                                    format!("#{tag}")
-                                };
-                                Frame::none()
-                                    .fill(bg)
-                                    .rounding(Rounding::same(99.0))
-                                    .inner_margin(Margin::symmetric(6.0, 1.0))
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new(label).size(11.0).color(fg));
-                                    });
-                            }
-                        });
+                        ui.label(title_rt);
+                        if let Some(ex) = &excerpt {
+                            ui.add_space(3.0);
+                            ui.horizontal(|ui| {
+                                paint_note_glyph(ui, theme::text_muted());
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(ex)
+                                        .size(11.5)
+                                        .color(theme::text_muted()),
+                                );
+                            });
+                        }
+                    },
+                );
+
+                ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
+                    ui.set_min_width(right_w);
+                    task_status_pill(ui, m, accent);
+                    if let Some(d) = deadline {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!("截止 {}", format_mmdd(d)))
+                                .size(11.0)
+                                .color(theme::text_muted()),
+                        );
                     }
                 });
             });
         });
-    // 左色条
+
     let r = outer.response.rect;
     ui.painter().rect_filled(
         egui::Rect::from_min_max(r.left_top(), egui::pos2(r.left() + 4.0, r.bottom())),
         Rounding {
-            nw: 8.0,
+            nw: 10.0,
             ne: 0.0,
-            sw: 8.0,
+            sw: 10.0,
             se: 0.0,
         },
         bar_c,
@@ -1239,15 +1298,220 @@ fn warn_task_card(
             tx,
         );
     });
-    ui.add_space(5.0);
+    warn_task_hover_preview(ui, &resp, &m.id, &m.title, &m.content);
+    ui.add_space(6.0);
+}
+
+#[derive(Clone)]
+struct HoverPreviewState {
+    memo_id: String,
+    since: f64,
+}
+
+/// 滚动中不弹；同一条目静止悬停满约 0.35s 后才显示完整标题/正文。
+fn warn_task_hover_preview(
+    ui: &mut egui::Ui,
+    resp: &egui::Response,
+    memo_id: &str,
+    title: &str,
+    content: &str,
+) {
+    const DELAY: f64 = 0.35;
+    let state_id = Id::new("warn_task_hover_preview");
+    let scrolling = ui.input(|i| {
+        i.raw_scroll_delta.y.abs() > 0.0 || i.smooth_scroll_delta.y.abs() > 0.0
+    });
+    if scrolling {
+        ui.ctx().data_mut(|d| {
+            d.remove::<HoverPreviewState>(state_id);
+        });
+        return;
+    }
+
+    let now = ui.input(|i| i.time);
+    if resp.hovered() {
+        let ready = ui.ctx().data_mut(|d| {
+            let st = d.get_temp_mut_or_insert_with(state_id, || HoverPreviewState {
+                memo_id: memo_id.to_string(),
+                since: now,
+            });
+            if st.memo_id != memo_id {
+                st.memo_id = memo_id.to_string();
+                st.since = now;
+            }
+            now - st.since >= DELAY
+        });
+        if ready {
+            let tip_title = if title.trim().is_empty() {
+                "(无标题)"
+            } else {
+                title
+            };
+            let tip_body = content.trim();
+            let tip_id = Id::new(("warn_task_hover_tip", memo_id));
+            egui::show_tooltip_at_pointer(ui.ctx(), tip_id, |ui| {
+                ui.set_max_width(320.0);
+                ui.label(
+                    RichText::new(tip_title)
+                        .size(13.0)
+                        .strong()
+                        .color(theme::text()),
+                );
+                if !tip_body.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(tip_body)
+                            .size(12.0)
+                            .color(theme::text_muted()),
+                    );
+                }
+            });
+        }
+    } else {
+        ui.ctx().data_mut(|d| {
+            if d.get_temp::<HoverPreviewState>(state_id)
+                .map(|st| st.memo_id == memo_id)
+                .unwrap_or(false)
+            {
+                d.remove::<HoverPreviewState>(state_id);
+            }
+        });
+    }
+}
+
+/// 圆形完成勾选：未完成描边圆；已完成绿底白勾。
+fn task_done_checkbox(ui: &mut egui::Ui, done: bool, ring: Color32) -> egui::Response {
+    let size = Vec2::splat(22.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let c = rect.center();
+    let r = 9.0;
+    let painter = ui.painter();
+    if done {
+        painter.circle_filled(c, r, theme::success());
+        let stroke = Stroke::new(2.0, Color32::WHITE);
+        painter.line_segment(
+            [
+                egui::pos2(c.x - 4.0, c.y + 0.5),
+                egui::pos2(c.x - 1.0, c.y + 3.5),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(c.x - 1.0, c.y + 3.5),
+                egui::pos2(c.x + 4.5, c.y - 3.0),
+            ],
+            stroke,
+        );
+    } else {
+        painter.circle_stroke(c, r, Stroke::new(1.6, ring));
+    }
+    resp.on_hover_text(if done {
+        "点击取消完成"
+    } else {
+        "点击标记完成"
+    })
+}
+
+fn paint_note_glyph(ui: &mut egui::Ui, color: Color32) {
+    let size = Vec2::splat(12.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter();
+    let r = egui::Rect::from_center_size(rect.center(), Vec2::new(9.0, 10.0));
+    p.rect_stroke(r, Rounding::same(1.5), Stroke::new(1.2, color));
+    p.line_segment(
+        [
+            egui::pos2(r.left() + 2.0, r.top() + 3.0),
+            egui::pos2(r.right() - 2.0, r.top() + 3.0),
+        ],
+        Stroke::new(1.0, color),
+    );
+    p.line_segment(
+        [
+            egui::pos2(r.left() + 2.0, r.top() + 5.5),
+            egui::pos2(r.right() - 2.5, r.top() + 5.5),
+        ],
+        Stroke::new(1.0, color),
+    );
+}
+
+fn task_status_pill(ui: &mut egui::Ui, m: &MemoView, accent: TaskAccent) {
+    let (text, bg, fg, border) = if m.done {
+        (
+            "已完成".to_string(),
+            theme::panel(),
+            theme::text_muted(),
+            theme::border(),
+        )
+    } else {
+        match accent {
+            TaskAccent::Overdue => {
+                let days = overdue_days(&m.due_date, &m.end_date, m.done)
+                    .unwrap_or(1)
+                    .max(1);
+                (
+                    format!("已过期 {days} 天"),
+                    theme::warn_overdue_bg(),
+                    theme::warn_overdue_fg(),
+                    theme::warn_overdue_border(),
+                )
+            }
+            TaskAccent::DueToday => {
+                let badge = if let Some(hm) = due_time_hm(&m.due_date) {
+                    format!("今天 {hm} 截止")
+                } else {
+                    "今天到期".into()
+                };
+                (
+                    badge,
+                    theme::warn_due_today_bg(),
+                    theme::warn_due_today_fg(),
+                    theme::warn_due_today_border(),
+                )
+            }
+            TaskAccent::Normal => {
+                if is_span(m) {
+                    if let (Some(a), Some(b)) = (
+                        due_date_part(&m.due_date),
+                        event_end_date(&m.due_date, &m.end_date),
+                    ) {
+                        (
+                            format!("{} - {}", format_mmdd(a), format_mmdd(b)),
+                            theme::accent_soft(),
+                            theme::shell_accent(),
+                            theme::border(),
+                        )
+                    } else {
+                        (
+                            "进行中".into(),
+                            theme::panel(),
+                            theme::text_muted(),
+                            theme::border(),
+                        )
+                    }
+                } else {
+                    (
+                        "进行中".into(),
+                        theme::panel(),
+                        theme::text_muted(),
+                        theme::border(),
+                    )
+                }
+            }
+        }
+    };
+    status_badge(ui, &text, bg, fg, border);
 }
 
 fn status_badge(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32, border: Color32) {
     Frame::none()
         .fill(bg)
         .stroke(Stroke::new(1.0, border))
-        .rounding(Rounding::same(4.0))
-        .inner_margin(Margin::symmetric(6.0, 2.0))
+        .rounding(Rounding::same(99.0))
+        .inner_margin(Margin::symmetric(8.0, 3.0))
         .show(ui, |ui| {
             ui.label(RichText::new(text).size(11.0).strong().color(fg));
         });
@@ -1404,6 +1668,8 @@ fn paint_tool_trash(painter: &egui::Painter, rect: egui::Rect) {
 }
 
 /// 侧栏任务卡左侧分类图标（可点击切换完成）；用 layout_galley 避免 ☐ 等符号在 Windows 上落成空方框。
+/// 任务列表卡已改用圆形勾选，本函数暂留作他用。
+#[allow(dead_code)]
 fn warn_card_category_icon(ui: &mut egui::Ui, cat: MemoCategory, done: bool) -> egui::Response {
     let size = Vec2::splat(20.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -1577,7 +1843,11 @@ pub fn show_event_detail(
                 })
                 .size(20.0)
                 .strong()
-                .color(theme::text());
+                .color(if m.done {
+                    theme::text_muted()
+                } else {
+                    theme::text()
+                });
                 if m.done {
                     heading = heading.strikethrough();
                 }
