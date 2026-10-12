@@ -7,14 +7,12 @@ use chrono::{Datelike, NaiveDate};
 use eframe::egui;
 use lunar_rust::lunar::LunarRefHelper;
 use lunar_rust::solar::{self, SolarRefHelper};
-use memo_core::license::LicenseStatus;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-/// 社区版宜/忌各最多条数；商业版取过滤后上限。
-pub const COMMUNITY_YI_JI_LIMIT: usize = 2;
-pub const LICENSED_YI_JI_LIMIT: usize = 6;
+/// 上班宜忌过滤后各最多条数（全员通用）。
+pub const YI_JI_LIMIT: usize = 6;
 
 #[derive(Debug, Clone)]
 pub struct DayAlmanac {
@@ -49,21 +47,13 @@ impl DayAlmanac {
         s
     }
 
-    /// 按授权截断后的宜/忌文案；`show_upsell` 表示社区版被截断、可提示升级。
-    pub fn display_yi_ji_text(&self, licensed: bool, max_chars: usize) -> (String, String, bool) {
-        let limit = if licensed {
-            LICENSED_YI_JI_LIMIT
-        } else {
-            COMMUNITY_YI_JI_LIMIT
-        };
-        let yi_view: Vec<_> = self.yi.iter().take(limit).cloned().collect();
-        let ji_view: Vec<_> = self.ji.iter().take(limit).cloned().collect();
-        let show_upsell = !licensed
-            && (self.yi.len() > COMMUNITY_YI_JI_LIMIT || self.ji.len() > COMMUNITY_YI_JI_LIMIT);
+    /// 宜/忌文案（已按上班精简上限截断）。
+    pub fn display_yi_ji_text(&self, max_chars: usize) -> (String, String) {
+        let yi_view: Vec<_> = self.yi.iter().take(YI_JI_LIMIT).cloned().collect();
+        let ji_view: Vec<_> = self.ji.iter().take(YI_JI_LIMIT).cloned().collect();
         (
             join_or_placeholder(&yi_view, max_chars),
             join_or_placeholder(&ji_view, max_chars),
-            show_upsell,
         )
     }
 }
@@ -87,20 +77,6 @@ fn full_cache() -> &'static Mutex<HashMap<NaiveDate, DayAlmanac>> {
 fn pending() -> &'static Mutex<HashSet<NaiveDate>> {
     static C: OnceLock<Mutex<HashSet<NaiveDate>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// 当前是否为有效商业授权（本地 `license.json`）。
-pub fn is_licensed() -> bool {
-    let Ok(settings) = memo_core::config::settings_path() else {
-        return false;
-    };
-    let Some(dir) = settings.parent() else {
-        return false;
-    };
-    matches!(
-        memo_core::license::load_status(dir),
-        LicenseStatus::Licensed { .. }
-    )
 }
 
 /// 月历格用：仅农历日/节气（微秒级），带缓存。
@@ -216,8 +192,8 @@ fn compute_full(d: NaiveDate) -> DayAlmanac {
 /// 都市上班宜忌：保留商务/通勤/工地/出差/剃头等，丢掉嫁娶安葬等传统项。
 fn urban_work_yi_ji(yi: &[String], ji: &[String]) -> (Vec<String>, Vec<String>) {
     (
-        filter_rank_take(yi, LICENSED_YI_JI_LIMIT),
-        filter_rank_take(ji, LICENSED_YI_JI_LIMIT),
+        filter_rank_take(yi, YI_JI_LIMIT),
+        filter_rank_take(ji, YI_JI_LIMIT),
     )
 }
 

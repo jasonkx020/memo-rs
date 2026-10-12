@@ -35,8 +35,6 @@ pub struct CalendarUi {
     pub filter: DayFilter,
     /// `+N 更多` 弹层所在日
     pub more_popup_day: Option<NaiveDate>,
-    /// 点「查看过期任务」后侧栏优先展示过期分组
-    pub focus_overdue: bool,
 }
 
 impl Default for CalendarUi {
@@ -48,9 +46,14 @@ impl Default for CalendarUi {
             selected: t,
             filter: DayFilter::All,
             more_popup_day: None,
-            focus_overdue: false,
         }
     }
+}
+
+fn jump_cal_to(cal: &mut CalendarUi, day: NaiveDate) {
+    cal.year = day.year();
+    cal.month = day.month();
+    cal.selected = day;
 }
 
 fn today() -> NaiveDate {
@@ -384,14 +387,11 @@ fn show_warn_banner(
                             )
                             .clicked()
                     {
-                        cal.focus_overdue = true;
                         if let Some(d) = overdue
                             .first()
                             .and_then(|m| deadline_date(&m.due_date, &m.end_date))
                         {
-                            cal.year = d.year();
-                            cal.month = d.month();
-                            cal.selected = d;
+                            jump_cal_to(cal, d);
                         }
                     }
                 });
@@ -717,7 +717,6 @@ fn select_calendar_day(
     *selected = None;
     *editing = false;
     cal.more_popup_day = None;
-    cal.focus_overdue = false;
 }
 
 fn truncate_title(title: &str, max_chars: usize) -> String {
@@ -864,10 +863,9 @@ pub(crate) fn show_day_side(
     let overdue = collect_overdue(all, q);
     let due_today = collect_due_today(all, q);
     let day_events = events_on(all, cal.selected, q);
-    let other: Vec<_> = day_events
+    let day_list: Vec<_> = day_events
         .iter()
         .copied()
-        .filter(|m| !memo_overdue(m) && !(cal.selected == today() && memo_due_today(m)))
         .filter(|m| match cal.filter {
             DayFilter::Open => !m.done,
             DayFilter::All => true,
@@ -877,7 +875,7 @@ pub(crate) fn show_day_side(
 
     // 摘要卡
     if !overdue.is_empty() {
-        summary_card(
+        if summary_card(
             ui,
             theme::warn_overdue_bg(),
             theme::warn_overdue_fg(),
@@ -885,11 +883,19 @@ pub(crate) fn show_day_side(
             "🔥",
             &format!("{} 条任务已过期", overdue.len()),
             "请尽快处理，或延期到新日期",
-        );
+            "查看当天",
+        ) {
+            if let Some(d) = overdue
+                .first()
+                .and_then(|m| deadline_date(&m.due_date, &m.end_date))
+            {
+                jump_cal_to(cal, d);
+            }
+        }
         ui.add_space(6.0);
     }
     if !due_today.is_empty() {
-        summary_card(
+        if summary_card(
             ui,
             theme::warn_due_today_bg(),
             theme::warn_due_today_fg(),
@@ -897,10 +903,16 @@ pub(crate) fn show_day_side(
             "⏰",
             &format!("{} 条任务今天到期", due_today.len()),
             "记得在今日内完成",
-        );
+            "查看当天",
+        ) {
+            jump_cal_to(cal, today());
+        }
         ui.add_space(6.0);
     }
 
+    let lunar_line = huangli::cached_full(cal.selected)
+        .map(|al| al.lunar_line())
+        .unwrap_or_else(|| huangli::lunar_summary_line(cal.selected));
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!(
@@ -912,8 +924,13 @@ pub(crate) fn show_day_side(
             .strong()
             .color(theme::text()),
         );
+        ui.label(
+            RichText::new(format!("· {lunar_line}"))
+                .size(11.5)
+                .color(theme::text_muted()),
+        );
     });
-    ui.add_space(6.0);
+    ui.add_space(2.0);
     show_huangli_for_day(ui, cal.selected);
     ui.add_space(6.0);
 
@@ -923,81 +940,33 @@ pub(crate) fn show_day_side(
         .auto_shrink([false, false])
         .max_height(list_h)
         .show(ui, |ui| {
-            if cal.focus_overdue || !overdue.is_empty() {
-                section_header(
-                    ui,
-                    "⚠ 已过期",
-                    overdue.len(),
-                    theme::warn_overdue_fg(),
-                    theme::warn_overdue_bg(),
-                );
-                for m in &overdue {
-                    warn_task_card(
-                        ui,
-                        svc,
-                        m,
-                        TaskAccent::Overdue,
-                        selected,
-                        editing,
-                        picked,
-                        pick_edit,
-                        pick_delete,
-                        open_sticky,
-                        tx,
-                    );
-                }
-                ui.add_space(8.0);
-                if cal.focus_overdue {
-                    cal.focus_overdue = false;
-                }
-            }
-
-            if !due_today.is_empty() {
-                section_header(
-                    ui,
-                    "⏰ 今天到期",
-                    due_today.len(),
-                    theme::warn_due_today_fg(),
-                    theme::warn_due_today_bg(),
-                );
-                for m in &due_today {
-                    warn_task_card(
-                        ui,
-                        svc,
-                        m,
-                        TaskAccent::DueToday,
-                        selected,
-                        editing,
-                        picked,
-                        pick_edit,
-                        pick_delete,
-                        open_sticky,
-                        tx,
-                    );
-                }
-                ui.add_space(8.0);
-            }
-
             section_header(
                 ui,
-                "其他任务",
-                other.len(),
+                "当天任务",
+                day_list.len(),
                 theme::text_muted(),
                 theme::panel(),
             );
-            if other.is_empty() {
+            if day_list.is_empty() {
                 ui.label(
-                    RichText::new("这天没有其它安排")
+                    RichText::new("这天没有安排")
                         .size(12.5)
                         .color(theme::text_muted()),
                 );
             } else {
-                for m in &other {
+                for m in &day_list {
+                    let accent = if memo_overdue(m) {
+                        TaskAccent::Overdue
+                    } else if memo_due_today(m) {
+                        TaskAccent::DueToday
+                    } else {
+                        TaskAccent::Normal
+                    };
                     warn_task_card(
                         ui,
                         svc,
                         m,
-                        TaskAccent::Normal,
+                        accent,
                         selected,
                         editing,
                         picked,
@@ -1014,6 +983,7 @@ pub(crate) fn show_day_side(
         });
 }
 
+/// 返回是否点击了右侧跳转。
 fn summary_card(
     ui: &mut egui::Ui,
     bg: Color32,
@@ -1022,39 +992,48 @@ fn summary_card(
     icon: &str,
     title: &str,
     sub: &str,
-) {
-    let full = ui.available_width();
-    let (_, resp) = ui.allocate_exact_size(Vec2::new(full, 52.0), Sense::hover());
-    ui.painter()
-        .rect(resp.rect, Rounding::same(8.0), bg, Stroke::new(1.0, border));
-    let accent = egui::Rect::from_min_max(
-        resp.rect.left_top(),
-        egui::pos2(resp.rect.left() + 4.0, resp.rect.bottom()),
-    );
-    ui.painter()
-        .rect_filled(accent, Rounding::same(2.0), fg);
-    let title_g = theme::layout_galley(
-        ui,
-        &format!("{icon}  {title}"),
-        egui::FontId::proportional(13.0),
-        fg,
-    );
-    let sub_g = theme::layout_galley(
-        ui,
-        sub,
-        egui::FontId::proportional(11.0),
-        theme::text_muted(),
-    );
-    ui.painter().galley(
-        egui::pos2(resp.rect.left() + 14.0, resp.rect.top() + 10.0),
-        title_g,
-        fg,
-    );
-    ui.painter().galley(
-        egui::pos2(resp.rect.left() + 14.0, resp.rect.top() + 30.0),
-        sub_g,
-        theme::text_muted(),
-    );
+    link: &str,
+) -> bool {
+    let mut jumped = false;
+    Frame::none()
+        .fill(bg)
+        .stroke(Stroke::new(1.0, border))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let accent_h = 36.0;
+                let (bar, _) = ui.allocate_exact_size(Vec2::new(4.0, accent_h), Sense::hover());
+                ui.painter().rect_filled(bar, Rounding::same(2.0), fg);
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(format!("{icon}  {title}"))
+                            .size(13.0)
+                            .strong()
+                            .color(fg),
+                    );
+                    ui.label(RichText::new(sub).size(11.0).color(theme::text_muted()));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(link).size(12.0).color(fg),
+                            )
+                            .fill(Color32::WHITE)
+                            .stroke(Stroke::new(1.0, fg))
+                            .rounding(Rounding::same(6.0)),
+                        )
+                        .clicked()
+                    {
+                        jumped = true;
+                    }
+                });
+            });
+        });
+    jumped
 }
 
 fn section_header(ui: &mut egui::Ui, title: &str, n: usize, fg: Color32, badge_bg: Color32) {
@@ -1074,85 +1053,55 @@ fn section_header(ui: &mut egui::Ui, title: &str, n: usize, fg: Color32, badge_b
     ui.add_space(4.0);
 }
 
-/// 选中日黄历：农历即时显示；宜忌后台算完再刷新。
+/// 选中日黄历：宜忌后台算完再刷新（农历已并入日期标题）。
 fn show_huangli_for_day(ui: &mut egui::Ui, day: NaiveDate) {
     if let Some(al) = huangli::cached_full(day) {
-        show_huangli_card(ui, Some(&al), &al.lunar_line());
+        show_huangli_card(ui, Some(&al));
     } else {
-        let line = huangli::lunar_summary_line(day);
-        show_huangli_card(ui, None, &line);
+        show_huangli_card(ui, None);
         huangli::ensure_full_async(day, ui.ctx().clone());
     }
 }
 
-fn show_huangli_card(ui: &mut egui::Ui, al: Option<&huangli::DayAlmanac>, lunar_line: &str) {
-    let licensed = huangli::is_licensed();
-    Frame::none()
-        .fill(theme::card())
-        .stroke(Stroke::new(1.0, theme::border()))
-        .rounding(Rounding::same(8.0))
-        .inner_margin(Margin::symmetric(10.0, 8.0))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(lunar_line)
-                        .size(12.0)
-                        .color(theme::text()),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new("上班宜忌")
-                            .size(11.0)
-                            .color(theme::text_muted()),
-                    );
-                });
-            });
-            ui.add_space(4.0);
-            match al {
-                Some(al) => {
-                    let (yi, ji, show_upsell) = al.display_yi_ji_text(licensed, 48);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new("宜")
-                                .size(12.0)
-                                .strong()
-                                .color(theme::success()),
-                        );
-                        ui.label(RichText::new(yi).size(12.0).color(theme::success()));
-                    });
-                    ui.add_space(2.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new("忌")
-                                .size(12.0)
-                                .strong()
-                                .color(theme::danger()),
-                        );
-                        ui.label(
-                            RichText::new(ji)
-                                .size(12.0)
-                                .color(theme::danger().linear_multiply(0.85)),
-                        );
-                    });
-                    if show_upsell {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new("商业版可看完整上班宜忌")
-                                .size(10.5)
-                                .color(theme::text_muted()),
-                        );
-                    }
-                }
-                None => {
-                    ui.label(
-                        RichText::new("上班宜忌加载中…")
-                            .size(12.0)
-                            .color(theme::text_muted()),
-                    );
-                }
-            }
-        });
+fn show_huangli_card(ui: &mut egui::Ui, al: Option<&huangli::DayAlmanac>) {
+    const H: f32 = 36.0;
+    let full_w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(full_w, H), Sense::hover());
+    let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min));
+    child.set_clip_rect(rect);
+    child.set_max_height(H);
+    match al {
+        Some(al) => {
+            let (yi, ji) = al.display_yi_ji_text(40);
+            child.label(
+                RichText::new(format!("宜 {yi}"))
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
+            child.label(
+                RichText::new(format!("忌 {ji}"))
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
+        }
+        None => {
+            child.label(
+                RichText::new("宜 …")
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
+            child.label(
+                RichText::new("忌 …")
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
+        }
+    }
+    let y = rect.bottom() - 0.5;
+    ui.painter().line_segment(
+        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+        Stroke::new(1.0, theme::border()),
+    );
 }
 
 #[derive(Clone, Copy)]

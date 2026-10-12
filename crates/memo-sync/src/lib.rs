@@ -636,7 +636,7 @@ impl SyncEngine {
             tokio::select! {
                 _ = self.stop.notified() => break,
                 _ = interval.tick() => {
-                    self.refresh_connected_slaves();
+                    self.refresh_connected_peers();
                     self.prune_discovered();
                     self.drop_stale_tcp();
                     for addr in self.dial_targets() {
@@ -665,17 +665,17 @@ impl SyncEngine {
         }
     }
 
-    /// 已 TCP 连接的从机不会 UDP 广播：刷新 last_seen，避免被 prune/drop。
-    fn refresh_connected_slaves(&self) {
+    fn is_static_peer_addr(&self, addr: &str) -> bool {
+        self.peers_cfg.iter().any(|a| a == addr)
+    }
+
+    /// 已 TCP 握手的对端：刷新 last_seen，避免仅因无 UDP 被 prune/drop。
+    fn refresh_connected_peers(&self) {
         let peers = self.peers.read();
         let mut disco = self.discovered.write();
         for p in peers.values() {
             let rid = p.remote_id.read().clone();
             if rid.is_empty() {
-                continue;
-            }
-            let role = *p.remote_role.read();
-            if role.is_master() {
                 continue;
             }
             if let Some(e) = disco.get_mut(&rid) {
@@ -689,6 +689,10 @@ impl SyncEngine {
         let disco = self.discovered.read();
         let mut to_cancel = Vec::new();
         for (key, peer) in self.peers.read().iter() {
+            // 手填对端：TCP 保活，不依赖 UDP 心跳
+            if self.is_static_peer_addr(key) {
+                continue;
+            }
             let rid = peer.remote_id.read().clone();
             if rid.is_empty() {
                 continue;
@@ -826,7 +830,8 @@ impl SyncEngine {
             })
             .collect();
         self.discovered.write().retain(|id, e| {
-            if !e.role.is_master() && connected.contains(id) {
+            // 任意已握手 TCP 对端：保留发现条目（含手填、从机）
+            if connected.contains(id) {
                 return true;
             }
             now.duration_since(e.last_seen) <= DISCOVER_TTL
@@ -1060,8 +1065,12 @@ impl SyncEngine {
             return;
         }
 
-        // 主机不应主动维持「拨向从机」的连接（从机应拨主机）
-        if peer.active && self.node_role.is_master() && !remote_role.is_master() {
+        // 主机不应主动维持「拨向从机」的连接（从机应拨主机）；手填对端例外
+        if peer.active
+            && self.node_role.is_master()
+            && !remote_role.is_master()
+            && !self.is_static_peer_addr(conn_key)
+        {
             peer.cancel.notify_waiters();
             self.peers.write().remove(conn_key);
             return;
@@ -1811,23 +1820,43 @@ impl SyncEngine {
             let mut sync_ready = false;
             let mut role = NodeRole::Master;
             if let Some(p) = self.peers.read().get(a) {
-                sync_ready = true;
                 let rid = p.remote_id.read().clone();
+                // 仅握手完成后算已连接，避免拨号瞬间闪「已连接」
                 if !rid.is_empty() {
+                    sync_ready = true;
                     node_id = rid;
+                    role = *p.remote_role.read();
                 }
-                role = *p.remote_role.read();
             }
             if by_id.contains_key(&node_id) {
+                // 已在发现表：若手填地址已 TCP 握手，状态至少为在线
+                if sync_ready {
+                    if let Some(p) = by_id.get_mut(&node_id) {
+                        p.connected = true;
+                        p.sync_ready = true;
+                        if p.status == PeerStatus::Undiscovered || p.status == PeerStatus::Offline
+                        {
+                            p.status = PeerStatus::Online;
+                        }
+                        if p.addr.is_empty() {
+                            p.addr = a.clone();
+                        }
+                    }
+                }
                 continue;
             }
+            let status = if sync_ready {
+                PeerStatus::Online
+            } else {
+                PeerStatus::Offline
+            };
             by_id.insert(
                 node_id.clone(),
                 DiscoveredPeer {
                     node_id,
                     addr: a.clone(),
-                    last_seen_secs: u64::MAX / 4,
-                    status: PeerStatus::Undiscovered,
+                    last_seen_secs: if sync_ready { 0 } else { u64::MAX / 4 },
+                    status,
                     sync_ready,
                     disk_free: None,
                     disk_total: None,
