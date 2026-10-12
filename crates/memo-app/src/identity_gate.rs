@@ -1,6 +1,7 @@
 ﻿//! 启动身份门：选择/生成/导入密钥对（macOS 风格设置助手）。
 
 use crate::app_icon;
+use crate::autostart;
 use crate::save_dialog;
 use crate::theme;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Vec2};
@@ -612,7 +613,7 @@ fn default_memokey_name(st: &IdentityGateState) -> String {
 
 fn draw_select(
     ui: &mut egui::Ui,
-    cfg: &Config,
+    cfg: &mut Config,
     st: &mut IdentityGateState,
     action: &mut GateAction,
 ) {
@@ -853,6 +854,32 @@ fn draw_select(
                             }
                         }
                     }
+                }
+                ui.add_space(10.0);
+                ui.add_enabled_ui(autostart::supported(), |ui| {
+                    let tip = if autostart::supported() {
+                        "与设置中的「开机自启动」同步；开机后托盘启动，仍需解锁身份"
+                    } else {
+                        "当前系统不支持写入开机启动项"
+                    };
+                    if ui
+                        .checkbox(&mut cfg.start_on_boot, "开机时启动 Memo")
+                        .on_hover_text(tip)
+                        .changed()
+                    {
+                        let want = cfg.start_on_boot;
+                        match autostart::apply_and_persist(cfg, want) {
+                            Ok(msg) => st.status = msg.into(),
+                            Err(e) => {
+                                cfg.start_on_boot = !want;
+                                st.status = format!("开机自启动设置失败: {e}");
+                            }
+                        }
+                    }
+                });
+                if !st.status.is_empty() {
+                    ui.add_space(6.0);
+                    mac_status(ui, &st.status, st.busy);
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {

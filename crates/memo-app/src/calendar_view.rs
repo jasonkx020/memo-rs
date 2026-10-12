@@ -249,13 +249,6 @@ pub(crate) fn show_month(
     open_new: &mut bool,
     picked: &mut Option<String>,
 ) {
-    let overdue = collect_overdue(all, q);
-    let due_today = collect_due_today(all, q);
-    if !overdue.is_empty() || !due_today.is_empty() {
-        show_warn_banner(ui, cal, &overdue, due_today.len());
-        ui.add_space(6.0);
-    }
-
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{}年{}月", cal.year, cal.month))
@@ -343,60 +336,6 @@ pub(crate) fn show_month(
             ui.add_space(row_gap);
         }
     }
-}
-
-fn show_warn_banner(
-    ui: &mut egui::Ui,
-    cal: &mut CalendarUi,
-    overdue: &[&MemoView],
-    due_today_n: usize,
-) {
-    let n_od = overdue.len();
-    let mut parts = Vec::new();
-    if n_od > 0 {
-        parts.push(format!("{n_od} 条任务已过期"));
-    }
-    if due_today_n > 0 {
-        parts.push(format!("{due_today_n} 条今天到期"));
-    }
-    let text = format!("⚠ 有 {}", parts.join("，"));
-    Frame::none()
-        .fill(theme::warn_overdue_bg())
-        .stroke(Stroke::new(1.0, theme::warn_overdue_border()))
-        .rounding(Rounding::same(8.0))
-        .inner_margin(Margin::symmetric(10.0, 8.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(text)
-                        .size(12.5)
-                        .color(theme::warn_overdue_fg()),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if n_od > 0
-                        && ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("查看过期任务")
-                                        .size(12.0)
-                                        .color(theme::warn_overdue_fg()),
-                                )
-                                .fill(Color32::WHITE)
-                                .stroke(Stroke::new(1.0, theme::warn_overdue_fg()))
-                                .rounding(Rounding::same(6.0)),
-                            )
-                            .clicked()
-                    {
-                        if let Some(d) = overdue
-                            .first()
-                            .and_then(|m| deadline_date(&m.due_date, &m.end_date))
-                        {
-                            jump_cal_to(cal, d);
-                        }
-                    }
-                });
-            });
-        });
 }
 
 fn shift_month(cal: &mut CalendarUi, delta: i32) {
@@ -1163,7 +1102,7 @@ fn warn_task_card(
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
                 if task_done_checkbox(ui, m.done, ring_c).clicked() {
-                    toggle_done(svc, m, tx);
+                    toggle_done(svc, m, tx, selected, editing);
                     consumed = true;
                 }
                 ui.add_space(8.0);
@@ -1910,7 +1849,7 @@ pub fn show_event_detail(
                         )
                         .clicked()
                     {
-                        toggle_done(svc, m, tx);
+                        toggle_done(svc, m, tx, selected, editing);
                     }
                 } else if ui
                     .add(
@@ -1926,7 +1865,7 @@ pub fn show_event_detail(
                     )
                     .clicked()
                 {
-                    toggle_done(svc, m, tx);
+                    toggle_done(svc, m, tx, selected, editing);
                 }
             });
             ui.add_space(16.0);
@@ -2022,10 +1961,23 @@ fn detail_attr_pill(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32) {
         });
 }
 
-fn toggle_done(svc: &Arc<MemoService>, m: &MemoView, tx: &Sender<BgMsg>) {
+fn toggle_done(
+    svc: &Arc<MemoService>,
+    m: &MemoView,
+    tx: &Sender<BgMsg>,
+    selected: &mut Option<String>,
+    editing: &mut bool,
+) {
+    let next = !m.done;
+    // 标记完成：退出详情回到列表（撤销完成仍留在详情）
+    if next {
+        if selected.as_deref() == Some(m.id.as_str()) {
+            *selected = None;
+        }
+        *editing = false;
+    }
     let svc = svc.clone();
     let id = m.id.clone();
-    let next = !m.done;
     let tx = tx.clone();
     std::thread::spawn(move || match svc.set_done(&id, next) {
         Ok(()) => {
@@ -2077,7 +2029,7 @@ fn item_menu(
     }
     let done_l = if m.done { "取消完成" } else { "标记完成" };
     if ui.button(done_l).clicked() {
-        toggle_done(svc, m, tx);
+        toggle_done(svc, m, tx, selected, editing);
         ui.close_menu();
     }
     if ui

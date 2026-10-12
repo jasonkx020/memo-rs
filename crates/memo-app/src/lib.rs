@@ -184,6 +184,8 @@ pub struct MemoApp {
     show_help: bool,
     show_about: bool,
     pending_switch_person: bool,
+    /// 私密页锁定：已切任务页，下一帧再真正锁定
+    pending_lock_after_task: bool,
     shell: ShellUi,
     memo_doc: doc_editor::Doc,
     edit_form: MemoFormState,
@@ -201,6 +203,8 @@ pub struct MemoApp {
     /// 开机 `--tray`：首帧隐藏主窗
     start_hidden: bool,
     last_sticky_session_save: Instant,
+    /// 下一帧强制落盘便签会话（新建便签等）
+    sticky_session_dirty: bool,
     /// 当前会话登录密码（锁定/切换身份时清空）
     session_login_password: Option<String>,
     /// 设置中改密草稿
@@ -227,6 +231,7 @@ impl MemoApp {
             show_help: false,
             show_about: false,
             pending_switch_person: false,
+            pending_lock_after_task: false,
             shell: ShellUi::default(),
             memo_doc: doc_editor::Doc::empty(),
             edit_form: MemoFormState::default(),
@@ -239,6 +244,7 @@ impl MemoApp {
             main_hidden: start_hidden,
             start_hidden,
             last_sticky_session_save: Instant::now() - Duration::from_secs(60),
+            sticky_session_dirty: false,
             session_login_password: None,
             change_pw_old: String::new(),
             change_pw_new: String::new(),
@@ -269,13 +275,12 @@ impl MemoApp {
         }
     }
 
+    /// 解锁后按本机会话自动打开便签，并尽量恢复历史位置。
     fn restore_stickies_from_session(&mut self, rt: &AppRuntime) {
-        let Some(session) = sticky_note::load_session(Path::new(&self.cfg.data_dir)) else {
+        let fp = rt.svc.session_fp().to_string();
+        let Some(session) = sticky_note::load_session(Path::new(&self.cfg.data_dir), &fp) else {
             return;
         };
-        if session.person_fp != rt.svc.session_fp() {
-            return;
-        }
         let list = rt.svc.list();
         for g in session.notes {
             if self.stickies.contains_key(&g.id) {
@@ -289,7 +294,8 @@ impl MemoApp {
                 sticky_note::StickyNote::from_memo_geom(
                     m,
                     Some([g.x, g.y]),
-                    Some([g.w, g.h]),
+                    Some([g.w.max(200.0), g.h.max(120.0)]),
+                    true,
                 ),
             );
         }
@@ -455,6 +461,9 @@ impl MemoApp {
                     self.change_pw_new.clear();
                     self.change_pw_new2.clear();
                     self.restore_stickies_from_session(&rt);
+                    // 每天首次解锁：按手标重算经期预测（排卵/易孕/下次）
+                    let list = rt.svc.list();
+                    let _ = period_view::ensure_daily_predict_recalc(&rt.svc, &list);
                     self.screen = Self::make_main(rt, &cfg);
                 }
                 BgMsg::UnlockResult(Err(e)) => {
@@ -708,15 +717,22 @@ impl eframe::App for MemoApp {
         }
         if tray_quit {
             self.quit_requested = true;
+            self.main_hidden = false;
         }
 
-        // 关主窗 → Win32 隐藏到托盘（真正退出仅托盘「退出」）
+        // 关主窗 → Win32 隐藏到托盘；最小化交给系统（任务栏）
         // 切勿 Visible(false)：Windows 上会导致无法再显示（egui#5229）
-        if !self.quit_requested
-            && !self.main_hidden
-            && ctx.input(|i| i.viewport().close_requested())
-        {
+        // 注意：托盘退出会 PostMessage(WM_CLOSE)，须先认 quit_requested，否则会被当成藏托盘
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        // 已在托盘时：拦截关闭，否则任务栏/系统对隐藏窗的 WM_CLOSE 会把进程干掉
+        if !self.quit_requested && self.main_hidden && close_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        let close_to_tray = !self.quit_requested && !self.main_hidden && close_requested;
+        if close_to_tray {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // 藏托盘前落盘便签位置，便于下次解锁按原位打开
+            self.save_sticky_session_now();
             tray::hide_main_window();
             self.main_hidden = true;
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -735,6 +751,13 @@ impl eframe::App for MemoApp {
             self.close_all_sticky_viewports(ctx);
             self.stickies.clear();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ctx.request_repaint();
+        }
+
+        // 上一帧已从私密切到任务：本帧执行锁定
+        if self.pending_lock_after_task {
+            self.pending_lock_after_task = false;
+            self.pending_switch_person = true;
         }
 
         if self.pending_switch_person {
@@ -758,9 +781,13 @@ impl eframe::App for MemoApp {
             gate.skip_auto_unlock = true;
             self.screen = Screen::IdentityGate(gate);
             self.pending_switch_person = false;
+            self.pending_lock_after_task = false;
         }
 
-        if let Screen::Main { .. } = &self.screen {
+        if let Screen::Main {
+            selected, editing, ..
+        } = &mut self.screen
+        {
             let any_input = ctx.input(|i| {
                 i.pointer.any_pressed()
                     || i.events.iter().any(|e| {
@@ -777,7 +804,12 @@ impl eframe::App for MemoApp {
             }
             if let Some(after) = auto_lock_after(&self.cfg) {
                 if self.last_input_at.elapsed() >= after {
-                    self.pending_switch_person = true;
+                    if shell::leave_private_for_lock(&mut self.shell, selected, editing) {
+                        self.pending_lock_after_task = true;
+                        ctx.request_repaint();
+                    } else {
+                        self.pending_switch_person = true;
+                    }
                 }
             }
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -892,8 +924,11 @@ impl eframe::App for MemoApp {
 
                 if self.last_remind_scan.elapsed() >= Duration::from_secs(30) {
                     self.last_remind_scan = Instant::now();
+                    let list = rt.svc.list();
+                    // 长期开机跨日：自动重算经期预测
+                    let _ = period_view::ensure_daily_predict_recalc(&rt.svc, &list);
                     let now = chrono::Local::now().naive_local();
-                    for m in rt.svc.list() {
+                    for m in list {
                         if m.done || m.due_date.trim().is_empty() {
                             continue;
                         }
@@ -1062,8 +1097,13 @@ impl eframe::App for MemoApp {
                     } else if let Some(m) = list.iter().find(|m| m.id == id) {
                         self.stickies
                             .insert(id, sticky_note::StickyNote::from_memo(m));
+                        self.sticky_session_dirty = true;
                         *status_line = "已生成桌面便签".into();
                     }
+                }
+                if shell_action.defer_lock_after_task {
+                    self.pending_lock_after_task = true;
+                    ctx.request_repaint();
                 }
                 if shell_action.switch {
                     self.pending_switch_person = true;
@@ -1665,33 +1705,27 @@ impl eframe::App for MemoApp {
                                                         &mut settings_draft.start_on_boot,
                                                         "开机时启动 Memo",
                                                     )
+                                                    .on_hover_text(
+                                                        "与登录页勾选同步；开机后托盘启动，仍需解锁身份",
+                                                    )
                                                     .changed()
                                                 {
-                                                    self.cfg.start_on_boot =
-                                                        settings_draft.start_on_boot;
-                                                    let mut persist = self.cfg.clone();
-                                                    persist.start_on_boot =
-                                                        settings_draft.start_on_boot;
-                                                    let _ = config::save_settings(&persist);
-                                                    match autostart::apply(
-                                                        settings_draft.start_on_boot,
+                                                    let want = settings_draft.start_on_boot;
+                                                    match autostart::apply_and_persist(
+                                                        &mut self.cfg,
+                                                        want,
                                                     ) {
-                                                        Ok(()) => {
-                                                            *status_line = if settings_draft
-                                                                .start_on_boot
-                                                            {
-                                                                "已开启开机自启动".into()
-                                                            } else {
-                                                                "已关闭开机自启动".into()
-                                                            };
+                                                        Ok(msg) => {
+                                                            settings_draft.start_on_boot =
+                                                                self.cfg.start_on_boot;
+                                                            *status_line = msg.into();
                                                         }
                                                         Err(e) => {
-                                                            *status_line =
-                                                                format!("开机自启动设置失败: {e}");
-                                                            settings_draft.start_on_boot =
-                                                                !settings_draft.start_on_boot;
-                                                            self.cfg.start_on_boot =
-                                                                settings_draft.start_on_boot;
+                                                            settings_draft.start_on_boot = !want;
+                                                            self.cfg.start_on_boot = !want;
+                                                            *status_line = format!(
+                                                                "开机自启动设置失败: {e}"
+                                                            );
                                                         }
                                                     }
                                                     ctx.request_repaint();
@@ -2166,10 +2200,14 @@ impl eframe::App for MemoApp {
                 sticky_note::force_hide_viewport(ctx, &sid);
                 self.stickies.remove(&sid);
             }
-            if self.last_sticky_session_save.elapsed() >= Duration::from_secs(5) {
+            // 位置变动较频繁：约 1 秒落盘一次本机会话
+            if self.sticky_session_dirty
+                || self.last_sticky_session_save.elapsed() >= Duration::from_secs(1)
+            {
                 need_session_save = true;
             }
             if need_session_save {
+                self.sticky_session_dirty = false;
                 self.save_sticky_session_now();
             }
             if self.main_hidden

@@ -29,6 +29,8 @@ pub struct GenderPrivateUi {
     pub tab: HubTab,
     /// 列表预警：「查看过期任务」时滚到过期分组。
     pub focus_overdue: bool,
+    /// 待闭合的经期开始日（右键「经期开始」后等待「经期结束」）。
+    pub period_range_start: Option<String>,
 }
 
 impl Default for GenderPrivateUi {
@@ -44,6 +46,7 @@ impl Default for GenderPrivateUi {
             care_dismissed: false,
             tab: HubTab::Period,
             focus_overdue: false,
+            period_range_start: None,
         }
     }
 }
@@ -250,6 +253,88 @@ fn save_health(svc: &Arc<MemoService>, health: &MaleHealthConfig) {
     }
 }
 
+fn persist_mark_checkup(
+    svc: &Arc<MemoService>,
+    health: &mut MaleHealthConfig,
+    ymd: &str,
+    status_line: &mut String,
+    tip: &mut String,
+) {
+    match male_view::ensure_male_person(svc) {
+        Ok(pid) => {
+            health.mark_checkup_day(ymd);
+            match svc.set_male_health(&pid, health.clone()) {
+                Ok(()) => {
+                    *status_line = if health.checkup_repeat && !health.next_checkup.is_empty() {
+                        format!(
+                            "已标体检 {ymd}；每 {} 个月，下次 {}",
+                            health.checkup_interval_months, health.next_checkup
+                        )
+                    } else {
+                        format!("已标体检 {ymd}")
+                    };
+                    tip.clear();
+                }
+                Err(e) => *status_line = format!("保存失败: {e}"),
+            }
+        }
+        Err(e) => *status_line = e,
+    }
+}
+
+fn persist_clear_checkup(
+    svc: &Arc<MemoService>,
+    health: &mut MaleHealthConfig,
+    ymd: &str,
+    status_line: &mut String,
+    tip: &mut String,
+) {
+    match male_view::ensure_male_person(svc) {
+        Ok(pid) => {
+            health.clear_checkup_day(ymd);
+            match svc.set_male_health(&pid, health.clone()) {
+                Ok(()) => {
+                    *status_line = format!("已取消体检 {ymd}");
+                    tip.clear();
+                }
+                Err(e) => *status_line = format!("保存失败: {e}"),
+            }
+        }
+        Err(e) => *status_line = e,
+    }
+}
+
+/// 底栏/菜单：重复开关与间隔（月）。
+fn checkup_repeat_controls(ui: &mut egui::Ui, health: &mut MaleHealthConfig, svc: &Arc<MemoService>) {
+    let mut changed = false;
+    if ui
+        .checkbox(&mut health.checkup_repeat, "按周期重复")
+        .on_hover_text("开启后，标注已过/今天的体检日时自动推算下次")
+        .changed()
+    {
+        changed = true;
+    }
+    if health.checkup_repeat {
+        ui.label(RichText::new("每").size(12.0).color(theme::text_muted()));
+        let mut m = health.checkup_interval_months.max(1) as i32;
+        let dv = ui.add(
+            egui::DragValue::new(&mut m)
+                .clamp_range(1..=36)
+                .suffix(" 个月"),
+        );
+        if dv.changed() {
+            health.checkup_interval_months = m as u32;
+            changed = true;
+        }
+    }
+    if changed {
+        if health.checkup_interval_months == 0 {
+            health.checkup_interval_months = 12;
+        }
+        save_health(svc, health);
+    }
+}
+
 /// 绘制日历化性别私密专属页。
 pub fn show(
     ui: &mut egui::Ui,
@@ -266,11 +351,22 @@ pub fn show(
     let marked = period_view::period_marked_days(memos);
     let stats = analyze_period_marks(&marked);
     let mut cycle = svc.current_cycle().unwrap_or_default();
-    let drop_manual = cycle.manual_cycle
-        || cycle.manual_period
-        || cycle.ovulation_preset != memo_core::OvulationPreset::Standard;
+    let before = (
+        cycle.last_start.clone(),
+        cycle.cycle_days,
+        cycle.period_days,
+        cycle.manual_cycle,
+        cycle.manual_period,
+        cycle.ovulation_preset,
+    );
     period_view::apply_effective_cfg(&mut cycle, &stats);
-    if drop_manual {
+    let changed = before.0 != cycle.last_start
+        || before.1 != cycle.cycle_days
+        || before.2 != cycle.period_days
+        || before.3
+        || before.4
+        || before.5 != memo_core::OvulationPreset::Standard;
+    if changed {
         save_cycle(svc, &cycle);
     }
     let next_period = period_view::next_expected(&cycle);
@@ -752,6 +848,8 @@ fn show_hub_settings(
                         health.remind_days = d as u32;
                         save_health(svc, health);
                     }
+                    ui.add_space(8.0);
+                    checkup_repeat_controls(ui, health, svc);
                 });
             }
 
@@ -811,6 +909,7 @@ fn show_period_page(
 
     let bottom_reserve = 140.0;
     let cal_h = (ui.available_height() - bottom_reserve).clamp(160.0, 480.0);
+    let mut dummy_health = MaleHealthConfig::default();
     ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), cal_h),
         egui::Layout::top_down(egui::Align::Min),
@@ -825,6 +924,7 @@ fn show_period_page(
                     "",
                     svc,
                     cycle,
+                    &mut dummy_health,
                     status_line,
                     HubTab::Period,
                     0,
@@ -878,6 +978,9 @@ fn show_checkup_page(
                     parts.push(format!("已过 {} 天", -d));
                 }
             }
+            if health.checkup_repeat {
+                parts.push(format!("每{}个月", health.checkup_interval_months.max(1)));
+            }
             if !parts.is_empty() {
                 ui.label(
                     RichText::new(parts.join(" "))
@@ -893,9 +996,10 @@ fn show_checkup_page(
     });
     ui.add_space(4.0);
 
-    let bottom_reserve = 140.0;
+    let bottom_reserve = 168.0;
     let cal_h = (ui.available_height() - bottom_reserve).clamp(160.0, 480.0);
     let mut dummy_cycle = CycleConfig::default();
+    let remind_days = health.remind_days.max(1);
     ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), cal_h),
         egui::Layout::top_down(egui::Align::Min),
@@ -910,9 +1014,10 @@ fn show_checkup_page(
                     checkup_ymd,
                     svc,
                     &mut dummy_cycle,
+                    health,
                     status_line,
                     HubTab::Checkup,
-                    health.remind_days.max(1),
+                    remind_days,
                 );
             });
         },
@@ -991,6 +1096,7 @@ fn draw_month_grid(
     checkup_ymd: &str,
     svc: &Arc<MemoService>,
     cycle: &mut CycleConfig,
+    health: &mut MaleHealthConfig,
     status_line: &mut String,
     mode: HubTab,
     remind_days: u32,
@@ -1181,17 +1287,112 @@ fn draw_month_grid(
                     st.selected_day = Some(ymd.clone());
                     load_note_draft(st, memos);
                 }
-                if mode == HubTab::Period && resp.secondary_clicked() {
-                    st.selected_day = Some(ymd.clone());
-                    period_view::toggle_period_day(
-                        svc,
-                        &ymd,
-                        memos,
-                        cycle,
-                        status_line,
-                        &mut st.tip,
-                    );
-                    load_note_draft(st, memos);
+                if mode == HubTab::Period {
+                    resp.context_menu(|ui| {
+                        let is_future = NaiveDate::parse_from_str(&ymd, "%Y-%m-%d")
+                            .ok()
+                            .map(|d| d > chrono::Local::now().date_naive())
+                            .unwrap_or(true);
+                        let marked_here = marked.iter().any(|d| d == &ymd);
+                        ui.add_enabled_ui(!is_future, |ui| {
+                            if ui
+                                .button("经期开始")
+                                .on_disabled_hover_text("只能标记今天及以前")
+                                .clicked()
+                            {
+                                st.selected_day = Some(ymd.clone());
+                                period_view::mark_period_start(
+                                    svc,
+                                    &ymd,
+                                    memos,
+                                    cycle,
+                                    status_line,
+                                    &mut st.tip,
+                                    &mut st.period_range_start,
+                                );
+                                load_note_draft(st, memos);
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button("经期结束")
+                                .on_disabled_hover_text("先选开始日，再点结束：自动标整段")
+                                .clicked()
+                            {
+                                st.selected_day = Some(ymd.clone());
+                                period_view::mark_period_end(
+                                    svc,
+                                    &ymd,
+                                    memos,
+                                    cycle,
+                                    status_line,
+                                    &mut st.tip,
+                                    &mut st.period_range_start,
+                                );
+                                load_note_draft(st, memos);
+                                ui.close_menu();
+                            }
+                        });
+                        if marked_here
+                            && ui
+                                .button("清除本段经期")
+                                .on_hover_text("删除该日所在整段，无需逐日取消")
+                                .clicked()
+                        {
+                            st.selected_day = Some(ymd.clone());
+                            period_view::clear_period_episode(
+                                svc,
+                                &ymd,
+                                cycle,
+                                status_line,
+                                &mut st.tip,
+                            );
+                            load_note_draft(st, memos);
+                            ui.close_menu();
+                        }
+                    });
+                } else if mode == HubTab::Checkup {
+                    resp.context_menu(|ui| {
+                        let marked_here = health.is_checkup_day(&ymd);
+                        if ui
+                            .button("标为体检日")
+                            .on_hover_text(if health.checkup_repeat {
+                                format!(
+                                    "已过/今天会记入上次，并按每 {} 个月推下次",
+                                    health.checkup_interval_months.max(1)
+                                )
+                            } else {
+                                "已过→上次体检；今天及未来→下次体检".into()
+                            })
+                            .clicked()
+                        {
+                            st.selected_day = Some(ymd.clone());
+                            persist_mark_checkup(
+                                svc,
+                                health,
+                                &ymd,
+                                status_line,
+                                &mut st.tip,
+                            );
+                            load_note_draft(st, memos);
+                            ui.close_menu();
+                        }
+                        if marked_here
+                            && ui.button("取消体检日").clicked()
+                        {
+                            st.selected_day = Some(ymd.clone());
+                            persist_clear_checkup(
+                                svc,
+                                health,
+                                &ymd,
+                                status_line,
+                                &mut st.tip,
+                            );
+                            load_note_draft(st, memos);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        checkup_repeat_controls(ui, health, svc);
+                    });
                 }
             }
         });
@@ -1237,11 +1438,18 @@ fn show_period_bottom(
                         .color(theme::text()),
                 );
                 ui.label(
-                    RichText::new("左键选日写备注 · 右键标经期（仅今天及以前）")
+                    RichText::new("左键备注 · 右键开始/结束自动标整段（重叠旧段会自动替换）")
                         .size(11.0)
                         .color(theme::text_muted()),
                 );
             });
+            if let Some(start) = &st.period_range_start {
+                ui.label(
+                    RichText::new(format!("待闭合开始日：{start}（再选结束日即可自动标注）"))
+                        .size(11.0)
+                        .color(theme::warn()),
+                );
+            }
 
             if let Some(ymd) = ymd.clone() {
                 ui.add_space(4.0);
@@ -1250,33 +1458,48 @@ fn show_period_bottom(
                         .ok()
                         .map(|d| d > chrono::Local::now().date_naive())
                         .unwrap_or(true);
-                    if is_marked {
-                        if theme::ghost_button(ui, "取消经期").clicked() {
-                            period_view::toggle_period_day(
+                    ui.add_enabled_ui(!is_future, |ui| {
+                        if theme::ghost_button(ui, "经期开始")
+                            .on_disabled_hover_text("只能标记今天及之前")
+                            .clicked()
+                        {
+                            period_view::mark_period_start(
                                 svc,
                                 &ymd,
                                 memos,
                                 cycle,
                                 status_line,
                                 &mut st.tip,
+                                &mut st.period_range_start,
                             );
                         }
-                    } else {
-                        ui.add_enabled_ui(!is_future, |ui| {
-                            let r = theme::ghost_button(ui, "标为经期").on_disabled_hover_text(
-                                "只能标记今天及之前的经期日，未来日请看预测",
+                        if theme::ghost_button(ui, "经期结束")
+                            .on_disabled_hover_text("先开始后结束，自动写入整段")
+                            .clicked()
+                        {
+                            period_view::mark_period_end(
+                                svc,
+                                &ymd,
+                                memos,
+                                cycle,
+                                status_line,
+                                &mut st.tip,
+                                &mut st.period_range_start,
                             );
-                            if r.clicked() {
-                                period_view::toggle_period_day(
-                                    svc,
-                                    &ymd,
-                                    memos,
-                                    cycle,
-                                    status_line,
-                                    &mut st.tip,
-                                );
-                            }
-                        });
+                        }
+                    });
+                    if is_marked
+                        && theme::ghost_button(ui, "清除本段经期")
+                            .on_hover_text("删除该日所在整段")
+                            .clicked()
+                    {
+                        period_view::clear_period_episode(
+                            svc,
+                            &ymd,
+                            cycle,
+                            status_line,
+                            &mut st.tip,
+                        );
                     }
                 });
 
@@ -1329,7 +1552,7 @@ fn show_checkup_bottom(
             .color(theme::text()),
     );
     ui.label(
-        RichText::new("左键选日 · 标为体检（已过/未到自动区分）")
+        RichText::new("左键选日 · 右键/底栏标体检（已过·今天→上次并可选推下次；未来→下次）")
             .size(12.0)
             .color(theme::text_muted()),
     );
@@ -1337,55 +1560,26 @@ fn show_checkup_bottom(
     if let Some(ymd) = ymd.clone() {
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            let is_marked = health.last_checkup == ymd || health.next_checkup == ymd;
+            let is_marked = health.is_checkup_day(&ymd);
             if is_marked {
                 if theme::ghost_button(ui, "取消体检").clicked() {
-                    match male_view::ensure_male_person(svc) {
-                        Ok(pid) => {
-                            if health.last_checkup == ymd {
-                                health.last_checkup.clear();
-                            }
-                            if health.next_checkup == ymd {
-                                health.next_checkup.clear();
-                                health.remind_seen_for.clear();
-                            }
-                            match svc.set_male_health(&pid, health.clone()) {
-                                Ok(()) => {
-                                    *status_line = format!("已取消体检 {ymd}");
-                                    st.tip.clear();
-                                }
-                                Err(e) => *status_line = format!("保存失败: {e}"),
-                            }
-                        }
-                        Err(e) => *status_line = e,
-                    }
+                    persist_clear_checkup(svc, health, &ymd, status_line, &mut st.tip);
                 }
             } else if theme::ghost_button(ui, "标为体检").clicked() {
-                match male_view::ensure_male_person(svc) {
-                    Ok(pid) => {
-                        if ymd.as_str() < today_ymd().as_str() {
-                            health.last_checkup = ymd.clone();
-                        } else {
-                            health.next_checkup = ymd.clone();
-                            health.remind_seen_for.clear();
-                        }
-                        match svc.set_male_health(&pid, health.clone()) {
-                            Ok(()) => {
-                                *status_line = format!("已标体检 {ymd}");
-                                st.tip.clear();
-                            }
-                            Err(e) => *status_line = format!("保存失败: {e}"),
-                        }
-                    }
-                    Err(e) => *status_line = e,
-                }
+                persist_mark_checkup(svc, health, &ymd, status_line, &mut st.tip);
             }
+            ui.add_space(8.0);
+            checkup_repeat_controls(ui, health, svc);
         });
         show_note_editor(ui, svc, st, &ymd, status_line);
     } else {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            checkup_repeat_controls(ui, health, svc);
+        });
         ui.add_space(2.0);
         ui.label(
-            RichText::new("在日历上点选日期")
+            RichText::new("在日历上点选或右键标注体检日")
                 .size(12.0)
                 .color(theme::text_muted()),
         );

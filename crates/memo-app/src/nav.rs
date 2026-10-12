@@ -49,6 +49,10 @@ impl NavItem {
         matches!(self, Self::Calendar)
     }
 
+    pub fn is_credentials(self) -> bool {
+        matches!(self, Self::Credentials)
+    }
+
     pub const TABS: &'static [NavItem] = &[
         NavItem::Calendar,
         NavItem::Credentials,

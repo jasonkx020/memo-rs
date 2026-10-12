@@ -1036,6 +1036,43 @@ pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     )
 }
 
+/// 备忘页顶栏主按钮（圆角实心）。
+pub fn page_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .color(Color32::WHITE)
+                .strong()
+                .size(13.5),
+        )
+        .fill(shell_accent())
+        .rounding(Rounding::same(8.0))
+        .min_size(Vec2::new(0.0, 30.0)),
+    )
+}
+
+/// 备忘页顶栏次要描边按钮。
+pub fn page_outline_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(13.5).color(text()))
+            .fill(card())
+            .stroke(Stroke::new(1.0, border()))
+            .rounding(Rounding::same(8.0))
+            .min_size(Vec2::new(0.0, 30.0)),
+    )
+}
+
+/// 备忘页顶栏危险描边按钮（删除）。
+pub fn page_danger_outline_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(13.5).color(danger()))
+            .fill(card())
+            .stroke(Stroke::new(1.0, border()))
+            .rounding(Rounding::same(8.0))
+            .min_size(Vec2::new(0.0, 30.0)),
+    )
+}
+
 /// macOS 风格主按钮（系统蓝、大圆角）；宽度不超过当前列可用宽度。
 pub fn mac_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
     let text = egui::RichText::new(label)

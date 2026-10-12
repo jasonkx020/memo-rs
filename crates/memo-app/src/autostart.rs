@@ -1,5 +1,7 @@
 //! 开机自启动（Windows：HKCU Run；其它平台：配置可存但不生效）。
 
+use memo_core::config::{self, Config};
+
 const RUN_VALUE_NAME: &str = "DistributedMemo";
 
 /// 是否支持本机写入开机启动项。
@@ -18,6 +20,21 @@ pub fn apply(enabled: bool) -> anyhow::Result<()> {
         let _ = enabled;
         Ok(())
     }
+}
+
+/// 写入系统启动项并落盘 `start_on_boot`（登录页与设置共用）。
+/// 失败时不改配置；成功返回提示文案。
+pub fn apply_and_persist(cfg: &mut Config, enabled: bool) -> anyhow::Result<&'static str> {
+    apply(enabled)?;
+    cfg.start_on_boot = enabled;
+    let mut persist = cfg.clone();
+    persist.start_on_boot = enabled;
+    config::save_settings(&persist)?;
+    Ok(if enabled {
+        "已开启开机自启动"
+    } else {
+        "已关闭开机自启动"
+    })
 }
 
 #[cfg(windows)]

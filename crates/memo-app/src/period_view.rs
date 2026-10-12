@@ -1,7 +1,7 @@
 //! 女性私密 · 生理期记录（标记经期日 → 自动推算周期 / 经期长 / 下次预计）。
 
 use crate::theme;
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
 use memo_core::cycle::{
     apply_mark_stats, analyze_period_marks, CycleConfig, PeriodMarkStats,
@@ -237,7 +237,55 @@ pub(crate) fn sync_cfg_from_marks(
     apply_mark_stats(cfg, &stats);
     // 标记变更后下次预测与关怀以新预计开始日为准
     cfg.remind_seen_for.clear();
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    cfg.last_predict_ymd = today;
     let _ = svc.set_cycle(pid, cfg.clone());
+}
+
+/// 跨自然日自动按手标重算预测（启动首日 + 长期开机挂机）。
+/// 返回是否执行了重算。
+pub fn ensure_daily_predict_recalc(svc: &MemoService, memos: &[MemoView]) -> bool {
+    let Ok(pid) = ensure_cycle_person(svc) else {
+        return false;
+    };
+    let mut cfg = svc.get_cycle(&pid).unwrap_or_default();
+    if !cfg.period_enabled {
+        return false;
+    }
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    if cfg.last_predict_ymd == today {
+        return false;
+    }
+    let marked = period_marked_days(memos);
+    if marked.is_empty() && cfg.last_start.is_empty() {
+        cfg.last_predict_ymd = today;
+        let _ = svc.set_cycle(&pid, cfg);
+        return false;
+    }
+    let old_next = cfg.next_predicted_start();
+    let stats = analyze_period_marks(&marked);
+    apply_effective_cfg(&mut cfg, &stats);
+    let new_next = cfg.next_predicted_start();
+    if old_next != new_next {
+        cfg.remind_seen_for.clear();
+    } else if let Some(start) = new_next {
+        // 预计整段经期已早于今天时也清已读，便于新一轮关怀
+        let period = cfg.period_days.max(1) as i64;
+        let end = start + Duration::try_days(period - 1).unwrap_or_default();
+        let today_d = chrono::Local::now().date_naive();
+        if end < today_d {
+            cfg.remind_seen_for.clear();
+        }
+    }
+    cfg.last_predict_ymd = today;
+    let _ = svc.set_cycle(&pid, cfg);
+    true
 }
 
 fn legend_dot(ui: &mut egui::Ui, color: Color32, label: &str) {
@@ -1205,6 +1253,294 @@ pub(crate) fn save_day_note(
     }
 }
 
+fn is_future_ymd(ymd: &str) -> bool {
+    NaiveDate::parse_from_str(ymd, "%Y-%m-%d")
+        .ok()
+        .map(|d| d > chrono::Local::now().date_naive())
+        .unwrap_or(true)
+}
+
+fn add_period_day_memo(svc: &MemoService, ymd: &str) -> Result<(), String> {
+    match svc.add_full(
+        "经期日",
+        "",
+        MemoVisibility::Private,
+        MemoLifecycle::Permanent,
+        MemoCategory::GenderPrivate,
+        ymd,
+        "",
+        &[],
+        memo_core::store::MemoPriority::Normal,
+        0,
+    ) {
+        Ok(id) => {
+            let _ = svc.ack_remind(&id);
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn delete_period_day_memo(svc: &MemoService, memos: &[MemoView], ymd: &str) -> Result<bool, String> {
+    let Some(m) = find_period_day_memo(memos, ymd) else {
+        return Ok(false);
+    };
+    svc.delete(&m.id).map(|_| true).map_err(|e| e.to_string())
+}
+
+/// 某段经期覆盖的全部 YYYY-MM-DD（按 start + days）。
+fn episode_ymds(start: &str, days: u32) -> Vec<String> {
+    let Ok(s) = NaiveDate::parse_from_str(start, "%Y-%m-%d") else {
+        return Vec::new();
+    };
+    let n = days.max(1);
+    (0..n)
+        .filter_map(|i| {
+            let d = s + Duration::try_days(i as i64)?;
+            Some(d.format("%Y-%m-%d").to_string())
+        })
+        .collect()
+}
+
+fn ranges_overlap(a0: NaiveDate, a1: NaiveDate, b0: NaiveDate, b1: NaiveDate) -> bool {
+    a0 <= b1 && b0 <= a1
+}
+
+/// 确保某日为经期标记（已有则不动）。旧版单日切换仍用。
+pub(crate) fn ensure_period_day(
+    svc: &Arc<MemoService>,
+    ymd: &str,
+    _memos: &[MemoView],
+    cfg: &mut CycleConfig,
+    status_line: &mut String,
+) -> bool {
+    let pid = match ensure_cycle_person(svc) {
+        Ok(id) => id,
+        Err(e) => {
+            *status_line = e;
+            return false;
+        }
+    };
+    if is_future_ymd(ymd) {
+        *status_line = "只能标记今天及之前的经期日，未来日请看预测".into();
+        return false;
+    }
+    let fresh = svc.list();
+    let mut marked = period_marked_days(&fresh);
+    if !is_marked_day(&marked, ymd) {
+        if let Err(e) = add_period_day_memo(svc, ymd) {
+            *status_line = format!("操作失败: {e}");
+            return false;
+        }
+        marked.push(ymd.to_string());
+        marked.sort();
+        marked.dedup();
+    }
+    sync_cfg_from_marks(svc, &pid, cfg, &marked);
+    true
+}
+
+/// 将 [from, to] 自动整段标注：与区间重叠的旧片段整段清除后，再写入精确起止（无需逐日取消）。
+pub(crate) fn mark_period_range(
+    svc: &Arc<MemoService>,
+    from: &str,
+    to: &str,
+    _memos: &[MemoView],
+    cfg: &mut CycleConfig,
+    status_line: &mut String,
+    tip: &mut String,
+) {
+    let pid = match ensure_cycle_person(svc) {
+        Ok(id) => id,
+        Err(e) => {
+            *status_line = e;
+            return;
+        }
+    };
+    let Some(start) = NaiveDate::parse_from_str(from, "%Y-%m-%d").ok() else {
+        *status_line = "开始日期无效".into();
+        return;
+    };
+    let Some(end) = NaiveDate::parse_from_str(to, "%Y-%m-%d").ok() else {
+        *status_line = "结束日期无效".into();
+        return;
+    };
+    if end < start {
+        *status_line = "结束日不能早于开始日".into();
+        return;
+    }
+    let today = chrono::Local::now().date_naive();
+    if start > today || end > today {
+        *status_line = "只能标记今天及之前的经期日，未来日请看预测".into();
+        return;
+    }
+    if (end - start).num_days() > 14 {
+        *status_line = "经期区间过长（最多 15 天），请检查起止日".into();
+        return;
+    }
+
+    let mut fresh = svc.list();
+    let marked = period_marked_days(&fresh);
+    let stats = analyze_period_marks(&marked);
+
+    // 与新区间重叠的旧片段 → 整段删除（自动纠正，无需「取消本日」）
+    let mut removed = 0u32;
+    for ep in &stats.episodes {
+        let Ok(ep_s) = NaiveDate::parse_from_str(&ep.start, "%Y-%m-%d") else {
+            continue;
+        };
+        let ep_e =
+            ep_s + Duration::try_days(ep.days.saturating_sub(1) as i64).unwrap_or_default();
+        if !ranges_overlap(ep_s, ep_e, start, end) {
+            continue;
+        }
+        for y in episode_ymds(&ep.start, ep.days) {
+            match delete_period_day_memo(svc, &fresh, &y) {
+                Ok(true) => {
+                    removed += 1;
+                    fresh = svc.list();
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    *status_line = format!("清除旧标记 {y} 失败: {e}");
+                    return;
+                }
+            }
+        }
+    }
+
+    let mut added = 0u32;
+    let mut d = start;
+    while d <= end {
+        let ymd = d.format("%Y-%m-%d").to_string();
+        fresh = svc.list();
+        if find_period_day_memo(&fresh, &ymd).is_none() {
+            if let Err(e) = add_period_day_memo(svc, &ymd) {
+                *status_line = format!("标记 {ymd} 失败: {e}");
+                return;
+            }
+            added += 1;
+        }
+        d += Duration::try_days(1).unwrap_or_default();
+    }
+
+    let marked = period_marked_days(&svc.list());
+    sync_cfg_from_marks(svc, &pid, cfg, &marked);
+    *status_line = format!(
+        "已自动标注经期 {from} ~ {to}（写入 {added} 天，替换旧标记 {removed} 天）；已重算预测"
+    );
+    tip.clear();
+}
+
+/// 经期开始：只记下起点，闭合结束日时再自动整段写入。
+pub(crate) fn mark_period_start(
+    _svc: &Arc<MemoService>,
+    ymd: &str,
+    _memos: &[MemoView],
+    _cfg: &mut CycleConfig,
+    status_line: &mut String,
+    tip: &mut String,
+    range_start: &mut Option<String>,
+) {
+    if is_future_ymd(ymd) {
+        *status_line = "只能标记今天及之前的经期日，未来日请看预测".into();
+        return;
+    }
+    *range_start = Some(ymd.to_string());
+    *status_line = format!("已选经期开始 {ymd}");
+    *tip = "再选结束日：将自动标注整段（并替换与之重叠的旧经期）".into();
+}
+
+/// 经期结束：相对 pending 开始自动整段标注。
+pub(crate) fn mark_period_end(
+    svc: &Arc<MemoService>,
+    ymd: &str,
+    memos: &[MemoView],
+    cfg: &mut CycleConfig,
+    status_line: &mut String,
+    tip: &mut String,
+    range_start: &mut Option<String>,
+) {
+    if is_future_ymd(ymd) {
+        *status_line = "只能标记今天及之前的经期日，未来日请看预测".into();
+        return;
+    }
+    let start = if let Some(s) = range_start.clone() {
+        s
+    } else {
+        *status_line = "请先标注「经期开始」".into();
+        *tip = "右键某日选经期开始，再选结束日即可自动标整段".into();
+        return;
+    };
+    let Some(s) = NaiveDate::parse_from_str(&start, "%Y-%m-%d").ok() else {
+        *status_line = "开始日期无效".into();
+        *range_start = None;
+        return;
+    };
+    let Some(e) = NaiveDate::parse_from_str(ymd, "%Y-%m-%d").ok() else {
+        *status_line = "结束日期无效".into();
+        return;
+    };
+    if e < s {
+        *status_line = "结束日不能早于开始日".into();
+        return;
+    }
+    mark_period_range(svc, &start, ymd, memos, cfg, status_line, tip);
+    *range_start = None;
+}
+
+/// 清除选中日所在的整段经期（整段删除，非逐日取消）。
+pub(crate) fn clear_period_episode(
+    svc: &Arc<MemoService>,
+    ymd: &str,
+    cfg: &mut CycleConfig,
+    status_line: &mut String,
+    tip: &mut String,
+) {
+    let pid = match ensure_cycle_person(svc) {
+        Ok(id) => id,
+        Err(e) => {
+            *status_line = e;
+            return;
+        }
+    };
+    let mut fresh = svc.list();
+    let marked = period_marked_days(&fresh);
+    let stats = analyze_period_marks(&marked);
+    let Some(day) = NaiveDate::parse_from_str(ymd, "%Y-%m-%d").ok() else {
+        *status_line = "日期无效".into();
+        return;
+    };
+    let Some(ep) = stats.episodes.iter().find(|ep| {
+        let Ok(s) = NaiveDate::parse_from_str(&ep.start, "%Y-%m-%d") else {
+            return false;
+        };
+        let e = s + Duration::try_days(ep.days.saturating_sub(1) as i64).unwrap_or_default();
+        day >= s && day <= e
+    }) else {
+        *status_line = "该日不在已标经期段内".into();
+        return;
+    };
+    let mut n = 0u32;
+    for y in episode_ymds(&ep.start, ep.days) {
+        match delete_period_day_memo(svc, &fresh, &y) {
+            Ok(true) => {
+                n += 1;
+                fresh = svc.list();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                *status_line = format!("清除失败: {e}");
+                return;
+            }
+        }
+    }
+    let marked = period_marked_days(&svc.list());
+    sync_cfg_from_marks(svc, &pid, cfg, &marked);
+    *status_line = format!("已清除本段经期（{n} 天）；已重算预测");
+    tip.clear();
+}
+
 pub(crate) fn toggle_period_day(
     svc: &Arc<MemoService>,
     ymd: &str,
@@ -1227,7 +1563,7 @@ pub(crate) fn toggle_period_day(
                 let mut marked = period_marked_days(memos);
                 marked.retain(|d| d != ymd);
                 sync_cfg_from_marks(svc, &pid, cfg, &marked);
-                *status_line = format!("已取消 {ymd} 经期日");
+                *status_line = format!("已取消 {ymd} 经期日；已重算预测");
                 tip.clear();
             }
             Err(e) => *status_line = format!("取消失败: {e}"),
@@ -1235,40 +1571,9 @@ pub(crate) fn toggle_period_day(
         return;
     }
 
-    // 只能标记今天及之前（未来日留给预测，不可人工标经期）
-    let is_future = NaiveDate::parse_from_str(ymd, "%Y-%m-%d")
-        .ok()
-        .map(|d| d > chrono::Local::now().date_naive())
-        .unwrap_or(true);
-    if is_future {
-        *status_line = "只能标记今天及之前的经期日，未来日请看预测".into();
+    if !ensure_period_day(svc, ymd, memos, cfg, status_line) {
         return;
     }
-
-    match svc.add_full(
-        "经期日",
-        "",
-        MemoVisibility::Private,
-        MemoLifecycle::Permanent,
-        MemoCategory::GenderPrivate,
-        ymd,
-        "",
-        &[],
-        memo_core::store::MemoPriority::Normal,
-        0,
-    ) {
-        Ok(id) => {
-            // 日历标记日不进到期提醒队列（避免误弹系统通知）
-            let _ = svc.ack_remind(&id);
-            let mut marked = period_marked_days(memos);
-            if !marked.iter().any(|d| d == ymd) {
-                marked.push(ymd.to_string());
-                marked.sort();
-            }
-            sync_cfg_from_marks(svc, &pid, cfg, &marked);
-            *status_line = format!("已标记经期日 {ymd}");
-            tip.clear();
-        }
-        Err(e) => *status_line = format!("操作失败: {e}"),
-    }
+    *status_line = format!("已标记经期日 {ymd}；已重算预测");
+    tip.clear();
 }

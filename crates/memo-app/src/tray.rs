@@ -75,14 +75,24 @@ pub fn has_main_hwnd() -> bool {
     MAIN_HWND.load(Ordering::SeqCst) != 0
 }
 
-/// 藏到托盘：Win32 隐藏，**不**发 ViewportCommand::Visible(false)。
+/// 藏到托盘：先播放「缩入通知区」动画，再 Win32 隐藏。
+/// **不**发 ViewportCommand::Visible(false)（见 egui#5229）。
+///
+/// 若窗口已最小化（IsIconic），必须先 Restore 再 Hide，否则会停在
+/// iconic+hidden，托盘「退出」投递的 WM_CLOSE 无法及时进入 update。
 pub fn hide_main_window() {
     #[cfg(windows)]
     {
         let hwnd = MAIN_HWND.load(Ordering::SeqCst);
         if hwnd != 0 {
             unsafe {
-                use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    IsIconic, ShowWindow, SW_HIDE, SW_RESTORE,
+                };
+                if IsIconic(hwnd as _) != 0 {
+                    ShowWindow(hwnd as _, SW_RESTORE);
+                }
+                animate_window_to_tray(hwnd as _);
                 ShowWindow(hwnd as _, SW_HIDE);
             }
         }
@@ -103,6 +113,7 @@ pub fn show_main_window() {
                 use windows_sys::Win32::UI::WindowsAndMessaging::{
                     BringWindowToTop, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
                 };
+                animate_window_from_tray(hwnd as _);
                 ShowWindow(hwnd as _, SW_SHOW);
                 ShowWindow(hwnd as _, SW_RESTORE);
                 BringWindowToTop(hwnd as _);
@@ -116,6 +127,91 @@ pub fn show_main_window() {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
     wake_ui();
+}
+
+#[cfg(windows)]
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 任务栏通知区域（托盘）附近的小矩形，作为缩小动画终点。
+#[cfg(windows)]
+unsafe fn tray_notify_rect() -> Option<windows_sys::Win32::Foundation::RECT> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowExW, FindWindowW, GetWindowRect};
+    let tray_cls = to_wide("Shell_TrayWnd");
+    let notify_cls = to_wide("TrayNotifyWnd");
+    let tray = FindWindowW(tray_cls.as_ptr(), std::ptr::null());
+    if tray == 0 {
+        return None;
+    }
+    let notify = FindWindowExW(tray, 0, notify_cls.as_ptr(), std::ptr::null());
+    let target = if notify != 0 { notify } else { tray };
+    let mut rc = std::mem::zeroed::<RECT>();
+    if GetWindowRect(target, &mut rc) == 0 {
+        return None;
+    }
+    // 收到通知区中部一小块，视觉上更像「吸进托盘」
+    let cx = (rc.left + rc.right) / 2;
+    let cy = (rc.top + rc.bottom) / 2;
+    Some(RECT {
+        left: cx - 10,
+        top: cy - 10,
+        right: cx + 10,
+        bottom: cy + 10,
+    })
+}
+
+#[cfg(windows)]
+unsafe fn window_normal_rect(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+) -> Option<windows_sys::Win32::Foundation::RECT> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, GetWindowRect, WINDOWPLACEMENT,
+    };
+    let mut place = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..std::mem::zeroed()
+    };
+    if GetWindowPlacement(hwnd, &mut place) != 0 {
+        let r = place.rcNormalPosition;
+        if r.right > r.left && r.bottom > r.top {
+            return Some(r);
+        }
+    }
+    let mut rc = std::mem::zeroed::<RECT>();
+    if GetWindowRect(hwnd, &mut rc) != 0 {
+        Some(rc)
+    } else {
+        None
+    }
+}
+
+/// 经典标题栏缩小动画：窗口矩形 → 托盘通知区（DrawAnimatedRects）。
+#[cfg(windows)]
+unsafe fn animate_window_to_tray(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Graphics::Gdi::DrawAnimatedRects;
+    let Some(from) = window_normal_rect(hwnd) else {
+        return;
+    };
+    let Some(to) = tray_notify_rect() else {
+        return;
+    };
+    // IDANI_CAPTION = 3：标题栏样式的缩小动画
+    DrawAnimatedRects(hwnd, 3, &from, &to);
+}
+
+#[cfg(windows)]
+unsafe fn animate_window_from_tray(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Graphics::Gdi::DrawAnimatedRects;
+    let Some(to) = window_normal_rect(hwnd) else {
+        return;
+    };
+    let Some(from) = tray_notify_rect() else {
+        return;
+    };
+    DrawAnimatedRects(hwnd, 3, &from, &to);
 }
 
 fn request_show_main() {
@@ -150,23 +246,38 @@ fn install_event_handlers() {
         if MENU_SHOW_ID.get().map(|s| s.as_str()) == Some(id) {
             request_show_main();
         } else if MENU_QUIT_ID.get().map(|s| s.as_str()) == Some(id) {
+            // 必须先置位：随后 WM_CLOSE 进入 update 时不能被「关窗→藏托盘」吃掉
             QUIT_APP.store(true, Ordering::SeqCst);
-            // 退出前先露出主窗，便于 eframe 处理 Close
-            #[cfg(windows)]
-            {
-                let hwnd = MAIN_HWND.load(Ordering::SeqCst);
-                if hwnd != 0 {
-                    unsafe {
-                        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOW};
-                        ShowWindow(hwnd as _, SW_SHOW);
-                    }
-                }
-            }
-            wake_ui();
+            request_quit_wake();
         } else {
             wake_ui();
         }
     }));
+}
+
+/// 主窗在前台空闲 / 最小化 / 已藏托盘时事件循环可能停转，仅 `request_repaint` 不够；
+/// Win32 投递消息才能立刻跑到 `update` 处理退出。
+fn request_quit_wake() {
+    #[cfg(windows)]
+    {
+        let hwnd = MAIN_HWND.load(Ordering::SeqCst);
+        if hwnd != 0 {
+            unsafe {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    PostMessageW, ShowWindow, SW_RESTORE, SW_SHOW, WM_CLOSE, WM_NULL,
+                };
+                // 覆盖：系统最小化（iconic）与关窗藏托盘（SW_HIDE）
+                ShowWindow(hwnd as _, SW_RESTORE);
+                ShowWindow(hwnd as _, SW_SHOW);
+                PostMessageW(hwnd as _, WM_NULL as _, 0, 0);
+                PostMessageW(hwnd as _, WM_CLOSE as _, 0, 0);
+            }
+        }
+    }
+    wake_ui();
+    if let Some(ctx) = EGUI_CTX.get() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
 }
 
 fn load_tray_icon() -> Option<Icon> {

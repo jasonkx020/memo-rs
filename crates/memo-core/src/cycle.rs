@@ -85,6 +85,9 @@ pub struct CycleConfig {
     /// 是否在性别私密页展示经期模块（关闭仅藏 UI，不删标记）
     #[serde(default = "default_true")]
     pub period_enabled: bool,
+    /// 上次按自然日重算预测时的本地日期 YYYY-MM-DD（跨日自动重算用）
+    #[serde(default)]
+    pub last_predict_ymd: String,
 }
 
 impl Default for CycleConfig {
@@ -98,6 +101,7 @@ impl Default for CycleConfig {
             remind_seen_for: String::new(),
             ovulation_preset: OvulationPreset::Standard,
             period_enabled: true,
+            last_predict_ymd: String::new(),
         }
     }
 }
@@ -108,49 +112,94 @@ impl CycleConfig {
         !self.last_start.is_empty() && self.cycle_days >= 15 && self.period_days >= 1
     }
 
-    /// 排卵日相对经期开始的偏移（第 0 天=开始日）；无法估算时为 None。
-    /// 一律按标准黄体期约 14 天：排卵日 ≈ 周期天数 − 14。
+    /// 排卵日相对经期开始的偏移（第 0 天 = 经期第 1 天）；无法可靠估算时为 None。
+    ///
+    /// 日历法（临床常用近似，仅供参考）：
+    /// - 黄体期相对稳定，排卵日 ≈ 下次月经开始前 `luteal` 天
+    ///   → `offset = cycle_days - luteal`（默认 luteal=14，见 `ovulation_preset`）
+    /// - 排卵必须落在经期结束之后；卵泡期过短时日历法不可靠，不给出排卵日
     pub fn ovulation_offset(&self) -> Option<u32> {
-        const LUTEAL: u32 = 14;
+        let luteal = self.ovulation_preset.luteal_days()?;
         if !self.can_predict() {
             return None;
         }
         let cycle = self.cycle_days;
         let period = self.period_days.max(1);
-        let off = cycle.saturating_sub(LUTEAL);
-        if off <= period || off >= cycle {
+        if cycle <= luteal {
+            return None;
+        }
+        let off = cycle - luteal;
+        // 排卵须在经期之后，且完整「排卵前 5 天」窗还能再空出至少 1 天卵泡早期
+        // （否则日历法会把易孕贴在经期刚结束，既不稳也易误导）
+        // 同时排卵极少早于周期第 8 天（offset < 7）
+        // 排卵后 4 天须仍在本周期内（不跨入下次月经）
+        if off < 7
+            || off < period.saturating_add(6)
+            || off.saturating_add(4) >= cycle
+            || off >= cycle
+        {
             return None;
         }
         Some(off)
     }
 
-    /// 易孕窗相对开始偏移 [start, end]（含端点）；不含经期日。
+    /// 易孕窗相对开始偏移 `[start, end]`（含端点）。
+    ///
+    /// 备孕/避孕常用日历法：将整段排卵危险期视为易孕期——
+    /// 排卵日前 5 天 + 当天 + 后 4 天，共 10 天。
+    ///
+    /// **禁止把窗口钳到经期次日**：完整窗须全部落在经期结束后，
+    /// 且与经期之间至少隔 1 天；否则返回 None。
     pub fn fertile_offset_range(&self) -> Option<(u32, u32)> {
         let ov = self.ovulation_offset()?;
         let period = self.period_days.max(1);
         let cycle = self.cycle_days;
-        let start = ov.saturating_sub(5).max(period);
-        let end = (ov + 1).min(cycle.saturating_sub(1));
-        if start > end {
+        // 排卵前 5 天 … 排卵后 4 天（含排卵日）
+        let start = ov.saturating_sub(5);
+        let end = ov + 4;
+        // 经期为 [0, period)；其后第 1 天是 period。易孕最早从 period+1 起
+        if start <= period {
+            return None;
+        }
+        if end >= cycle || start > end {
             return None;
         }
         Some((start, end))
     }
 
-    /// 即将到来的一轮周期开始日（易孕/排卵仅相对此锚点，不做多轮模运算）。
-    /// 若以 `last_start` 为锚的易孕末日仍 ≥ 今天，用 last；否则用下一预测开始日。
-    pub fn upcoming_cycle_start_for_fertile(&self) -> Option<NaiveDate> {
+    /// 易孕/排卵着色锚点：最近手标开始日 + 下一预测开始日（若不同）。
+    pub fn fertile_anchors(&self) -> Vec<NaiveDate> {
         if !self.can_predict() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if let Ok(last) = NaiveDate::parse_from_str(&self.last_start, "%Y-%m-%d") {
+            out.push(last);
+        }
+        if let Some(next) = self.next_predicted_start() {
+            if out.first().copied() != Some(next) {
+                out.push(next);
+            }
+        }
+        out
+    }
+
+    /// 兼容旧调用：优先返回仍含未过完易孕窗的锚点，否则下一预测开始。
+    pub fn upcoming_cycle_start_for_fertile(&self) -> Option<NaiveDate> {
+        let anchors = self.fertile_anchors();
+        if anchors.is_empty() {
             return None;
         }
         let (_, end_off) = self.fertile_offset_range()?;
-        let last = NaiveDate::parse_from_str(&self.last_start, "%Y-%m-%d").ok()?;
         let today = chrono::Local::now().date_naive();
-        let fertile_end = last + Duration::try_days(end_off as i64)?;
-        if fertile_end >= today {
-            return Some(last);
+        for &anchor in &anchors {
+            if let Some(fertile_end) = Duration::try_days(end_off as i64).map(|d| anchor + d) {
+                if fertile_end >= today {
+                    return Some(anchor);
+                }
+            }
         }
-        self.next_predicted_start()
+        anchors.last().copied()
     }
 
     fn offset_from_anchor(&self, ymd: &str, anchor: NaiveDate) -> Option<i64> {
@@ -158,33 +207,37 @@ impl CycleConfig {
         Some((day - anchor).num_days())
     }
 
-    /// 估算排卵日：仅「即将到来的一轮」。
+    /// 估算排卵日：相对手标当轮或下一预测轮任一锚点。
     pub fn is_ovulation_day(&self, ymd: &str) -> bool {
         let Some(ov) = self.ovulation_offset() else {
             return false;
         };
-        let Some(anchor) = self.upcoming_cycle_start_for_fertile() else {
-            return false;
-        };
-        self.offset_from_anchor(ymd, anchor) == Some(ov as i64)
+        for anchor in self.fertile_anchors() {
+            if self.offset_from_anchor(ymd, anchor) == Some(ov as i64) {
+                return true;
+            }
+        }
+        false
     }
 
-    /// 易孕参考窗（含排卵日）：仅即将到来的一轮；与该轮经期窗重叠时不算。
+    /// 易孕参考窗（含排卵日）：手标当轮 + 下一预测轮；与该锚点经期窗重叠时不算。
     pub fn is_fertile_day(&self, ymd: &str) -> bool {
         let Some((a, b)) = self.fertile_offset_range() else {
             return false;
         };
-        let Some(anchor) = self.upcoming_cycle_start_for_fertile() else {
-            return false;
-        };
-        let Some(off) = self.offset_from_anchor(ymd, anchor) else {
-            return false;
-        };
         let period = self.period_days.max(1) as i64;
-        if off >= 0 && off < period {
-            return false;
+        for anchor in self.fertile_anchors() {
+            let Some(off) = self.offset_from_anchor(ymd, anchor) else {
+                continue;
+            };
+            if off >= 0 && off < period {
+                continue;
+            }
+            if off >= a as i64 && off <= b as i64 {
+                return true;
+            }
         }
-        off >= a as i64 && off <= b as i64
+        false
     }
 
     /// 判断某日是否落在经期窗口（按固定周期模运算，含历史/未来各轮；内部/兼容用）。
@@ -373,10 +426,13 @@ pub fn apply_mark_stats(cfg: &mut CycleConfig, stats: &PeriodMarkStats) {
         }
     }
     if !cfg.manual_cycle {
-        if let Some(c) = stats.avg_cycle {
+        if let Some(c) = stats.avg_cycle.or(stats.last_gap) {
             cfg.cycle_days = c;
-        } else {
+        } else if cfg.last_start.is_empty() {
             cfg.cycle_days = 0;
+        } else if cfg.cycle_days < 15 {
+            // 仅一段经期时尚无间隔：保留有效值，否则默认 28 天参考周期
+            cfg.cycle_days = 28;
         }
     }
 }
@@ -548,7 +604,8 @@ mod tests {
         cfg.period_days = 5;
         cfg.ovulation_preset = OvulationPreset::Standard;
         assert_eq!(cfg.ovulation_offset(), Some(14));
-        assert_eq!(cfg.fertile_offset_range(), Some((9, 15)));
+        // 排卵前 5 + 当天 + 后 4；28 天周期 → offset 9..=18
+        assert_eq!(cfg.fertile_offset_range(), Some((9, 18)));
         assert_eq!(cfg.upcoming_cycle_start_for_fertile(), Some(last));
 
         let ovu = (last + Duration::try_days(14).unwrap())
@@ -557,26 +614,79 @@ mod tests {
         let fert_a = (last + Duration::try_days(9).unwrap())
             .format("%Y-%m-%d")
             .to_string();
-        let fert_b = (last + Duration::try_days(15).unwrap())
+        let fert_after = (last + Duration::try_days(18).unwrap())
+            .format("%Y-%m-%d")
+            .to_string();
+        let after_window = (last + Duration::try_days(19).unwrap())
             .format("%Y-%m-%d")
             .to_string();
         assert!(cfg.is_ovulation_day(&ovu));
         assert!(cfg.is_fertile_day(&fert_a));
-        assert!(cfg.is_fertile_day(&fert_b));
+        assert!(cfg.is_fertile_day(&ovu));
+        for d in 15..=18 {
+            let ymd = (last + Duration::try_days(d).unwrap())
+                .format("%Y-%m-%d")
+                .to_string();
+            assert!(cfg.is_fertile_day(&ymd), "offset {d} 应为排卵后易孕");
+        }
+        assert!(cfg.is_fertile_day(&fert_after));
+        assert!(!cfg.is_fertile_day(&after_window)); // ov+5 不再计入
         assert!(!cfg.is_fertile_day(&last.format("%Y-%m-%d").to_string())); // 经期
-        // 更远下一轮不标
+        // 经期刚结束后的几天属卵泡早期，不应标易孕（offset 5..=8）
+        for d in 5..=8 {
+            let ymd = (last + Duration::try_days(d).unwrap())
+                .format("%Y-%m-%d")
+                .to_string();
+            assert!(
+                !cfg.is_fertile_day(&ymd),
+                "offset {d} 不应为易孕（经期刚结束）"
+            );
+        }
+        // 手标当轮 + 下一预测轮双锚：下一轮排卵也着色
         let far_ovu = (last + Duration::try_days(28 + 14).unwrap())
             .format("%Y-%m-%d")
             .to_string();
-        assert!(!cfg.is_ovulation_day(&far_ovu));
-        assert!(!cfg.is_fertile_day(&far_ovu));
+        assert!(cfg.is_ovulation_day(&far_ovu));
+        assert!(cfg.is_fertile_day(&far_ovu));
+    }
+
+    #[test]
+    fn fertile_not_clamped_to_day_after_period() {
+        // 旧逻辑会把易孕窗钳到经期次日，造成「一结束就易孕」
+        let mut cfg = CycleConfig::default();
+        cfg.last_start = "2026-03-01".into();
+        cfg.cycle_days = 22; // 短周期：卵泡期过短，日历法不着色
+        cfg.period_days = 5;
+        cfg.ovulation_preset = OvulationPreset::Standard;
+        // ov = 22-14 = 8 < period+6=11 → 不估算排卵/易孕
+        assert_eq!(cfg.ovulation_offset(), None);
+        assert_eq!(cfg.fertile_offset_range(), None);
+        assert!(!cfg.is_fertile_day("2026-03-06")); // 经期次日
+        assert!(!cfg.is_ovulation_day("2026-03-09"));
+    }
+
+    #[test]
+    fn fertile_uses_luteal_preset() {
+        let mut cfg = CycleConfig::default();
+        cfg.last_start = "2026-03-01".into();
+        cfg.cycle_days = 28;
+        cfg.period_days = 5;
+        cfg.ovulation_preset = OvulationPreset::Late; // 黄体期 12 → ov = 16
+        assert_eq!(cfg.ovulation_offset(), Some(16));
+        assert_eq!(cfg.fertile_offset_range(), Some((11, 20)));
+        cfg.ovulation_preset = OvulationPreset::Early; // 黄体期 16 → ov = 12
+        assert_eq!(cfg.ovulation_offset(), Some(12));
+        assert_eq!(cfg.fertile_offset_range(), Some((7, 16)));
+        cfg.ovulation_preset = OvulationPreset::Off;
+        assert_eq!(cfg.ovulation_offset(), None);
+        assert_eq!(cfg.fertile_offset_range(), None);
     }
 
     #[test]
     fn fertile_advances_to_next_cycle_when_window_passed() {
         let mut cfg = CycleConfig::default();
         let today = chrono::Local::now().date_naive();
-        // last 在 20 天前：本轮易孕末日约 last+15 已过 → 锚点切到 next
+        // last 在 20 天前：本轮易孕已过；upcoming 优先下一轮，但双锚仍保留当轮着色
         let last = today - Duration::try_days(20).unwrap();
         cfg.last_start = last.format("%Y-%m-%d").to_string();
         cfg.cycle_days = 28;
@@ -591,6 +701,6 @@ mod tests {
         let old_ovu = (last + Duration::try_days(14).unwrap())
             .format("%Y-%m-%d")
             .to_string();
-        assert!(!cfg.is_ovulation_day(&old_ovu));
+        assert!(cfg.is_ovulation_day(&old_ovu));
     }
 }

@@ -1,9 +1,9 @@
 //! 无边框、可拖动、置顶的桌面便签（deferred 子 Viewport）。
-//! 可编辑并回写备忘；位置/打开列表落盘到 sticky_session.json。
+//! 可编辑并回写备忘；打开列表与位置仅本机落盘（按身份隔离，不同步）。
 
 use crate::theme;
 use eframe::egui::{
-    self, Color32, Frame, Margin, RichText, Sense, Stroke, TextEdit, Vec2, ViewportBuilder,
+    self, Color32, Frame, Margin, Pos2, RichText, Sense, Stroke, TextEdit, Vec2, ViewportBuilder,
     ViewportClass, ViewportCommand, ViewportId,
 };
 use memo_core::service::MemoView;
@@ -26,6 +26,8 @@ pub struct StickyNote {
     pub pos: Option<[f32; 2]>,
     pub size: Option<[f32; 2]>,
     pub flush_now: bool,
+    /// 从会话恢复后需强制 OuterPosition/InnerSize，直到与目标接近
+    pub apply_geom: bool,
 }
 
 pub type StickyHandle = Arc<Mutex<StickyNote>>;
@@ -35,13 +37,14 @@ const DEFAULT_SIZE: [f32; 2] = [280.0, 180.0];
 
 impl StickyNote {
     pub fn from_memo(m: &MemoView) -> StickyHandle {
-        Self::from_memo_geom(m, None, None)
+        Self::from_memo_geom(m, None, None, false)
     }
 
     pub fn from_memo_geom(
         m: &MemoView,
         pos: Option<[f32; 2]>,
         size: Option<[f32; 2]>,
+        apply_geom: bool,
     ) -> StickyHandle {
         Arc::new(Mutex::new(Self {
             id: m.id.clone(),
@@ -58,6 +61,7 @@ impl StickyNote {
             pos,
             size: size.or(Some(DEFAULT_SIZE)),
             flush_now: false,
+            apply_geom: apply_geom && pos.is_some(),
         }))
     }
 
@@ -110,17 +114,42 @@ pub struct StickyGeom {
     pub h: f32,
 }
 
-pub fn session_path(data_dir: &Path) -> PathBuf {
+/// 按身份隔离的会话路径（仅本机）。
+pub fn session_path_for(data_dir: &Path, person_fp: &str) -> PathBuf {
+    data_dir
+        .join("identities")
+        .join(person_fp)
+        .join("sticky_session.json")
+}
+
+/// 旧版全局路径（迁移用）。
+fn legacy_session_path(data_dir: &Path) -> PathBuf {
     data_dir.join("sticky_session.json")
 }
 
-pub fn load_session(data_dir: &Path) -> Option<StickySession> {
-    let raw = std::fs::read_to_string(session_path(data_dir)).ok()?;
-    serde_json::from_str(&raw).ok()
+pub fn load_session(data_dir: &Path, person_fp: &str) -> Option<StickySession> {
+    let path = session_path_for(data_dir, person_fp);
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(s) = serde_json::from_str::<StickySession>(&raw) {
+            if s.person_fp == person_fp || s.person_fp.is_empty() {
+                return Some(StickySession {
+                    person_fp: person_fp.to_string(),
+                    notes: s.notes,
+                });
+            }
+        }
+    }
+    // 兼容旧版根目录文件
+    let raw = std::fs::read_to_string(legacy_session_path(data_dir)).ok()?;
+    let s: StickySession = serde_json::from_str(&raw).ok()?;
+    if s.person_fp != person_fp {
+        return None;
+    }
+    Some(s)
 }
 
 pub fn save_session(data_dir: &Path, session: &StickySession) -> anyhow::Result<()> {
-    let path = session_path(data_dir);
+    let path = session_path_for(data_dir, &session.person_fp);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -179,7 +208,7 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
         .with_min_inner_size([200.0, 120.0])
         .with_resizable(true);
     if let Some(p) = pos {
-        builder = builder.with_position(p);
+        builder = builder.with_position(Pos2::new(p[0], p[1]));
     }
 
     if request_focus {
@@ -197,7 +226,27 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
             return;
         }
 
-        if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+        // 恢复历史位置：强制 OuterPosition，避免 winit 忽略 builder.with_position
+        if note.apply_geom {
+            if let Some(p) = note.pos {
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(Pos2::new(p[0], p[1])));
+            }
+            if let Some(s) = note.size {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(s[0], s[1])));
+            }
+            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                if let Some(p) = note.pos {
+                    let ok_x = (rect.min.x - p[0]).abs() < 8.0;
+                    let ok_y = (rect.min.y - p[1]).abs() < 8.0;
+                    if ok_x && ok_y {
+                        note.apply_geom = false;
+                        note.pos = Some([rect.min.x, rect.min.y]);
+                        note.size = Some([rect.width().max(200.0), rect.height().max(120.0)]);
+                    }
+                }
+            }
+            ctx.request_repaint();
+        } else if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
             note.pos = Some([rect.min.x, rect.min.y]);
             note.size = Some([rect.width().max(200.0), rect.height().max(120.0)]);
         }
