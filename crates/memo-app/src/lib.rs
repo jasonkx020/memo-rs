@@ -194,11 +194,11 @@ pub struct MemoApp {
     last_remind_scan: Instant,
     /// 桌面便签（memo_id → 共享句柄；deferred viewport 需 Send+Sync）
     stickies: HashMap<String, StickyHandle>,
-    /// 系统托盘（持有句柄防 drop）
-    _tray: Option<tray::TrayHandle>,
+    /// 系统托盘（退出时 take + dispose）
+    tray: Option<tray::TrayHandle>,
     /// 真正退出（托盘菜单）；否则关主窗只隐藏
     quit_requested: bool,
-    /// 主窗已藏到托盘（用于忽略残留的 close_requested，避免显示后立刻再藏）
+    /// 主窗已藏到托盘
     main_hidden: bool,
     /// 开机 `--tray`：首帧隐藏主窗
     start_hidden: bool,
@@ -220,7 +220,7 @@ impl MemoApp {
     pub fn new(cfg: Config, start_hidden: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         let gate = IdentityGateState::from_cfg(&cfg);
-        let _tray = tray::create();
+        let tray = tray::create();
         Self {
             cfg,
             screen: Screen::IdentityGate(gate),
@@ -239,7 +239,7 @@ impl MemoApp {
             pending_sync_hint: 0,
             last_remind_scan: Instant::now() - Duration::from_secs(30),
             stickies: HashMap::new(),
-            _tray,
+            tray,
             quit_requested: false,
             main_hidden: start_hidden,
             start_hidden,
@@ -708,7 +708,6 @@ impl eframe::App for MemoApp {
         let (tray_show, tray_quit) = tray::poll();
         if tray_show {
             self.main_hidden = false;
-            // 托盘回调里已 ShowWindow；此处再同步一次并聚焦
             tray::show_main_window();
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -717,26 +716,19 @@ impl eframe::App for MemoApp {
         }
         if tray_quit {
             self.quit_requested = true;
-            self.main_hidden = false;
         }
 
-        // 关主窗 → Win32 隐藏到托盘；最小化交给系统（任务栏）
-        // 切勿 Visible(false)：Windows 上会导致无法再显示（egui#5229）
-        // 注意：托盘退出会 PostMessage(WM_CLOSE)，须先认 quit_requested，否则会被当成藏托盘
+        // 关主窗（×）→ 藏托盘；最小化交给系统，不读 minimized
         let close_requested = ctx.input(|i| i.viewport().close_requested());
-        // 已在托盘时：拦截关闭，否则任务栏/系统对隐藏窗的 WM_CLOSE 会把进程干掉
-        if !self.quit_requested && self.main_hidden && close_requested {
+        if !self.quit_requested && close_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        }
-        let close_to_tray = !self.quit_requested && !self.main_hidden && close_requested;
-        if close_to_tray {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            // 藏托盘前落盘便签位置，便于下次解锁按原位打开
             self.save_sticky_session_now();
             tray::hide_main_window();
             self.main_hidden = true;
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+        // 托盘退出快路径（主循环仍在转时）：落盘 + dispose + exit。
+        // 若主窗最小化/SW_HIDE 导致 update 不跑，由 tray::force_quit_process 兜底。
         if self.quit_requested {
             let rt_for_flush = if let Screen::Main { rt, .. } = &self.screen {
                 Some(rt.clone())
@@ -750,8 +742,10 @@ impl eframe::App for MemoApp {
             self.save_sticky_session_now();
             self.close_all_sticky_viewports(ctx);
             self.stickies.clear();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            ctx.request_repaint();
+            if let Some(t) = self.tray.take() {
+                t.dispose();
+            }
+            std::process::exit(0);
         }
 
         // 上一帧已从私密切到任务：本帧执行锁定
@@ -2225,6 +2219,12 @@ impl eframe::App for MemoApp {
         self.show_help = show_help;
         self.show_about = show_about;
         Self::draw_help_about_windows(ctx, &mut self.show_help, &mut self.show_about);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(t) = self.tray.take() {
+            t.dispose();
+        }
     }
 }
 
