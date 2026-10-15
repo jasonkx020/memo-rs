@@ -34,6 +34,8 @@ pub struct IdentityGateState {
     pub pending_identity: Option<IdentityKeys>,
     /// 用户主动退出后为 true（保留字段；单身份不再自动进入）
     pub skip_auto_unlock: bool,
+    /// 登录主按钮下方：开机自启动 / 生成·导入身份
+    pub show_more_options: bool,
 }
 
 impl IdentityGateState {
@@ -66,6 +68,7 @@ impl IdentityGateState {
             init_mode_import: false,
             pending_identity: None,
             skip_auto_unlock: false,
+            show_more_options: false,
         }
     }
 
@@ -855,45 +858,74 @@ fn draw_select(
                         }
                     }
                 }
-                ui.add_space(10.0);
-                ui.add_enabled_ui(autostart::supported(), |ui| {
-                    let tip = if autostart::supported() {
-                        "与设置中的「开机自启动」同步；开机后托盘启动，仍需解锁身份"
-                    } else {
-                        "当前系统不支持写入开机启动项"
-                    };
-                    if ui
-                        .checkbox(&mut cfg.start_on_boot, "开机时启动 Memo")
-                        .on_hover_text(tip)
-                        .changed()
-                    {
-                        let want = cfg.start_on_boot;
-                        match autostart::apply_and_persist(cfg, want) {
-                            Ok(msg) => st.status = msg.into(),
-                            Err(e) => {
-                                cfg.start_on_boot = !want;
-                                st.status = format!("开机自启动设置失败: {e}");
-                            }
-                        }
-                    }
-                });
+
+                // 状态始终可见；开机自启动 / 生成·导入收入「更多选项」
                 if !st.status.is_empty() {
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     mac_status(ui, &st.status, st.busy);
                 }
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if theme::mac_secondary_button(ui, "生成新身份").clicked() {
-                        st.show_init = true;
-                        st.init_mode_import = false;
-                        st.status.clear();
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    let label = if st.show_more_options {
+                        "收起 ▴"
+                    } else {
+                        "更多选项 ▾"
+                    };
+                    let resp = ui.add(
+                        egui::Label::new(
+                            RichText::new(label)
+                                .size(12.5)
+                                .color(theme::mac_text_secondary()),
+                        )
+                        .sense(Sense::click()),
+                    );
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    if theme::mac_secondary_button(ui, "导入身份").clicked() {
-                        st.show_init = true;
-                        st.init_mode_import = true;
-                        st.status.clear();
+                    if resp.clicked() {
+                        st.show_more_options = !st.show_more_options;
                     }
                 });
+
+                if st.show_more_options {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.add_enabled_ui(autostart::supported(), |ui| {
+                        let tip = if autostart::supported() {
+                            "与设置中的「开机自启动」同步；开机后托盘启动，仍需解锁身份"
+                        } else {
+                            "当前系统不支持写入开机启动项"
+                        };
+                        if ui
+                            .checkbox(&mut cfg.start_on_boot, "开机时启动 Memo")
+                            .on_hover_text(tip)
+                            .changed()
+                        {
+                            let want = cfg.start_on_boot;
+                            match autostart::apply_and_persist(cfg, want) {
+                                Ok(msg) => st.status = msg.into(),
+                                Err(e) => {
+                                    cfg.start_on_boot = !want;
+                                    st.status = format!("开机自启动设置失败: {e}");
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if theme::mac_secondary_button(ui, "生成新身份").clicked() {
+                            st.show_init = true;
+                            st.init_mode_import = false;
+                            st.status.clear();
+                        }
+                        if theme::mac_secondary_button(ui, "导入身份").clicked() {
+                            st.show_init = true;
+                            st.init_mode_import = true;
+                            st.status.clear();
+                        }
+                    });
+                }
             });
     });
 }
