@@ -34,7 +34,7 @@ use memo_form::{FormMode, MemoFormState};
 use memo_sync::{EngineBroadcaster, SyncEngine};
 use msg::BgMsg;
 use runtime::AppRuntime;
-use shell::{ShellAction, ShellUi};
+use shell::{MemoDrawerAction, ShellAction, ShellUi};
 use sticky_note::StickyHandle;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -150,6 +150,8 @@ enum Screen {
         show_settings: bool,
         settings_draft: Config,
         show_delete: bool,
+        /// 头像菜单「重置密码」弹窗
+        show_change_pw: bool,
         /// 新建备忘弹窗
         show_new_memo: bool,
         purge_confirm_id: Option<String>,
@@ -355,6 +357,7 @@ impl MemoApp {
             show_settings: false,
             settings_draft: cfg.clone(),
             show_delete: false,
+            show_change_pw: false,
             show_new_memo: false,
             purge_confirm_id: None,
             show_export: false,
@@ -454,6 +457,10 @@ impl MemoApp {
                     let cfg = rt.cfg.clone();
                     self.cfg = cfg.clone();
                     self.shell = ShellUi::default();
+                    self.shell.cal.load_prefs(
+                        Path::new(&cfg.data_dir),
+                        rt.svc.session_fp(),
+                    );
                     self.last_input_at = Instant::now();
                     self.pending_sync_hint = 0;
                     self.session_login_password = Some(local_password);
@@ -873,6 +880,7 @@ impl eframe::App for MemoApp {
                 show_settings,
                 settings_draft,
                 show_delete,
+                show_change_pw,
                 show_new_memo,
                 purge_confirm_id,
                 show_export,
@@ -1017,8 +1025,6 @@ impl eframe::App for MemoApp {
                         });
                     });
 
-                let auto_lock_remaining = auto_lock_after(&self.cfg)
-                    .map(|after| after.saturating_sub(self.last_input_at.elapsed()));
                 let shell_action: ShellAction = shell::show(
                     ctx,
                     &rt.svc,
@@ -1039,6 +1045,7 @@ impl eframe::App for MemoApp {
                     &mut self.edit_form,
                     status_line,
                     show_settings,
+                    show_change_pw,
                     show_export,
                     export_pw,
                     export_path,
@@ -1056,7 +1063,6 @@ impl eframe::App for MemoApp {
                     rt.cfg.show_backup_status,
                     discovered,
                     peers.len(),
-                    auto_lock_remaining,
                     self.pending_sync_hint,
                     &rt.cfg.node_id,
                     rt.cfg.node_role,
@@ -1081,7 +1087,11 @@ impl eframe::App for MemoApp {
                         self.shell.nav,
                         Some(ymd.as_str()),
                     );
-                    *status_line = "填写新建备忘，保存后写入本机".into();
+                    *status_line = if self.shell.nav.is_credentials() {
+                        "在右侧抽屉填写新建备忘，保存后写入本机".into()
+                    } else {
+                        "填写新建备忘，保存后写入本机".into()
+                    };
                 }
                 if let Some(id) = shell_action.open_sticky {
                     let list = rt.svc.list();
@@ -1121,7 +1131,98 @@ impl eframe::App for MemoApp {
                 }
 
 
-                if *show_new_memo {
+                // 备忘页：新建/编辑用右侧抽屉；其它页新建仍用居中弹窗
+                if self.shell.nav.is_credentials() {
+                    let host = self.shell.content_host;
+                    if *show_new_memo {
+                        match shell::show_memo_form_drawer(
+                            ctx,
+                            host,
+                            "新建备忘",
+                            &mut self.edit_form,
+                            FormMode::Create,
+                            "cred_new_drawer",
+                        ) {
+                            MemoDrawerAction::Save => {
+                                match memo_form::validate_title(&self.edit_form) {
+                                    Ok(_) => {
+                                        shell::submit_new_memo(
+                                            &rt.svc,
+                                            &self.edit_form,
+                                            &self.tx,
+                                        );
+                                        *status_line = "正在创建…".into();
+                                        *show_new_memo = false;
+                                        self.edit_form.clear();
+                                    }
+                                    Err(e) => {
+                                        *status_line = e;
+                                        self.edit_form.request_title_focus();
+                                    }
+                                }
+                            }
+                            MemoDrawerAction::Dismiss => {
+                                *show_new_memo = false;
+                                self.edit_form.clear();
+                                if status_line.starts_with("填写新建") {
+                                    *status_line = "已取消新建".into();
+                                }
+                            }
+                            MemoDrawerAction::None => {}
+                        }
+                    } else if *editing {
+                        let all = rt.svc.list();
+                        match shell::show_memo_form_drawer(
+                            ctx,
+                            host,
+                            "编辑备忘",
+                            &mut self.edit_form,
+                            FormMode::Edit,
+                            "cred_edit_drawer",
+                        ) {
+                            MemoDrawerAction::Save => {
+                                shell::save_memo_edit(
+                                    &rt.svc,
+                                    &all,
+                                    selected,
+                                    title_draft,
+                                    body_draft,
+                                    visibility_draft,
+                                    category_draft,
+                                    due_date_draft,
+                                    end_date_draft,
+                                    tags_draft,
+                                    done_draft,
+                                    priority_draft,
+                                    editing,
+                                    &mut self.memo_doc,
+                                    &mut self.edit_form,
+                                    status_line,
+                                    &self.tx,
+                                );
+                            }
+                            MemoDrawerAction::Dismiss => {
+                                shell::cancel_memo_edit(
+                                    selected,
+                                    &all,
+                                    title_draft,
+                                    body_draft,
+                                    visibility_draft,
+                                    category_draft,
+                                    due_date_draft,
+                                    end_date_draft,
+                                    tags_draft,
+                                    done_draft,
+                                    priority_draft,
+                                    editing,
+                                    &mut self.memo_doc,
+                                    &mut self.edit_form,
+                                );
+                            }
+                            MemoDrawerAction::None => {}
+                        }
+                    }
+                } else if *show_new_memo {
                     let modal = theme::begin_modal(ctx, "new_memo_modal");
                     let mut open = true;
                     let mut close_requested = false;
@@ -1133,7 +1234,6 @@ impl eframe::App for MemoApp {
                                 .id_source("new_memo_modal_scroll")
                                 .auto_shrink([false, false])
                                 .max_height(520.0);
-                            // 标题未填保存时强制滚回顶部，露出标题输入栏
                             if self.edit_form.force_scroll_top() {
                                 scroll = scroll.vertical_scroll_offset(0.0);
                                 self.edit_form.tick_force_scroll_top();
@@ -1301,6 +1401,112 @@ impl eframe::App for MemoApp {
                         });
                     if modal.end(ctx, true) {
                         *purge_confirm_id = None;
+                    }
+                }
+
+                if *show_change_pw {
+                    let modal = theme::begin_modal(ctx, "change_pw_modal");
+                    let mut open = true;
+                    let mut close_requested = false;
+                    theme::modal_fixed(ctx, "重置密码", [420.0, 320.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
+                        .show(ctx, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new(
+                                    "修改本机登录密码。用于进入本机并加密数据备份；不加密 .memokey。",
+                                )
+                                .size(13.0)
+                                .color(theme::text_muted()),
+                            );
+                            ui.add_space(10.0);
+                            let pw_w = ui.available_width().max(120.0);
+                            ui.label(
+                                RichText::new("当前密码")
+                                    .size(12.0)
+                                    .color(theme::text_muted()),
+                            );
+                            theme::password_field(
+                                ui,
+                                &mut self.change_pw_old,
+                                "当前登录密码",
+                                pw_w,
+                                32.0,
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("新密码（至少 6 位）")
+                                    .size(12.0)
+                                    .color(theme::text_muted()),
+                            );
+                            theme::password_field(
+                                ui,
+                                &mut self.change_pw_new,
+                                "新登录密码",
+                                pw_w,
+                                32.0,
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("确认新密码")
+                                    .size(12.0)
+                                    .color(theme::text_muted()),
+                            );
+                            theme::password_field(
+                                ui,
+                                &mut self.change_pw_new2,
+                                "再输入一次",
+                                pw_w,
+                                32.0,
+                            );
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                if theme::success_button(ui, "保存新密码").clicked() {
+                                    let old = self.change_pw_old.clone();
+                                    let new = self.change_pw_new.clone();
+                                    let new2 = self.change_pw_new2.clone();
+                                    match memo_core::identity_keys::validate_local_password(
+                                        &new, &new2,
+                                    ) {
+                                        Ok(()) => {
+                                            let data = PathBuf::from(&rt.cfg.data_dir);
+                                            let fp = rt.svc.session_fp().to_string();
+                                            match memo_core::identity_keys::IdentityKeys::change_local_password(
+                                                data.as_path(),
+                                                &fp,
+                                                &old,
+                                                &new,
+                                            ) {
+                                                Ok(()) => {
+                                                    self.session_login_password =
+                                                        Some(new.trim().to_string());
+                                                    self.change_pw_old.clear();
+                                                    self.change_pw_new.clear();
+                                                    self.change_pw_new2.clear();
+                                                    *status_line = "登录密码已更新".into();
+                                                    close_requested = true;
+                                                }
+                                                Err(e) => {
+                                                    *status_line = format!("改密失败: {e}");
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            *status_line = e.to_string();
+                                        }
+                                    }
+                                }
+                                if theme::ghost_button(ui, "取消").clicked() {
+                                    close_requested = true;
+                                }
+                            });
+                        });
+                    if modal.end(ctx, open) || close_requested || !open {
+                        *show_change_pw = false;
+                        self.change_pw_old.clear();
+                        self.change_pw_new.clear();
+                        self.change_pw_new2.clear();
                     }
                 }
 
@@ -2204,6 +2410,10 @@ impl eframe::App for MemoApp {
                 self.sticky_session_dirty = false;
                 self.save_sticky_session_now();
             }
+            self.shell.cal.save_prefs_if_dirty(
+                Path::new(&self.cfg.data_dir),
+                rt.svc.session_fp(),
+            );
             if self.main_hidden
                 || !ctx.input(|i| i.viewport().focused.unwrap_or(false))
             {
@@ -2222,6 +2432,12 @@ impl eframe::App for MemoApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Screen::Main { rt, .. } = &self.screen {
+            self.shell.cal.save_prefs_if_dirty(
+                Path::new(&self.cfg.data_dir),
+                rt.svc.session_fp(),
+            );
+        }
         if let Some(t) = self.tray.take() {
             t.dispose();
         }
@@ -2290,7 +2506,7 @@ pub fn run_gui_with_opts(cfg: Config, start_hidden: bool) -> eframe::Result<()> 
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 840.0])
+            .with_inner_size([960.0, 640.0])
             .with_min_inner_size([960.0, 640.0])
             .with_title("分布式备忘录")
             .with_icon(app_icon::window_icon()),
