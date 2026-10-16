@@ -76,7 +76,7 @@ pub struct CycleConfig {
     /// 用户手动指定经期长度
     #[serde(default)]
     pub manual_period: bool,
-    /// 已查看关怀提醒所对应的「预计开始日」YYYY-MM-DD（未查看则持续提示）
+    /// 最近确认关怀的日历日 YYYY-MM-DD（按日已读；窗口内次日再提示）
     #[serde(default)]
     pub remind_seen_for: String,
     /// 排卵/易孕窗预设

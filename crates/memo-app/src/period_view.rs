@@ -13,12 +13,12 @@ use std::sync::Arc;
 const REF_DISCLAIMER: &str =
     "系统仅根据你标记的历史经期日给出参考时间，不能确保完全正确。月经不调、压力、疾病、药物等都可能影响周期，请以自身感受为准，必要时咨询医生。";
 
-/// 经期临近 / 进行中的关怀提醒（未点开「女性私密」前持续友好提示）。
+/// 经期临近 / 进行中的关怀提醒（窗口内按日提示；当天点开私密后消闪）。
 #[derive(Debug, Clone)]
 pub struct PeriodCareRemind {
     /// 是否处于提醒窗口（预计前 3 天～经期窗口内）
     pub active: bool,
-    /// 用户是否已点开查看过本轮预计
+    /// 今天是否已点开查看过（按自然日，非整轮一次）
     pub seen: bool,
     /// 本轮预计开始日 YYYY-MM-DD
     pub expected_start: String,
@@ -55,7 +55,8 @@ pub fn care_remind(svc: &MemoService, memos: &[MemoView]) -> Option<PeriodCareRe
         return None;
     }
     let (title, body) = warm_copy(days);
-    let seen = cfg.remind_seen_for == expected_start;
+    // remind_seen_for = 最近确认关怀的日历日（非 expected_start）
+    let seen = cfg.remind_seen_for == today_ymd();
     Some(PeriodCareRemind {
         active: true,
         seen,
@@ -66,16 +67,17 @@ pub fn care_remind(svc: &MemoService, memos: &[MemoView]) -> Option<PeriodCareRe
     })
 }
 
-/// 用户点开「女性私密」后标记本轮提醒已读。
-pub fn ack_care_remind(svc: &MemoService, expected_start: &str) {
+/// 用户点开「私密」后标记**今日**关怀已读（窗口内次日再提示）。
+pub fn ack_care_remind(svc: &MemoService, _expected_start: &str) {
     let Ok(pid) = ensure_cycle_person(svc) else {
         return;
     };
+    let today = today_ymd();
     let mut cfg = svc.get_cycle(&pid).unwrap_or_default();
-    if cfg.remind_seen_for == expected_start {
+    if cfg.remind_seen_for == today {
         return;
     }
-    cfg.remind_seen_for = expected_start.to_string();
+    cfg.remind_seen_for = today;
     if cfg.last_start.is_empty() {
         let marked = period_marked_days(&svc.list());
         let stats = analyze_period_marks(&marked);
@@ -1447,8 +1449,8 @@ pub(crate) fn mark_period_start(
         return;
     }
     *range_start = Some(ymd.to_string());
-    *status_line = format!("已选经期开始 {ymd}");
-    *tip = "再选结束日：将自动标注整段（并替换与之重叠的旧经期）".into();
+    *status_line = format!("已选经期开始 {ymd}，请再点结束日");
+    *tip = "再点日历结束日：将自动标注整段（并替换与之重叠的旧经期）".into();
 }
 
 /// 经期结束：相对 pending 开始自动整段标注。
@@ -1469,7 +1471,7 @@ pub(crate) fn mark_period_end(
         s
     } else {
         *status_line = "请先标注「经期开始」".into();
-        *tip = "右键某日选经期开始，再选结束日即可自动标整段".into();
+        *tip = "点底栏「标记经期」或「从此日开始」，再选结束日即可自动标整段".into();
         return;
     };
     let Some(s) = NaiveDate::parse_from_str(&start, "%Y-%m-%d").ok() else {

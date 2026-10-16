@@ -37,7 +37,15 @@ pub fn categories_for(scope: FormScope) -> &'static [MemoCategory] {
             MemoCategory::Emergency,
             MemoCategory::Inspiration,
         ],
-        FormScope::Credentials => &[MemoCategory::Credentials],
+        // 备忘页：永久档案类型（无待办 / 无性别私密）；不上日历
+        FormScope::Credentials => &[
+            MemoCategory::Credentials,
+            MemoCategory::Work,
+            MemoCategory::Life,
+            MemoCategory::Finance,
+            MemoCategory::Inspiration,
+            MemoCategory::Emergency,
+        ],
         FormScope::GenderPrivate => &[MemoCategory::GenderPrivate],
     }
 }
@@ -53,6 +61,7 @@ pub fn kinds_for(scope: FormScope) -> &'static [DateKind] {
         FormScope::Calendar | FormScope::GenderPrivate => {
             &[DateKind::Day, DateKind::Span, DateKind::Parked]
         }
+        // 备忘作用域统一「不上日历」；分类由上面的类型选择决定
         FormScope::Credentials => &[DateKind::Credentials],
     }
 }
@@ -248,10 +257,15 @@ impl MemoFormState {
     fn sync_kind_fields(&mut self) {
         match self.kind {
             DateKind::Credentials => {
-                self.category = MemoCategory::Credentials;
+                // 备忘页作用域：保留用户选的类型，仅清日期；账号证件仍强制私密
+                if self.scope != FormScope::Credentials {
+                    self.category = MemoCategory::Credentials;
+                    self.visibility = MemoVisibility::Private;
+                } else if self.category.canonical() == MemoCategory::Credentials {
+                    self.visibility = MemoVisibility::Private;
+                }
                 self.due_date.clear();
                 self.end_date.clear();
-                self.visibility = MemoVisibility::Private;
                 self.remind_before_days = 0;
             }
             DateKind::Parked => {
@@ -311,7 +325,10 @@ impl MemoFormState {
             return;
         }
         self.kind = kind;
-        if kind == DateKind::Credentials && self.category.canonical() != MemoCategory::Credentials
+        // 备忘页可多类型；其它作用域选「备忘」仍落到账号证件分类
+        if kind == DateKind::Credentials
+            && self.scope != FormScope::Credentials
+            && self.category.canonical() != MemoCategory::Credentials
         {
             self.set_category(MemoCategory::Credentials, stamp);
             return;
@@ -561,12 +578,21 @@ fn kind_hint(kind: DateKind) -> &'static str {
         DateKind::Day => "出现在选中的那一天。",
         DateKind::Span => "月历上画一条横跨多天的色条。",
         DateKind::Parked => "进右侧「未安排」，以后再放到某一天。",
-        DateKind::Credentials => "会放进「备忘」，只本人可见，不上日历。",
+        DateKind::Credentials => "永久档案：不上日历；账号证件类强制私密。",
     }
 }
 
 fn show_kinds(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
     let kinds = kinds_for(state.scope);
+    // 备忘页类型由「选择分类」决定，此处不重复展示单一「这是」
+    if state.scope == FormScope::Credentials && kinds.len() <= 1 {
+        let k = kinds.first().copied().unwrap_or(DateKind::Credentials);
+        if state.kind != k {
+            state.kind = k;
+            state.sync_kind_fields();
+        }
+        return;
+    }
     field_label(ui, "这是", true);
     ui.add_space(3.0);
     if kinds.len() <= 1 {

@@ -33,7 +33,7 @@ pub struct MaleHealthConfig {
     /// 提前提醒天数
     #[serde(default = "default_remind_days")]
     pub remind_days: u32,
-    /// 已查看关怀提醒所对应的下次体检日
+    /// 最近确认关怀的日历日 YYYY-MM-DD（按日已读；窗口内次日再提示）
     #[serde(default)]
     pub remind_seen_for: String,
     /// 是否在性别私密页展示体检模块（关闭仅藏 UI，不删日期）
@@ -78,8 +78,13 @@ impl MaleHealthConfig {
         days <= ahead && days >= -3
     }
 
+    /// 今天是否已确认过关怀（`remind_seen_for` = 今日 YYYY-MM-DD）。
     pub fn care_seen(&self) -> bool {
-        !self.next_checkup.is_empty() && self.remind_seen_for == self.next_checkup
+        let today = chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+        !self.next_checkup.is_empty() && self.remind_seen_for == today
     }
 
     /// `ymd` 加 `months` 个月（日对齐，遇月末钳到当月最后一天）。

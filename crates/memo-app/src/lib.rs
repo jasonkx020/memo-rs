@@ -15,6 +15,7 @@ mod memo_form;
 mod msg;
 mod nav;
 mod notify_sys;
+mod page_shell;
 mod period_view;
 mod runtime;
 mod save_dialog;
@@ -213,6 +214,8 @@ pub struct MemoApp {
     change_pw_old: String,
     change_pw_new: String,
     change_pw_new2: String,
+    /// 保存需重启的设置后，确认是否立即重启
+    show_restart_confirm: bool,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
@@ -251,7 +254,23 @@ impl MemoApp {
             change_pw_old: String::new(),
             change_pw_new: String::new(),
             change_pw_new2: String::new(),
+            show_restart_confirm: false,
         }
+    }
+
+    /// 拉起新进程后由调用方设置 `quit_requested` 退出当前实例。
+    fn spawn_self_restart() -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| format!("无法解析程序路径: {e}"))?;
+        // 从设置确认重启：去掉 --tray，让用户看到主窗
+        let args: Vec<std::ffi::OsString> = std::env::args_os()
+            .skip(1)
+            .filter(|a| a != "--tray")
+            .collect();
+        std::process::Command::new(exe)
+            .args(&args)
+            .spawn()
+            .map_err(|e| format!("无法启动新进程: {e}"))?;
+        Ok(())
     }
 
     fn save_sticky_session_now(&mut self) {
@@ -929,6 +948,15 @@ impl eframe::App for MemoApp {
                     let list = rt.svc.list();
                     // 长期开机跨日：自动重算经期预测
                     let _ = period_view::ensure_daily_predict_recalc(&rt.svc, &list);
+                    // 顶栏告警：自然日变化则立刻重绘（关怀按日已读 / 过期集合）
+                    let today_ymd = chrono::Local::now()
+                        .date_naive()
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    if self.shell.last_nav_warn_ymd != today_ymd {
+                        self.shell.last_nav_warn_ymd = today_ymd;
+                        ctx.request_repaint();
+                    }
                     let now = chrono::Local::now().naive_local();
                     for m in list {
                         if m.done || m.due_date.trim().is_empty() {
@@ -988,6 +1016,12 @@ impl eframe::App for MemoApp {
                                 .color(theme::text_muted()),
                             );
                             ui.separator();
+                            ui.label(
+                                RichText::new(format!("待同步 {} 条", self.pending_sync_hint))
+                                    .small()
+                                    .color(theme::text_muted()),
+                            );
+                            ui.separator();
                             let disk = rt.svc.disk_space();
                             let disk_txt = if disk.total_bytes > 0 {
                                 format!("磁盘 {}", disk.format_pair())
@@ -1021,6 +1055,16 @@ impl eframe::App for MemoApp {
                                         .color(theme::text_muted()),
                                 );
                             }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new("数据本地加密 · 仅同步已授权节点")
+                                            .small()
+                                            .color(theme::text_muted()),
+                                    );
+                                },
+                            );
                             let _ = audit_detail;
                         });
                     });
@@ -1062,8 +1106,6 @@ impl eframe::App for MemoApp {
                     &rt.cfg.data_dir,
                     rt.cfg.show_backup_status,
                     discovered,
-                    peers.len(),
-                    self.pending_sync_hint,
                     &rt.cfg.node_id,
                     rt.cfg.node_role,
                     rt.cfg.node_visible,
@@ -1087,11 +1129,7 @@ impl eframe::App for MemoApp {
                         self.shell.nav,
                         Some(ymd.as_str()),
                     );
-                    *status_line = if self.shell.nav.is_credentials() {
-                        "在右侧抽屉填写新建备忘，保存后写入本机".into()
-                    } else {
-                        "填写新建备忘，保存后写入本机".into()
-                    };
+                    *status_line = "在右侧抽屉填写新建，保存后写入本机".into();
                 }
                 if let Some(id) = shell_action.open_sticky {
                     let list = rt.svc.list();
@@ -1131,17 +1169,31 @@ impl eframe::App for MemoApp {
                 }
 
 
-                // 备忘页：新建/编辑用右侧抽屉；其它页新建仍用居中弹窗
-                if self.shell.nav.is_credentials() {
+                // 三页统一：新建/编辑一律右侧抽屉（ops-unify）；关怀日历底栏标记为域特例
+                {
                     let host = self.shell.content_host;
+                    let (new_title, edit_title, new_salt, edit_salt) = match self.shell.nav {
+                        nav::NavItem::Calendar => {
+                            ("新建任务", "编辑任务", "task_new_drawer", "task_edit_drawer")
+                        }
+                        nav::NavItem::GenderPrivate => {
+                            ("新建私密", "编辑私密", "priv_new_drawer", "priv_edit_drawer")
+                        }
+                        _ => (
+                            "新建备忘",
+                            "编辑备忘",
+                            "cred_new_drawer",
+                            "cred_edit_drawer",
+                        ),
+                    };
                     if *show_new_memo {
                         match shell::show_memo_form_drawer(
                             ctx,
                             host,
-                            "新建备忘",
+                            new_title,
                             &mut self.edit_form,
                             FormMode::Create,
-                            "cred_new_drawer",
+                            new_salt,
                         ) {
                             MemoDrawerAction::Save => {
                                 match memo_form::validate_title(&self.edit_form) {
@@ -1164,118 +1216,70 @@ impl eframe::App for MemoApp {
                             MemoDrawerAction::Dismiss => {
                                 *show_new_memo = false;
                                 self.edit_form.clear();
-                                if status_line.starts_with("填写新建") {
+                                if status_line.starts_with("在右侧抽屉填写新建")
+                                    || status_line.starts_with("填写新建")
+                                {
                                     *status_line = "已取消新建".into();
                                 }
                             }
                             MemoDrawerAction::None => {}
                         }
                     } else if *editing {
-                        let all = rt.svc.list();
-                        match shell::show_memo_form_drawer(
-                            ctx,
-                            host,
-                            "编辑备忘",
-                            &mut self.edit_form,
-                            FormMode::Edit,
-                            "cred_edit_drawer",
-                        ) {
-                            MemoDrawerAction::Save => {
-                                shell::save_memo_edit(
-                                    &rt.svc,
-                                    &all,
-                                    selected,
-                                    title_draft,
-                                    body_draft,
-                                    visibility_draft,
-                                    category_draft,
-                                    due_date_draft,
-                                    end_date_draft,
-                                    tags_draft,
-                                    done_draft,
-                                    priority_draft,
-                                    editing,
-                                    &mut self.memo_doc,
-                                    &mut self.edit_form,
-                                    status_line,
-                                    &self.tx,
-                                );
-                            }
-                            MemoDrawerAction::Dismiss => {
-                                shell::cancel_memo_edit(
-                                    selected,
-                                    &all,
-                                    title_draft,
-                                    body_draft,
-                                    visibility_draft,
-                                    category_draft,
-                                    due_date_draft,
-                                    end_date_draft,
-                                    tags_draft,
-                                    done_draft,
-                                    priority_draft,
-                                    editing,
-                                    &mut self.memo_doc,
-                                    &mut self.edit_form,
-                                );
-                            }
-                            MemoDrawerAction::None => {}
-                        }
-                    }
-                } else if *show_new_memo {
-                    let modal = theme::begin_modal(ctx, "new_memo_modal");
-                    let mut open = true;
-                    let mut close_requested = false;
-                    theme::modal_fixed(ctx, "新建备忘", [560.0, 640.0])
-                        .id(modal.window_id)
-                        .open(&mut open)
-                        .show(ctx, |ui| {
-                            let mut scroll = egui::ScrollArea::vertical()
-                                .id_source("new_memo_modal_scroll")
-                                .auto_shrink([false, false])
-                                .max_height(520.0);
-                            if self.edit_form.force_scroll_top() {
-                                scroll = scroll.vertical_scroll_offset(0.0);
-                                self.edit_form.tick_force_scroll_top();
-                            }
-                            scroll.show(ui, |ui| {
-                                memo_form::show_fields(
-                                    ui,
-                                    &mut self.edit_form,
-                                    FormMode::Create,
-                                    "new_memo_modal",
-                                );
-                            });
-                            ui.add_space(10.0);
-                            ui.separator();
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                if theme::success_button(ui, "保存备忘").clicked() {
-                                    match memo_form::validate_title(&self.edit_form) {
-                                        Ok(_) => {
-                                            shell::submit_new_memo(
-                                                &rt.svc,
-                                                &self.edit_form,
-                                                &self.tx,
-                                            );
-                                            *status_line = "正在创建…".into();
-                                        }
-                                        Err(e) => {
-                                            *status_line = e;
-                                            self.edit_form.request_title_focus();
-                                        }
-                                    }
+                        // 关怀 Hub 无备忘正文可编；勿开表单抽屉
+                        let editing_hub = selected
+                            .as_ref()
+                            .is_some_and(|id| shell::is_private_hub(id));
+                        if !editing_hub {
+                            let all = rt.svc.list();
+                            match shell::show_memo_form_drawer(
+                                ctx,
+                                host,
+                                edit_title,
+                                &mut self.edit_form,
+                                FormMode::Edit,
+                                edit_salt,
+                            ) {
+                                MemoDrawerAction::Save => {
+                                    shell::save_memo_edit(
+                                        &rt.svc,
+                                        &all,
+                                        selected,
+                                        title_draft,
+                                        body_draft,
+                                        visibility_draft,
+                                        category_draft,
+                                        due_date_draft,
+                                        end_date_draft,
+                                        tags_draft,
+                                        done_draft,
+                                        priority_draft,
+                                        editing,
+                                        &mut self.memo_doc,
+                                        &mut self.edit_form,
+                                        status_line,
+                                        &self.tx,
+                                    );
                                 }
-                                if theme::ghost_button(ui, "取消").clicked() {
-                                    close_requested = true;
+                                MemoDrawerAction::Dismiss => {
+                                    shell::cancel_memo_edit(
+                                        selected,
+                                        &all,
+                                        title_draft,
+                                        body_draft,
+                                        visibility_draft,
+                                        category_draft,
+                                        due_date_draft,
+                                        end_date_draft,
+                                        tags_draft,
+                                        done_draft,
+                                        priority_draft,
+                                        editing,
+                                        &mut self.memo_doc,
+                                        &mut self.edit_form,
+                                    );
                                 }
-                            });
-                        });
-                    if modal.end(ctx, open) || close_requested || !open {
-                        *show_new_memo = false;
-                        self.edit_form.clear();
-                        if status_line.starts_with("填写新建") {
-                            *status_line = "已取消新建".into();
+                                MemoDrawerAction::None => {}
+                            }
                         }
                     }
                 }
@@ -1933,6 +1937,15 @@ impl eframe::App for MemoApp {
                                             });
 
                                             settings_item_gap(ui);
+                                            // —— 关怀与健康（私密页模块开关 / 调参）——
+                                            settings_section(ui, "关怀与健康");
+                                            gender_private_view::show_care_health_settings(
+                                                ui,
+                                                &rt.svc,
+                                                status_line,
+                                            );
+
+                                            settings_item_gap(ui);
                                             // —— 本机 ——
                                             settings_section(ui, "本机");
                                             settings_item_header(
@@ -2323,16 +2336,14 @@ impl eframe::App for MemoApp {
                                                 self.cfg.auto_lock_minutes =
                                                     settings_draft.auto_lock_minutes;
                                                 self.last_theme_mode = None;
-                                                let msg = if config::needs_restart(
-                                                    &before,
-                                                    settings_draft,
-                                                ) {
-                                                    "已保存，请重启程序使关键设置生效"
-                                                } else {
-                                                    "已保存"
-                                                };
-                                                let _ = self.tx.send(BgMsg::Info(msg.into()));
                                                 *show_settings = false;
+                                                if config::needs_restart(&before, settings_draft)
+                                                {
+                                                    self.show_restart_confirm = true;
+                                                } else {
+                                                    let _ =
+                                                        self.tx.send(BgMsg::Info("已保存".into()));
+                                                }
                                             }
                                             Err(e) => {
                                                 let _ =
@@ -2348,6 +2359,58 @@ impl eframe::App for MemoApp {
                         });
                     if modal.end(ctx, open) {
                         *show_settings = false;
+                    }
+                }
+
+                if self.show_restart_confirm {
+                    let modal = theme::begin_modal(ctx, "restart_confirm_modal");
+                    let mut open = true;
+                    theme::modal_confirm(ctx, "需要重启")
+                        .id(modal.window_id)
+                        .open(&mut open)
+                        .show(ctx, |ui| {
+                            ui.label(
+                                RichText::new("设置已保存")
+                                    .size(15.0)
+                                    .strong()
+                                    .color(theme::text()),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                theme::muted_label(
+                                    "集群盐、节点、端口或数据目录等更改需重启后生效。确定后将立即重启本程序。",
+                                ),
+                            );
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                if theme::primary_button(ui, "立即重启").clicked() {
+                                    match Self::spawn_self_restart() {
+                                        Ok(()) => {
+                                            self.show_restart_confirm = false;
+                                            self.quit_requested = true;
+                                        }
+                                        Err(e) => {
+                                            self.show_restart_confirm = false;
+                                            let _ = self.tx.send(BgMsg::Error(format!(
+                                                "重启失败：{e}。请手动退出后重新打开。"
+                                            )));
+                                        }
+                                    }
+                                }
+                                if theme::ghost_button(ui, "稍后手动重启").clicked() {
+                                    self.show_restart_confirm = false;
+                                    let _ = self.tx.send(BgMsg::Info(
+                                        "已保存，请稍后手动重启使关键设置生效".into(),
+                                    ));
+                                }
+                            });
+                        });
+                    if modal.end(ctx, open) {
+                        self.show_restart_confirm = false;
+                        let _ = self.tx.send(BgMsg::Info(
+                            "已保存，请稍后手动重启使关键设置生效".into(),
+                        ));
                     }
                 }
 

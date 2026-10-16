@@ -150,15 +150,17 @@ pub fn care_remind(svc: &MemoService) -> Option<MaleCareRemind> {
     })
 }
 
+/// 点开「私密」后标记**今日**关怀已读（窗口内次日再提示）。
 pub fn ack_care_remind(svc: &MemoService, next_checkup: &str) {
     let Ok(pid) = ensure_male_person(svc) else {
         return;
     };
+    let today = today_ymd();
     let mut cfg = svc.get_male_health(&pid).unwrap_or_default();
-    if cfg.remind_seen_for == next_checkup {
+    if cfg.remind_seen_for == today {
         return;
     }
-    cfg.remind_seen_for = next_checkup.to_string();
+    cfg.remind_seen_for = today;
     if cfg.next_checkup.is_empty() {
         cfg.next_checkup = next_checkup.to_string();
     }

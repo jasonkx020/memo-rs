@@ -4,7 +4,8 @@
 
 use crate::nav::NavItem;
 use eframe::egui::{
-    self, Color32, Frame, Margin, Rounding, Stroke, Style, TextStyle, Vec2, Visuals,
+    self, Align2, Color32, CursorIcon, FontId, Frame, Margin, Rounding, Sense, Stroke, Style,
+    TextStyle, Vec2, Visuals,
 };
 use memo_core::store::MemoCategory;
 use memo_core::ThemePreference;
@@ -872,7 +873,8 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
     visuals.warn_fg_color = p.warn;
     visuals.error_fg_color = p.danger;
     visuals.window_rounding = Rounding::same(ROUND_CARD);
-    visuals.menu_rounding = Rounding::same(ROUND_CTRL);
+    // 右键菜单：圆角卡片（对齐 context-menu-focus）
+    visuals.menu_rounding = Rounding::same(12.0);
     visuals.window_stroke = Stroke::new(1.0, p.border);
     visuals.widgets.noninteractive.bg_fill = p.card;
     visuals.widgets.noninteractive.weak_bg_fill = p.panel;
@@ -923,7 +925,6 @@ pub fn sync(ctx: &egui::Context, pref: ThemePreference, last: &mut Option<ThemeM
 
 fn polish_text_styles(style: &mut Style) {
     use egui::FontFamily;
-    use egui::FontId;
     style.text_styles.insert(
         TextStyle::Heading,
         FontId::new(22.0, FontFamily::Proportional),
@@ -1028,6 +1029,125 @@ pub fn menu_text_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
             .frame(false)
             .min_size(Vec2::new(0.0, 26.0)),
     )
+}
+
+/// 右键菜单内容区：最小宽度与行距。
+pub fn style_context_menu(ui: &mut egui::Ui) {
+    ui.set_min_width(176.0);
+    ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
+    ui.spacing_mut().button_padding = Vec2::new(10.0, 7.0);
+}
+
+/// 右键菜单分组分隔线。
+pub fn menu_sep(ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    let full = ui.max_rect();
+    let y = ui.cursor().top();
+    ui.painter().hline(
+        (full.left() + 6.0)..=(full.right() - 6.0),
+        y,
+        Stroke::new(1.0, border()),
+    );
+    ui.add_space(5.0);
+}
+
+/// 右键菜单分区标题（如「经期」「体检」）。
+pub fn menu_section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(title)
+            .size(11.0)
+            .strong()
+            .color(text_muted()),
+    );
+    ui.add_space(2.0);
+}
+
+/// 右键普通菜单项（可选左侧标记块）。
+pub fn menu_item(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    menu_item_ex(ui, None, label, false)
+}
+
+/// 右键菜单项（带左侧短标记，如「开」「编」）。
+pub fn menu_item_mark(ui: &mut egui::Ui, mark: &str, label: &str) -> egui::Response {
+    menu_item_ex(ui, Some(mark), label, false)
+}
+
+/// 右键危险菜单项（移入回收站等，默认「删」标记）。
+pub fn menu_item_danger(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    menu_item_ex(ui, Some("删"), label, true)
+}
+
+/// 右键危险菜单项（自定义标记）。
+pub fn menu_item_danger_mark(ui: &mut egui::Ui, mark: &str, label: &str) -> egui::Response {
+    menu_item_ex(ui, Some(mark), label, true)
+}
+
+fn menu_item_ex(
+    ui: &mut egui::Ui,
+    mark: Option<&str>,
+    label: &str,
+    is_danger: bool,
+) -> egui::Response {
+    let w = ui.available_width().max(160.0);
+    let h = 32.0_f32;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let fill = if resp.hovered() {
+        if is_danger {
+            danger_soft()
+        } else {
+            shell_accent_soft()
+        }
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill.a() > 0 {
+        ui.painter()
+            .rect_filled(rect, Rounding::same(8.0), fill);
+    }
+    let fg = if is_danger {
+        danger()
+    } else if resp.hovered() {
+        shell_accent()
+    } else {
+        text()
+    };
+    let mut x = rect.left() + 8.0;
+    if let Some(m) = mark {
+        let badge = egui::Rect::from_center_size(
+            egui::pos2(x + 9.0, rect.center().y),
+            Vec2::splat(18.0),
+        );
+        let bbg = if is_danger {
+            danger_soft()
+        } else if resp.hovered() {
+            Color32::from_rgb(0xDB, 0xEA, 0xFE)
+        } else {
+            shell_accent_soft()
+        };
+        let bfg = if is_danger { danger() } else { shell_accent() };
+        ui.painter()
+            .rect_filled(badge, Rounding::same(5.0), bbg);
+        ui.painter().text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            m,
+            FontId::proportional(10.5),
+            bfg,
+        );
+        x += 24.0;
+    }
+    ui.painter().text(
+        egui::pos2(x, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        fg,
+    );
+    resp
 }
 
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
@@ -1222,7 +1342,7 @@ pub fn password_field(
     width: f32,
     height: f32,
 ) -> egui::Response {
-    use egui::{Align, Align2, FontId, Sense, TextEdit};
+    use egui::{Align, TextEdit};
 
     let size = Vec2::new(width, height);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
