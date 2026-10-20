@@ -3273,9 +3273,11 @@ pub fn show_memo_form_drawer(
                 .stroke(Stroke::new(1.0, theme::border()))
                 .inner_margin(Margin::symmetric(PAD_X, PAD_Y))
                 .show(ui, |ui| {
-                    ui.set_min_size(Vec2::new(drawer_w, inner_h));
+                    // Frame 已含 PAD；勿再按外宽 drawer_w 设最小宽，否则右溢
+                    let content_w = ui.available_width();
+                    ui.set_min_height(inner_h);
                     ui.set_max_height(inner_h);
-                    ui.set_max_width(drawer_w);
+                    ui.set_max_width(content_w);
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(title)
@@ -3316,7 +3318,9 @@ pub fn show_memo_form_drawer(
                         edit_form.tick_force_scroll_top();
                     }
                     scroll.show(ui, |ui| {
-                        ui.set_min_width((drawer_w - PAD_X * 2.0).max(200.0));
+                        let w = ui.available_width();
+                        ui.set_min_width(w);
+                        ui.set_max_width(w);
                         memo_form::show_fields(ui, edit_form, mode, id_salt);
                     });
 

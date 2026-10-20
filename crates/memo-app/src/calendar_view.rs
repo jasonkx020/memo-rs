@@ -1612,7 +1612,7 @@ fn section_header(ui: &mut egui::Ui, title: &str, n: usize, fg: Color32, badge_b
     ui.add_space(4.0);
 }
 
-/// 选中日黄历：宜忌后台算完再刷新（农历已并入日期标题）。
+/// 选中日黄历：宜忌后台算完再刷新；农历上行、宜忌下行可换行。
 fn show_huangli_row(ui: &mut egui::Ui, day: NaiveDate) {
     let al = huangli::cached_full(day);
     if al.is_none() {
@@ -1626,39 +1626,41 @@ fn show_huangli_row(ui: &mut egui::Ui, day: NaiveDate) {
         Some(a) => a.display_yi_ji_text(36),
         None => ("…".into(), "…".into()),
     };
-    ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.vertical(|ui| {
-            ui.set_max_width(ui.available_width() * 0.42);
+    let w = ui.available_width();
+    ui.vertical(|ui| {
+        ui.set_min_width(w);
+        ui.set_max_width(w);
+        ui.label(
+            RichText::new(lunar)
+                .size(12.0)
+                .color(theme::text_muted()),
+        );
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
             ui.label(
-                RichText::new(lunar)
-                    .size(12.0)
-                    .color(theme::text_muted()),
+                RichText::new("宜")
+                    .size(11.0)
+                    .strong()
+                    .color(theme::success()),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(yi).size(11.5).color(theme::text_muted()))
+                    .wrap(true),
             );
         });
-        let (sep, _) = ui.allocate_exact_size(Vec2::new(1.0, 28.0), Sense::hover());
-        ui.painter()
-            .rect_filled(sep, Rounding::ZERO, theme::border());
-        ui.add_space(6.0);
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("宜")
-                        .size(11.0)
-                        .strong()
-                        .color(theme::success()),
-                );
-                ui.label(RichText::new(yi).size(11.5).color(theme::text_muted()));
-            });
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("忌")
-                        .size(11.0)
-                        .strong()
-                        .color(theme::warn_overdue_fg()),
-                );
-                ui.label(RichText::new(ji).size(11.5).color(theme::text_muted()));
-            });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                RichText::new("忌")
+                    .size(11.0)
+                    .strong()
+                    .color(theme::warn_overdue_fg()),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(ji).size(11.5).color(theme::text_muted()))
+                    .wrap(true),
+            );
         });
     });
 }
@@ -2362,9 +2364,11 @@ pub fn show_cal_drawer(
                 .stroke(Stroke::new(1.0, theme::border()))
                 .inner_margin(Margin::symmetric(PAD_X, PAD_Y))
                 .show(ui, |ui| {
-                    ui.set_min_size(Vec2::new(drawer_w, inner_h));
+                    // Frame 已含 PAD；勿再按外宽 drawer_w 设最小宽，否则右溢
+                    let content_w = ui.available_width();
+                    ui.set_min_height(inner_h);
                     ui.set_max_height(inner_h);
-                    ui.set_max_width(drawer_w);
+                    ui.set_max_width(content_w);
                     ui.horizontal(|ui| {
                         if ui
                             .add(
@@ -2388,7 +2392,9 @@ pub fn show_cal_drawer(
                         .auto_shrink([false, false])
                         .max_height((inner_h - 48.0).max(80.0))
                         .show(ui, |ui| {
-                            ui.set_min_width((drawer_w - PAD_X * 2.0).max(200.0));
+                            let w = ui.available_width();
+                            ui.set_min_width(w);
+                            ui.set_max_width(w);
                             add_contents(ui);
                         });
                 });
@@ -2537,7 +2543,7 @@ pub fn show_event_detail(
                 if m.done {
                     heading = heading.strikethrough();
                 }
-                ui.label(heading);
+                ui.add(egui::Label::new(heading).wrap(true));
             });
             ui.add_space(14.0);
 
@@ -2689,7 +2695,9 @@ fn detail_time_row(ui: &mut egui::Ui, kind: DetailTimeIcon, text: &str, text_col
             DetailTimeIcon::Clock => paint_detail_clock_icon(ui.painter(), irect),
         }
         ui.add_space(6.0);
-        ui.label(RichText::new(text).size(13.5).color(text_color));
+        ui.add(
+            egui::Label::new(RichText::new(text).size(13.5).color(text_color)).wrap(true),
+        );
     });
 }
 
