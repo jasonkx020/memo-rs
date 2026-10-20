@@ -334,51 +334,6 @@ fn show_task_rail_header(
                 .strong()
                 .color(theme::text()),
         );
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            let seg = 13.0;
-            ui.label(
-                RichText::new(format!("今日 {today_n}"))
-                    .size(seg)
-                    .color(theme::shell_accent()),
-            );
-            let sep = |ui: &mut egui::Ui| {
-                ui.label(
-                    RichText::new(" · ")
-                        .size(seg)
-                        .color(theme::text_muted()),
-                );
-            };
-            sep(ui);
-            ui.label(
-                RichText::new(format!("共 {} 条", stats.total))
-                    .size(seg)
-                    .color(theme::text_muted()),
-            );
-            sep(ui);
-            ui.label(
-                RichText::new(format!("待办 {}", stats.pending))
-                    .size(seg)
-                    .color(theme::warn_due_today_fg()),
-            );
-            sep(ui);
-            ui.label(
-                RichText::new(format!("过期 {}", stats.overdue))
-                    .size(seg)
-                    .strong()
-                    .color(if stats.overdue == 0 {
-                        theme::text_muted()
-                    } else {
-                        theme::warn_overdue_fg()
-                    }),
-            );
-            sep(ui);
-            ui.label(
-                RichText::new(format!("已完成 {}", stats.done))
-                    .size(seg)
-                    .color(theme::success()),
-            );
-        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(
@@ -397,6 +352,52 @@ fn show_task_rail_header(
                 *open_new = true;
             }
         });
+    });
+    // 统计单独一行并可换行，避免窄左栏被 clip 裁掉
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let seg = 13.0;
+        ui.label(
+            RichText::new(format!("今日 {today_n}"))
+                .size(seg)
+                .color(theme::shell_accent()),
+        );
+        let sep = |ui: &mut egui::Ui| {
+            ui.label(
+                RichText::new(" · ")
+                    .size(seg)
+                    .color(theme::text_muted()),
+            );
+        };
+        sep(ui);
+        ui.label(
+            RichText::new(format!("共 {} 条", stats.total))
+                .size(seg)
+                .color(theme::text_muted()),
+        );
+        sep(ui);
+        ui.label(
+            RichText::new(format!("待办 {}", stats.pending))
+                .size(seg)
+                .color(theme::warn_due_today_fg()),
+        );
+        sep(ui);
+        ui.label(
+            RichText::new(format!("过期 {}", stats.overdue))
+                .size(seg)
+                .strong()
+                .color(if stats.overdue == 0 {
+                    theme::text_muted()
+                } else {
+                    theme::warn_overdue_fg()
+                }),
+        );
+        sep(ui);
+        ui.label(
+            RichText::new(format!("已完成 {}", stats.done))
+                .size(seg)
+                .color(theme::success()),
+        );
     });
 }
 
@@ -433,24 +434,35 @@ pub fn show(
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_max_width(side_w);
+                    ui.set_min_height(full_h);
                     ui.set_max_height(full_h);
                     ui.set_clip_rect(ui.max_rect());
                     show_task_rail_header(ui, today_n, rail_stats, open_new);
                     ui.add_space(page_shell::PAGE_GAP);
-                    show_work_side(
-                        ui,
-                        svc,
-                        cal,
-                        all,
-                        &q,
-                        selected,
-                        editing,
-                        open_new,
-                        picked,
-                        pick_edit,
-                        pick_delete,
-                        open_sticky,
-                        tx,
+                    // 列表区吃满页头以下剩余高度，保证长列表可滚到底
+                    let list_h = ui.available_height().max(40.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), list_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_height(list_h);
+                            ui.set_max_height(list_h);
+                            show_work_side(
+                                ui,
+                                svc,
+                                cal,
+                                all,
+                                &q,
+                                selected,
+                                editing,
+                                open_new,
+                                picked,
+                                pick_edit,
+                                pick_delete,
+                                open_sticky,
+                                tx,
+                            );
+                        },
                     );
                 },
             );
@@ -705,87 +717,101 @@ pub(crate) fn show_month(
     open_new: &mut bool,
     picked: &mut Option<String>,
 ) {
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{}年{}月", cal.year, cal.month))
-                .size(16.0)
-                .strong()
-                .color(theme::text()),
-        );
-        // 「+ 新建」已上移到页头；左栏只保留月历导航
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(egui::Button::new("今天").min_size(Vec2::new(44.0, 26.0)))
-                .clicked()
-            {
-                let t = today();
-                cal.year = t.year();
-                cal.month = t.month();
-                cal.selected = t;
-            }
-            if ui
-                .add_sized(Vec2::new(28.0, 26.0), egui::Button::new("›"))
-                .clicked()
-            {
-                shift_month(cal, 1);
-            }
-            if ui
-                .add_sized(Vec2::new(28.0, 26.0), egui::Button::new("‹"))
-                .clicked()
-            {
-                shift_month(cal, -1);
-            }
-        });
-    });
-    ui.add_space(4.0);
-    show_huangli_row(ui, cal.selected);
-    ui.add_space(6.0);
-    // 网格区关掉默认行距，只用显式 gap，避免底部多出空隙或溢出
-    ui.spacing_mut().item_spacing.y = 0.0;
-    let gap = 3.0_f32;
-    let cell_w = ((ui.available_width() - gap * 6.0) / 7.0).max(1.0);
-    ui.columns(7, |cols| {
-        for (i, name) in ["一", "二", "三", "四", "五", "六", "日"].iter().enumerate() {
-            cols[i].label(
-                RichText::new(*name)
-                    .size(11.0)
-                    .strong()
-                    .color(theme::text_muted()),
-            );
-        }
-    });
-    // 纵向刚好填满剩余高度：6 行 + 5 个 gap
-    let n_rows = 6_usize;
-    let remain = ui.available_height().max(1.0);
-    let cell_h = ((remain - gap * (n_rows - 1) as f32) / n_rows as f32).max(1.0);
-    let first = NaiveDate::from_ymd_opt(cal.year, cal.month, 1).unwrap_or_else(today);
-    let pad = first.weekday().num_days_from_monday() as i64;
-    let start = first - Duration::try_days(pad).unwrap_or_default();
-    for week in 0..n_rows {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
+    let frame_h = ui.available_height();
+    // 内高须扣掉上下 margin + 描边，否则 Frame 外高会撑破右栏（与私密同公式）
+    const FRAME_PAD: f32 = 10.0;
+    let stroke_h = 2.0;
+    let inner_budget = (frame_h - FRAME_PAD * 2.0 - stroke_h).max(80.0);
+    Frame::none()
+        .fill(theme::card())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(12.0))
+        .inner_margin(Margin::same(FRAME_PAD))
+        .show(ui, |ui| {
+            ui.set_min_height(inner_budget);
+            ui.set_max_height(inner_budget);
             ui.spacing_mut().item_spacing.y = 0.0;
-            for d in 0..7 {
-                let day = start + Duration::try_days((week * 7 + d) as i64).unwrap_or_default();
-                day_cell(
-                    ui,
-                    cal,
-                    all,
-                    q,
-                    day,
-                    cell_w,
-                    cell_h,
-                    selected,
-                    editing,
-                    open_new,
-                    picked,
+            ui.horizontal(|ui| {
+                if ui.small_button("‹").clicked() {
+                    shift_month(cal, -1);
+                }
+                ui.label(
+                    RichText::new(format!("{:04} 年 {:02} 月", cal.year, cal.month))
+                        .strong()
+                        .size(14.0)
+                        .color(theme::text()),
                 );
+                if ui.small_button("›").clicked() {
+                    shift_month(cal, 1);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let today_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new("今天").size(12.0).color(theme::text()),
+                        )
+                        .fill(theme::panel())
+                        .stroke(Stroke::new(1.0, theme::border()))
+                        .rounding(Rounding::same(8.0))
+                        .min_size(Vec2::new(48.0, 26.0)),
+                    );
+                    if today_btn.clicked() {
+                        let t = today();
+                        cal.year = t.year();
+                        cal.month = t.month();
+                        cal.selected = t;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            show_huangli_row(ui, cal.selected);
+            ui.add_space(6.0);
+            // 网格区关掉默认行距，只用显式 gap，避免底部多出空隙或溢出
+            let gap = 3.0_f32;
+            let cell_w = ((ui.available_width() - gap * 6.0) / 7.0).max(1.0);
+            ui.columns(7, |cols| {
+                for (i, name) in ["一", "二", "三", "四", "五", "六", "日"].iter().enumerate() {
+                    cols[i].label(
+                        RichText::new(*name)
+                            .size(11.0)
+                            .strong()
+                            .color(theme::text_muted()),
+                    );
+                }
+            });
+            // 纵向刚好填满剩余高度：6 行 + 5 个 gap
+            let n_rows = 6_usize;
+            let remain = ui.available_height().max(1.0);
+            let cell_h = ((remain - gap * (n_rows - 1) as f32) / n_rows as f32).max(1.0);
+            let first = NaiveDate::from_ymd_opt(cal.year, cal.month, 1).unwrap_or_else(today);
+            let pad = first.weekday().num_days_from_monday() as i64;
+            let start = first - Duration::try_days(pad).unwrap_or_default();
+            for week in 0..n_rows {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for d in 0..7 {
+                        let day =
+                            start + Duration::try_days((week * 7 + d) as i64).unwrap_or_default();
+                        day_cell(
+                            ui,
+                            cal,
+                            all,
+                            q,
+                            day,
+                            cell_w,
+                            cell_h,
+                            selected,
+                            editing,
+                            open_new,
+                            picked,
+                        );
+                    }
+                });
+                if week + 1 < n_rows {
+                    ui.add_space(gap);
+                }
             }
         });
-        if week + 1 < n_rows {
-            ui.add_space(gap);
-        }
-    }
 }
 
 fn shift_month(cal: &mut CalendarUi, delta: i32) {
