@@ -480,6 +480,10 @@ impl MemoApp {
                         Path::new(&cfg.data_dir),
                         rt.svc.session_fp(),
                     );
+                    self.shell.drawer.load(
+                        Path::new(&cfg.data_dir),
+                        rt.svc.session_fp(),
+                    );
                     self.last_input_at = Instant::now();
                     self.pending_sync_hint = 0;
                     self.session_login_password = Some(local_password);
@@ -539,7 +543,7 @@ impl MemoApp {
                     } = &mut self.screen
                     {
                         *show_new_memo = false;
-                        *selected = Some(id);
+                        *selected = Some(id.clone());
                         *title_draft = title.clone();
                         *body_draft = body.clone();
                         *category_draft = category;
@@ -572,7 +576,10 @@ impl MemoApp {
                             false,
                             MemoVisibility::Private,
                             0,
+                            &id,
                         );
+                        self.edit_form.data_dir =
+                            Some(std::path::PathBuf::from(&self.cfg.data_dir));
                     }
                 }
                 BgMsg::Deleted => {
@@ -1088,6 +1095,7 @@ impl eframe::App for MemoApp {
                     &mut self.memo_doc,
                     &mut self.edit_form,
                     status_line,
+                    *show_new_memo,
                     show_settings,
                     show_change_pw,
                     show_export,
@@ -1128,7 +1136,10 @@ impl eframe::App for MemoApp {
                         &mut self.edit_form,
                         self.shell.nav,
                         Some(ymd.as_str()),
+                        &rt.cfg.data_dir,
                     );
+                    // 清脏 tween（含重复点新建），本帧后续 begin 从 0 滑入
+                    page_shell::drawer_anim_reset(ctx, shell::NEW_MEMO_DRAWER_SALT);
                     *status_line = "在右侧抽屉填写新建，保存后写入本机".into();
                 }
                 if let Some(id) = shell_action.open_sticky {
@@ -1169,32 +1180,33 @@ impl eframe::App for MemoApp {
                 }
 
 
-                // 三页统一：新建/编辑一律右侧抽屉（ops-unify）；关怀日历底栏标记为域特例
+                // 新建：独立表单抽屉。任务/备忘/私密的编辑在壳层与预览共用同一抽屉。
                 {
                     let host = self.shell.content_host;
-                    let (new_title, edit_title, new_salt, edit_salt) = match self.shell.nav {
-                        nav::NavItem::Calendar => {
-                            ("新建任务", "编辑任务", "task_new_drawer", "task_edit_drawer")
-                        }
-                        nav::NavItem::GenderPrivate => {
-                            ("新建私密", "编辑私密", "priv_new_drawer", "priv_edit_drawer")
-                        }
-                        _ => (
-                            "新建备忘",
-                            "编辑备忘",
-                            "cred_new_drawer",
-                            "cred_edit_drawer",
-                        ),
+                    let new_title = match self.shell.nav {
+                        nav::NavItem::Calendar => "新建任务",
+                        nav::NavItem::GenderPrivate => "新建私密",
+                        _ => "新建备忘",
                     };
+                    // 固定 salt：切顶栏不得分裂 anim id（顶栏已在新建/编辑时锁定）
+                    let new_salt = shell::NEW_MEMO_DRAWER_SALT;
                     if *show_new_memo {
-                        match shell::show_memo_form_drawer(
+                        let mut drawer_dirty = false;
+                        let drawer_action = shell::show_memo_form_drawer(
                             ctx,
                             host,
                             new_title,
                             &mut self.edit_form,
                             FormMode::Create,
                             new_salt,
-                        ) {
+                            &rt.cfg.data_dir,
+                            &mut self.shell.drawer.form_w,
+                            &mut drawer_dirty,
+                        );
+                        if drawer_dirty {
+                            self.shell.drawer.mark_dirty();
+                        }
+                        match drawer_action {
                             MemoDrawerAction::Save => {
                                 match memo_form::validate_title(&self.edit_form) {
                                     Ok(_) => {
@@ -1224,21 +1236,30 @@ impl eframe::App for MemoApp {
                             }
                             MemoDrawerAction::None => {}
                         }
-                    } else if *editing {
-                        // 关怀 Hub 无备忘正文可编；勿开表单抽屉
+                    } else if *editing && !shell::nav_uses_unified_side_drawer(self.shell.nav)
+                    {
+                        // 其它页仍用独立编辑抽屉；任务/备忘/私密由壳层统一抽屉承接
                         let editing_hub = selected
                             .as_ref()
                             .is_some_and(|id| shell::is_private_hub(id));
                         if !editing_hub {
                             let all = rt.svc.list();
-                            match shell::show_memo_form_drawer(
+                            let mut drawer_dirty = false;
+                            let drawer_action = shell::show_memo_form_drawer(
                                 ctx,
                                 host,
-                                edit_title,
+                                "编辑备忘",
                                 &mut self.edit_form,
                                 FormMode::Edit,
-                                edit_salt,
-                            ) {
+                                "misc_edit_drawer",
+                                &rt.cfg.data_dir,
+                                &mut self.shell.drawer.form_w,
+                                &mut drawer_dirty,
+                            );
+                            if drawer_dirty {
+                                self.shell.drawer.mark_dirty();
+                            }
+                            match drawer_action {
                                 MemoDrawerAction::Save => {
                                     shell::save_memo_edit(
                                         &rt.svc,
@@ -1541,7 +1562,7 @@ impl eframe::App for MemoApp {
                                 let browse_w = 64.0;
                                 let gap = ui.spacing().item_spacing.x;
                                 let path_w =
-                                    (ui.available_width() - browse_w - gap).max(80.0);
+                                    (ui.available_width() - browse_w - gap).max(1.0);
                                 ui.add(
                                     egui::TextEdit::singleline(export_path)
                                         .desired_width(path_w)
@@ -1699,7 +1720,7 @@ impl eframe::App for MemoApp {
                                 let browse_w = 64.0;
                                 let gap = ui.spacing().item_spacing.x;
                                 let path_w =
-                                    (ui.available_width() - browse_w - gap).max(80.0);
+                                    (ui.available_width() - browse_w - gap).max(1.0);
                                 ui.add(
                                     egui::TextEdit::singleline(backup_path)
                                         .desired_width(path_w)
@@ -2112,7 +2133,7 @@ impl eframe::App for MemoApp {
                                                 let path_w = (ui.available_width()
                                                     - browse_w
                                                     - gap)
-                                                    .clamp(80.0, field_w.max(480.0));
+                                                    .clamp(1.0, field_w.max(480.0));
                                                 let te = ui.add(
                                                     egui::TextEdit::singleline(
                                                         &mut settings_draft.data_dir,
@@ -2477,6 +2498,10 @@ impl eframe::App for MemoApp {
                 Path::new(&self.cfg.data_dir),
                 rt.svc.session_fp(),
             );
+            self.shell.drawer.save_if_dirty(
+                Path::new(&self.cfg.data_dir),
+                rt.svc.session_fp(),
+            );
             if self.main_hidden
                 || !ctx.input(|i| i.viewport().focused.unwrap_or(false))
             {
@@ -2497,6 +2522,10 @@ impl eframe::App for MemoApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Screen::Main { rt, .. } = &self.screen {
             self.shell.cal.save_prefs_if_dirty(
+                Path::new(&self.cfg.data_dir),
+                rt.svc.session_fp(),
+            );
+            self.shell.drawer.save_if_dirty(
                 Path::new(&self.cfg.data_dir),
                 rt.svc.session_fp(),
             );

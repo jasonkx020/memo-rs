@@ -169,7 +169,7 @@ fn path_picker_row(ui: &mut egui::Ui, path: &mut String, hint: &str, btn: &str) 
     const GAP: f32 = 8.0;
     let mut clicked = false;
     ui.horizontal(|ui| {
-        let path_w = (ui.available_width() - BTN_W - GAP).max(80.0);
+        let path_w = (ui.available_width() - BTN_W - GAP).max(1.0);
         ui.add(
             egui::TextEdit::singleline(path)
                 .desired_width(path_w)

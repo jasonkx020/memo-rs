@@ -5,6 +5,8 @@ use crate::doc_editor::{self, Doc};
 use crate::theme;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
 use memo_core::store::{MemoCategory, MemoPriority, MemoVisibility};
+use std::path::PathBuf;
+use uuid::Uuid;
 
 /// 新建弹窗作用域：随主导航收窄分类/类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,10 +127,10 @@ pub enum DateKind {
 impl DateKind {
     fn label(self) -> &'static str {
         match self {
-            Self::Day => "某一天",
-            Self::Span => "好几天",
+            Self::Day => "某天",
+            Self::Span => "时段",
             Self::Parked => "先记着",
-            Self::Credentials => "备忘",
+            Self::Credentials => "不上日历",
         }
     }
 }
@@ -145,6 +147,10 @@ pub struct MemoFormState {
     pub doc: Doc,
     pub done: bool,
     pub visibility: MemoVisibility,
+    /// 附件目录用的备忘 id（新建时预生成，保存时沿用）
+    pub attach_id: String,
+    /// 数据目录（插图读写）；打开表单时填入
+    pub data_dir: Option<PathBuf>,
     /// 新建弹窗导航作用域；编辑为 Open
     pub scope: FormScope,
     /// 下一帧聚焦标题框（校验失败时）
@@ -171,6 +177,8 @@ impl Default for MemoFormState {
             doc: Doc::empty(),
             done: false,
             visibility: MemoVisibility::Private,
+            attach_id: String::new(),
+            data_dir: None,
             scope: FormScope::Open,
             focus_title: false,
             force_scroll_top: 0,
@@ -206,6 +214,7 @@ impl MemoFormState {
             category,
             due_date: prefill_due.unwrap_or("").to_string(),
             scope,
+            attach_id: Uuid::new_v4().to_string().replace('-', ""),
             ..Self::default()
         };
         s.kind = infer_kind(s.category, &s.due_date, &s.end_date);
@@ -231,6 +240,7 @@ impl MemoFormState {
         done: bool,
         visibility: MemoVisibility,
         remind_before_days: u32,
+        memo_id: &str,
     ) -> Self {
         let mut s = Self {
             category,
@@ -243,6 +253,12 @@ impl MemoFormState {
             doc: Doc::from_store(title, body),
             done,
             visibility,
+            attach_id: if memo_id.trim().is_empty() {
+                Uuid::new_v4().to_string().replace('-', "")
+            } else {
+                memo_id.to_string()
+            },
+            data_dir: None,
             scope: FormScope::Open,
             focus_title: false,
             force_scroll_top: 0,
@@ -540,36 +556,79 @@ pub fn default_category_for_nav(nav_category: Option<MemoCategory>) -> MemoCateg
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str, required: bool) {
+    field_label_hint(ui, text, required, None);
+}
+
+fn field_label_hint(ui: &mut egui::Ui, text: &str, required: bool, hint: Option<&str>) {
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(
             RichText::new(text)
-                .size(13.0)
+                .size(12.0)
                 .strong()
                 .color(theme::text()),
         );
         if required {
-            ui.label(RichText::new("*").size(13.0).color(theme::danger()));
+            ui.label(RichText::new("*").size(12.0).color(theme::danger()));
+        }
+        if let Some(h) = hint {
+            ui.label(
+                RichText::new(h)
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
         }
     });
 }
 
 fn form_w(ui: &egui::Ui) -> f32 {
-    (ui.available_width() - 8.0).max(0.0)
+    // 给滚动条/描边留缝，避免子控件贴右缘或被裁切
+    (ui.available_width() - 4.0).max(0.0)
+}
+
+/// 表单字段纵向间距（对齐紧凑焦点稿）。
+const FIELD_GAP: f32 = 8.0;
+
+fn split_cols(avail: f32, n: usize, gap: f32) -> f32 {
+    crate::page_shell::split_col_width(avail, n, gap)
+}
+
+fn fit_col_width(ui: &egui::Ui, want: f32) -> f32 {
+    crate::page_shell::fit_avail_width(ui, want)
+}
+
+/// 事件/备忘编号短码（完整 id 悬停「复制」可见）。
+fn short_event_id(id: &str) -> String {
+    let t = id.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    t.chars().take(8).collect()
 }
 
 fn show_due_priority(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
-    ui.set_width(col_w);
+    let col_w = fit_col_width(ui, col_w);
     ui.set_max_width(col_w);
-    field_label(ui, if state.kind == DateKind::Span { "从哪天" } else { "哪一天" }, false);
-    ui.add_space(3.0);
+    ui.set_width(col_w);
+    field_label(
+        ui,
+        if state.kind == DateKind::Span {
+            "从哪天"
+        } else {
+            "日期"
+        },
+        false,
+    );
+    ui.add_space(2.0);
     date_field::show_datetime(ui, &format!("{id_salt}_due"), &mut state.due_date, true);
 }
 
 fn show_end_date(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
-    ui.set_width(col_w);
+    let col_w = fit_col_width(ui, col_w);
     ui.set_max_width(col_w);
+    ui.set_width(col_w);
     field_label(ui, "到哪天", false);
-    ui.add_space(3.0);
+    ui.add_space(2.0);
     date_field::show(ui, &format!("{id_salt}_end"), &mut state.end_date, true);
 }
 
@@ -582,106 +641,121 @@ fn kind_hint(kind: DateKind) -> &'static str {
     }
 }
 
+/// 紧凑分段控件「这是」（无脚注；说明放 hover）。
 fn show_kinds(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
     let kinds = kinds_for(state.scope);
-    // 备忘页类型由「选择分类」决定，此处不重复展示单一「这是」
-    if state.scope == FormScope::Credentials && kinds.len() <= 1 {
-        let k = kinds.first().copied().unwrap_or(DateKind::Credentials);
-        if state.kind != k {
-            state.kind = k;
-            state.sync_kind_fields();
-        }
-        return;
-    }
-    field_label(ui, "这是", true);
-    ui.add_space(3.0);
     if kinds.len() <= 1 {
         let k = kinds.first().copied().unwrap_or(state.kind);
         if state.kind != k {
             state.kind = k;
             state.sync_kind_fields();
         }
-        ui.horizontal(|ui| {
-            let fill = theme::shell_nav_selected();
-            ui.add(
-                egui::Button::new(
-                    RichText::new(k.label())
-                        .size(12.5)
-                        .color(theme::shell_accent())
-                        .strong(),
-                )
-                .fill(fill)
-                .stroke(Stroke::new(1.0, Color32::from_rgb(0xBF, 0xDB, 0xFE)))
-                .rounding(Rounding::same(99.0))
-                .min_size(Vec2::new(64.0, 26.0)),
-            );
-            ui.label(
-                RichText::new("（当前页固定）")
-                    .size(11.0)
-                    .color(theme::text_muted()),
-            );
-        });
-    } else {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            for &k in kinds {
-                let on = state.kind == k;
-                let fill = if on {
-                    theme::shell_nav_selected()
-                } else {
-                    theme::card()
-                };
-                let fg = if on {
-                    theme::shell_accent()
-                } else {
-                    theme::text()
-                };
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(k.label()).size(12.5).color(fg).strong())
-                            .fill(fill)
-                            .stroke(Stroke::new(
-                                1.0,
-                                if on {
-                                    Color32::from_rgb(0xBF, 0xDB, 0xFE)
-                                } else {
-                                    theme::border()
-                                },
-                            ))
-                            .rounding(Rounding::same(99.0))
-                            .min_size(Vec2::new(64.0, 26.0)),
-                    )
-                    .clicked()
-                {
-                    state.set_kind(k, stamp);
-                }
-            }
-        });
     }
-    ui.label(
-        RichText::new(kind_hint(state.kind))
-            .size(11.0)
-            .color(if state.kind == DateKind::Credentials {
-                theme::shell_accent()
-            } else {
-                theme::text_muted()
-            }),
-    );
+    field_label(ui, "这是", false);
+    ui.add_space(2.0);
+    let seg_w = fit_col_width(ui, ui.available_width());
+    Frame::none()
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::same(2.0))
+        .show(ui, |ui| {
+            let seg_w = fit_col_width(ui, seg_w);
+            ui.set_max_width(seg_w);
+            ui.set_width(seg_w);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let locked = kinds.len() <= 1;
+                let n = kinds.len().max(1) as f32;
+                let btn_w = ((ui.available_width() - 2.0 * (n - 1.0)) / n)
+                    .floor()
+                    .max(36.0);
+                for &k in kinds {
+                    let on = state.kind == k;
+                    let fill = if on {
+                        theme::card()
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let fg = if on {
+                        theme::text()
+                    } else {
+                        theme::text_muted()
+                    };
+                    // 窄列用短标签，完整说明放 hover
+                    let label = if btn_w < 72.0 && k == DateKind::Credentials {
+                        "备忘"
+                    } else {
+                        k.label()
+                    };
+                    let btn = ui.add_enabled(
+                        !locked || on,
+                        egui::Button::new(
+                            RichText::new(label)
+                                .size(12.0)
+                                .color(fg)
+                                .strong(),
+                        )
+                        .fill(fill)
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(btn_w, 26.0)),
+                    );
+                    let btn = btn.on_hover_text(kind_hint(k));
+                    if !locked && btn.clicked() {
+                        state.set_kind(k, stamp);
+                    }
+                }
+            });
+        });
 }
 
 fn show_priority_field(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
-    ui.set_width(col_w);
+    let col_w = fit_col_width(ui, col_w);
     ui.set_max_width(col_w);
+    ui.set_width(col_w);
     field_label(ui, "优先级", false);
-    ui.add_space(3.0);
+    ui.add_space(2.0);
     egui::ComboBox::from_id_source(format!("{id_salt}_prio"))
-        .width((col_w - 6.0).max(80.0))
+        .width((col_w - 2.0).max(1.0))
         .selected_text(state.priority.label())
         .show_ui(ui, |ui| {
             for &p in MemoPriority::ALL {
                 ui.selectable_value(&mut state.priority, p, p.label());
             }
         });
+}
+
+fn show_remind_field(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    let col_w = fit_col_width(ui, col_w);
+    ui.set_max_width(col_w);
+    ui.set_width(col_w);
+    field_label(ui, "提醒", false);
+    ui.add_space(2.0);
+    let has_due = !state.due_date.trim().is_empty();
+    if !has_due {
+        state.remind_before_days = 0;
+    }
+    if ![0, 1, 3, 7].contains(&state.remind_before_days) {
+        state.remind_before_days = 0;
+    }
+    let remind_label = match state.remind_before_days {
+        1 => "提前 1 天",
+        3 => "提前 3 天",
+        7 => "提前 7 天",
+        _ => "到期时",
+    };
+    ui.add_enabled_ui(has_due, |ui| {
+        egui::ComboBox::from_id_source(format!("{id_salt}_remind"))
+            .width((col_w - 2.0).max(1.0))
+            .selected_text(if has_due { remind_label } else { "—" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut state.remind_before_days, 0, "到期时");
+                ui.selectable_value(&mut state.remind_before_days, 1, "提前 1 天");
+                ui.selectable_value(&mut state.remind_before_days, 3, "提前 3 天");
+                ui.selectable_value(&mut state.remind_before_days, 7, "提前 7 天");
+            });
+    });
 }
 
 fn show_category_combo(
@@ -694,8 +768,13 @@ fn show_category_combo(
 ) {
     let locked = cats.len() <= 1;
     let popup_id = ui.make_persistent_id(("memo_cat_combo", id_salt));
-    let w = form_w(ui);
-    let h = 34.0;
+    // 绝不能 .max(80) 再 allocate：双列/抽屉滑入首帧可用宽常 <80，会直接 abort 退进程
+    let w = fit_col_width(ui, form_w(ui));
+    let h = 30.0;
+    if w < 8.0 {
+        ui.allocate_exact_size(Vec2::new(w.max(1.0), h), Sense::hover());
+        return;
+    }
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(w, h),
         if locked {
@@ -787,7 +866,8 @@ fn show_category_combo(
 }
 
 fn category_option_row(ui: &mut egui::Ui, cat: MemoCategory, selected: bool) -> egui::Response {
-    let w = ui.available_width().max(200.0);
+    // 弹层内也勿 .max(200) 强扩，父级 set_min_width 已决定宽度
+    let w = fit_col_width(ui, ui.available_width());
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 50.0), Sense::click());
     let hovered = resp.hovered();
     if hovered || selected {
@@ -855,6 +935,7 @@ fn category_option_row(ui: &mut egui::Ui, cat: MemoCategory, selected: bool) -> 
 }
 
 /// 绘制表单主体（不含底部取消/保存按钮）。
+/// 布局对齐 `docs/memo-form-compact-focus.html`：编号→标题→备注→分类|类型→日期网格→可见性→标签。
 pub fn show_fields(
     ui: &mut egui::Ui,
     state: &mut MemoFormState,
@@ -875,31 +956,53 @@ pub fn show_fields(
     if gender_locked || cred_locked {
         state.visibility = MemoVisibility::Private;
     }
-    let w = form_w(ui);
-    ui.set_max_width(w);
-
-    // —— 分类 ——
-    field_label(ui, "选择分类", true);
-    ui.add_space(3.0);
-    let selected_cat = if state.category.is_gender_private() {
-        MemoCategory::GenderPrivate
-    } else {
-        state.category.canonical()
-    };
-    show_category_combo(ui, id_salt, &cats, selected_cat, &stamp, state);
-    ui.label(
-        RichText::new(category_desc(selected_cat))
-            .size(11.0)
-            .color(theme::text_muted()),
-    );
-    if gender_locked {
-        ui.label(
-            RichText::new("ⓘ 性别私密强制加密，仅本人可见")
-                .size(11.5)
-                .color(theme::text_muted()),
-        );
+    let w = form_w(ui).max(1.0);
+    // 抽屉动画极窄时勿强行 set_width 超过 available；双列至少约 100 才画完整表单
+    let w = w.min(ui.available_width().max(1.0));
+    if w < 24.0 {
+        ui.allocate_exact_size(egui::vec2(w.max(1.0), 1.0), Sense::hover());
+        return;
     }
-    ui.add_space(8.0);
+    ui.set_max_width(w);
+    ui.set_width(w);
+    ui.spacing_mut().item_spacing.y = FIELD_GAP;
+
+    // —— 事件编号 ——
+    if !state.attach_id.trim().is_empty() {
+        let short = short_event_id(&state.attach_id);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(
+                RichText::new("事件编号")
+                    .size(11.5)
+                    .color(theme::text_muted()),
+            );
+            ui.label(
+                RichText::new(&short)
+                    .size(12.0)
+                    .strong()
+                    .color(theme::text())
+                    .monospace(),
+            );
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("复制")
+                            .size(11.0)
+                            .color(theme::text_muted()),
+                    )
+                    .fill(theme::card())
+                    .stroke(Stroke::new(1.0, theme::border()))
+                    .rounding(Rounding::same(5.0))
+                    .min_size(Vec2::new(0.0, 20.0)),
+                )
+                .on_hover_text(format!("完整编号：{}", state.attach_id.trim()))
+                .clicked()
+            {
+                ui.ctx().copy_text(state.attach_id.trim().to_string());
+            }
+        });
+    }
 
     // —— 标题 ——
     let need_focus = state.take_focus_title();
@@ -916,33 +1019,20 @@ pub fn show_fields(
     };
     let title_block = ui
         .vertical(|ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("标题")
-                        .size(13.0)
-                        .strong()
-                        .color(theme::text()),
-                );
-                ui.label(RichText::new("*").size(13.0).color(theme::danger()));
-                ui.label(
-                    RichText::new("标题是必填字段，一句话说清楚要做什么")
-                        .size(12.0)
-                        .color(theme::danger()),
-                );
-            });
-            ui.add_space(3.0);
+            ui.spacing_mut().item_spacing.y = 3.0;
+            field_label_hint(ui, "标题", true, Some("一句话说清楚"));
             let title_id = ui.make_persistent_id((id_salt, "memo_title"));
             let title_resp = Frame::none()
                 .stroke(title_stroke)
-                .rounding(Rounding::same(8.0))
+                .rounding(Rounding::same(7.0))
                 .inner_margin(Margin::same(1.0))
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut state.doc.title)
                             .id(title_id)
-                            .desired_width((w - 2.0).max(40.0))
+                            .desired_width((w - 2.0).clamp(1.0, w.max(1.0)))
                             .hint_text(theme::hint(title_hint(state.category)))
-                            .margin(egui::vec2(10.0, 7.0)),
+                            .margin(egui::vec2(9.0, 5.0)),
                     )
                 })
                 .inner;
@@ -953,193 +1043,193 @@ pub fn show_fields(
         })
         .response;
     if need_focus || need_scroll {
-        // 滚到标题块；外层还会用 vertical_scroll_offset(0) 兜底
         title_block.scroll_to_me(Some(egui::Align::TOP));
         ui.scroll_to_rect(title_block.rect, Some(egui::Align::TOP));
         ui.ctx().request_repaint();
     }
-    ui.add_space(8.0);
 
-    // —— 备注 ——
-    field_label(ui, "备注（可选）", false);
-    ui.add_space(3.0);
-    let notes_w = (ui.available_width() - 10.0).max(48.0);
-    ui.scope(|ui| {
-        ui.set_width(notes_w);
+    // —— 备注：最小 140，随内容无限撑开（抽屉外层滚动）——
+    const NOTES_MIN_H: f32 = 140.0;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 3.0;
+        field_label_hint(ui, "备注", false, Some("可选"));
+        let notes_w = fit_col_width(ui, ui.available_width());
         ui.set_max_width(notes_w);
-        Frame::none()
-            .stroke(Stroke::new(1.0, theme::border()))
-            .rounding(Rounding::same(10.0))
-            .inner_margin(Margin::same(8.0))
-            .show(ui, |ui| {
-                ui.set_max_width(ui.available_width());
-                doc_editor::show_editor(ui, &mut state.doc, id_salt);
-            });
+        ui.set_width(notes_w);
+        doc_editor::show_editor(
+            ui,
+            &mut state.doc,
+            id_salt,
+            state.data_dir.as_deref(),
+            &state.attach_id,
+            NOTES_MIN_H,
+        );
     });
-    ui.add_space(8.0);
 
-    // —— 类型 ——
-    show_kinds(ui, state, &stamp);
-    ui.add_space(8.0);
+    // —— 分类 | 这是 ——
+    let selected_cat = if state.category.is_gender_private() {
+        MemoCategory::GenderPrivate
+    } else {
+        state.category.canonical()
+    };
+    let col_gap = 8.0;
+    let row_w = fit_col_width(ui, w);
+    let half = split_cols(row_w, 2, col_gap);
+    ui.horizontal(|ui| {
+        ui.set_max_width(row_w);
+        ui.spacing_mut().item_spacing.x = col_gap;
+        ui.vertical(|ui| {
+            let half = fit_col_width(ui, half);
+            ui.set_max_width(half);
+            ui.set_width(half);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            field_label(ui, "分类", false);
+            show_category_combo(ui, id_salt, cats, selected_cat, &stamp, state);
+        });
+        ui.vertical(|ui| {
+            let half = fit_col_width(ui, half);
+            ui.set_max_width(half);
+            ui.set_width(half);
+            show_kinds(ui, state, &stamp);
+        });
+    });
 
-    // —— 日期 | 优先级 ——
+    // —— 日期 | 优先级 | 提醒 ——
     let show_dates = matches!(state.kind, DateKind::Day | DateKind::Span);
     let show_end = state.kind == DateKind::Span;
-    if show_dates {
-        if w >= 360.0 {
-            let col = ((w - 12.0) * 0.5).max(80.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    show_due_priority(ui, state, id_salt, col);
-                });
-                ui.add_space(12.0);
-                ui.vertical(|ui| {
-                    if show_end {
-                        show_end_date(ui, state, id_salt, col);
-                    } else {
-                        show_priority_field(ui, state, id_salt, col);
-                    }
-                });
-            });
-            if show_end {
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    show_priority_field(ui, state, id_salt, w);
-                });
-            }
-        } else {
+    let third = split_cols(row_w, 3, col_gap);
+    if show_dates && show_end {
+        // 时段：从 / 到 占两列，优先级第三列；提醒下行
+        ui.horizontal(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing.x = col_gap;
             ui.vertical(|ui| {
-                show_due_priority(ui, state, id_salt, w);
+                show_due_priority(ui, state, id_salt, third);
             });
-            if show_end {
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    show_end_date(ui, state, id_salt, w);
-                });
-            }
-            ui.add_space(8.0);
             ui.vertical(|ui| {
-                show_priority_field(ui, state, id_salt, w);
+                show_end_date(ui, state, id_salt, third);
             });
-        }
+            ui.vertical(|ui| {
+                show_priority_field(ui, state, id_salt, third);
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing.x = col_gap;
+            ui.vertical(|ui| {
+                show_remind_field(ui, state, id_salt, third);
+            });
+        });
     } else {
-        ui.vertical(|ui| {
-            show_priority_field(ui, state, id_salt, w);
+        ui.horizontal(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing.x = col_gap;
+            ui.vertical(|ui| {
+                let third = fit_col_width(ui, third);
+                ui.set_max_width(third);
+                ui.set_width(third);
+                if show_dates {
+                    show_due_priority(ui, state, id_salt, third);
+                } else {
+                    field_label(ui, "日期", false);
+                    ui.add_space(2.0);
+                    ui.add_enabled_ui(false, |ui| {
+                        let mut placeholder = String::from("— 不上日历");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut placeholder)
+                                .desired_width((third - 2.0).max(1.0))
+                                .margin(egui::vec2(9.0, 5.0)),
+                        );
+                    });
+                }
+            });
+            ui.vertical(|ui| {
+                show_priority_field(ui, state, id_salt, third);
+            });
+            ui.vertical(|ui| {
+                show_remind_field(ui, state, id_salt, third);
+            });
         });
     }
-    if !state.due_date.trim().is_empty() {
-        ui.add_space(6.0);
-        field_label(ui, "提前提醒", false);
-        ui.add_space(3.0);
-        let remind_label = match state.remind_before_days {
-            0 => "到期时",
-            1 => "提前 1 天",
-            3 => "提前 3 天",
-            7 => "提前 7 天",
-            n => {
-                // keep custom
-                let _ = n;
-                "到期时"
-            }
-        };
-        if ![0, 1, 3, 7].contains(&state.remind_before_days) {
-            state.remind_before_days = 0;
-        }
-        egui::ComboBox::from_id_source(format!("{id_salt}_remind"))
-            .width(w.min(220.0).max(80.0))
-            .selected_text(remind_label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.remind_before_days, 0, "到期时");
-                ui.selectable_value(&mut state.remind_before_days, 1, "提前 1 天");
-                ui.selectable_value(&mut state.remind_before_days, 3, "提前 3 天");
-                ui.selectable_value(&mut state.remind_before_days, 7, "提前 7 天");
-            });
-        ui.label(
-            RichText::new("需保持程序运行；完全退出后无法弹系统通知")
-                .size(11.0)
-                .color(theme::text_muted()),
-        );
-    } else {
-        state.remind_before_days = 0;
-    }
-    ui.add_space(8.0);
 
-    // —— 可见性 ——
-    field_label(ui, "可见性", false);
-    ui.add_space(3.0);
-    Frame::none()
-        .fill(theme::panel())
-        .stroke(Stroke::new(1.0, theme::border()))
-        .rounding(Rounding::same(8.0))
-        .inner_margin(Margin::symmetric(10.0, 8.0))
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.add_enabled_ui(!(gender_locked || cred_locked), |ui| {
-                    ui.radio_value(&mut state.visibility, MemoVisibility::Private, "私密");
-                    ui.radio_value(&mut state.visibility, MemoVisibility::Public, "公开");
+    // —— 可见性（说明另起一行，避免右缘裁切）——
+    ui.vertical(|ui| {
+        ui.set_max_width(row_w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        field_label(ui, "可见性", false);
+        Frame::none()
+            .fill(theme::panel())
+            .stroke(Stroke::new(1.0, theme::border()))
+            .rounding(Rounding::same(7.0))
+            .inner_margin(Margin::symmetric(10.0, 4.0))
+            .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.add_enabled_ui(!(gender_locked || cred_locked), |ui| {
+                        ui.radio_value(&mut state.visibility, MemoVisibility::Private, "私密");
+                        ui.radio_value(&mut state.visibility, MemoVisibility::Public, "公开");
+                    });
                 });
-                if gender_locked {
-                    ui.label(
-                        RichText::new("性别私密固定为私密")
-                            .size(11.5)
-                            .color(theme::text_muted()),
-                    );
+                let note = if gender_locked {
+                    Some("性别私密固定私密")
                 } else if cred_locked {
+                    Some("备忘固定私密")
+                } else {
+                    None
+                };
+                if let Some(n) = note {
                     ui.label(
-                        RichText::new("备忘固定为私密，不上日历")
-                            .size(11.5)
+                        RichText::new(n)
+                            .size(11.0)
                             .color(theme::text_muted()),
                     );
                 }
             });
-        });
-    ui.add_space(8.0);
-
-    // —— 标签 ——
-    field_label(ui, "标签", false);
-    ui.add_space(3.0);
-    let tag_resp = ui.add(
-        egui::TextEdit::singleline(&mut state.tags)
-            .desired_width(w)
-            .hint_text(theme::hint("逗号或空格分隔；可点下方预设"))
-            .margin(egui::vec2(10.0, 7.0)),
-    );
-    if tag_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-        let tags = parse_tags(&state.tags);
-        state.tags = format_tags(&tags);
-    }
-    ui.add_space(2.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
-        ui.spacing_mut().button_padding = egui::vec2(6.0, 1.5);
-        ui.label(
-            RichText::new("预设")
-                .size(11.0)
-                .color(theme::text_muted()),
-        );
-        let cat_tags = preset_tags_for(state.category);
-        for t in cat_tags.iter().chain(COMMON_TAGS.iter()) {
-            let chip = ui.add(
-                egui::Button::new(
-                    RichText::new(*t)
-                        .size(11.0)
-                        .color(theme::shell_accent()),
-                )
-                .fill(theme::shell_tag_bg())
-                .stroke(Stroke::NONE)
-                .rounding(Rounding::same(6.0))
-                .min_size(Vec2::ZERO),
-            );
-            if chip.clicked() {
-                append_tag(&mut state.tags, t);
-            }
-        }
     });
-    ui.add_space(6.0);
+
+    // —— 标签 + 预设同行 ——
+    ui.vertical(|ui| {
+        ui.set_max_width(row_w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        field_label(ui, "标签", false);
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            let tag_w = (ui.available_width() * 0.42).clamp(80.0, row_w.min(180.0));
+            let tag_resp = ui.add(
+                egui::TextEdit::singleline(&mut state.tags)
+                    .desired_width(tag_w)
+                    .hint_text(theme::hint("逗号或空格分隔"))
+                    .margin(egui::vec2(8.0, 4.0)),
+            );
+            if tag_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let tags = parse_tags(&state.tags);
+                state.tags = format_tags(&tags);
+            }
+            ui.spacing_mut().button_padding = egui::vec2(7.0, 1.5);
+            let cat_tags = preset_tags_for(state.category);
+            for t in cat_tags.iter().chain(COMMON_TAGS.iter()).take(6) {
+                let chip = ui.add(
+                    egui::Button::new(
+                        RichText::new(*t)
+                            .size(11.0)
+                            .color(theme::shell_accent()),
+                    )
+                    .fill(theme::shell_tag_bg())
+                    .stroke(Stroke::NONE)
+                    .rounding(Rounding::same(6.0))
+                    .min_size(Vec2::new(0.0, 22.0)),
+                );
+                if chip.clicked() {
+                    append_tag(&mut state.tags, t);
+                }
+            }
+        });
+    });
 
     if mode == FormMode::Edit {
         ui.checkbox(&mut state.done, "已完成");
-        ui.add_space(6.0);
     }
 }
 
@@ -1153,5 +1243,69 @@ pub fn validate_title(state: &MemoFormState) -> Result<(String, String), String>
         Err("请填写标题".into())
     } else {
         Ok(state.current_store())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memo_core::store::MemoCategory;
+
+    /// 回归：新建/编辑表单在抽屉滑入·收起窄宽下不得 allocate>available 崩进程。
+    #[test]
+    fn create_form_ui_survives_narrow_drawer_widths() {
+        let ctx = egui::Context::default();
+        let stamp = "2026-10-21";
+        // 模拟动画 t→0 收起时的面板内宽序列
+        let widths = [
+            1.0_f32, 12.0, 24.0, 40.0, 71.0, 72.0, 79.0, 80.0, 100.0, 200.0, 420.0,
+        ];
+        for scope in [
+            FormScope::Credentials,
+            FormScope::Calendar,
+            FormScope::GenderPrivate,
+            FormScope::Open,
+        ] {
+            let cat = match scope {
+                FormScope::Credentials => MemoCategory::Credentials,
+                FormScope::GenderPrivate => MemoCategory::GenderPrivate,
+                _ => MemoCategory::Todo,
+            };
+            let mut create = MemoFormState::begin_create(cat, stamp, None, scope);
+            let mut edit = MemoFormState::load_from_drafts(
+                cat,
+                "历史标题",
+                "历史正文",
+                "",
+                "",
+                MemoPriority::Normal,
+                "标签",
+                false,
+                MemoVisibility::Private,
+                0,
+                "deadbeefcafe",
+            );
+            for &w in &widths {
+                for (form, mode, salt) in [
+                    (&mut create, FormMode::Create, "smoke_new"),
+                    (&mut edit, FormMode::Edit, "smoke_edit"),
+                ] {
+                    let mut input = egui::RawInput::default();
+                    input.screen_rect = Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(900.0, 700.0),
+                    ));
+                    let _ = ctx.begin_frame(input);
+                    egui::CentralPanel::default().show(&ctx, |ui| {
+                        ui.set_max_width(w);
+                        ui.set_width(w);
+                        show_fields(ui, form, mode, salt);
+                    });
+                    let _ = ctx.end_frame();
+                }
+            }
+        }
+        assert!(crate::page_shell::drawer_panel_too_narrow(70.0, 12.0));
+        assert!(!crate::page_shell::drawer_panel_too_narrow(120.0, 12.0));
     }
 }

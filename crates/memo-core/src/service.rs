@@ -245,12 +245,48 @@ impl MemoService {
         priority: MemoPriority,
         remind_before_days: u32,
     ) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string().replace('-', "");
+        self.add_full_with_id(
+            &id,
+            title,
+            content,
+            visibility,
+            lifecycle,
+            category,
+            due_date,
+            end_date,
+            tags,
+            priority,
+            remind_before_days,
+        )
+    }
+
+    /// 使用预定 id 创建（便于新建表单先插图再保存）。
+    pub fn add_full_with_id(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        visibility: MemoVisibility,
+        lifecycle: MemoLifecycle,
+        category: MemoCategory,
+        due_date: &str,
+        end_date: &str,
+        tags: &[String],
+        priority: MemoPriority,
+        remind_before_days: u32,
+    ) -> anyhow::Result<String> {
         let (visibility, due_date, end_date) =
             vis_dates_for_save(category, visibility, due_date, end_date);
         let _ = lifecycle;
         let lifecycle = MemoLifecycle::Permanent;
         let ct = crypto::encrypt_string(&self.key, content)?;
-        let id = Uuid::new_v4().to_string().replace('-', "");
+        let id = id.trim();
+        let id = if id.is_empty() {
+            Uuid::new_v4().to_string().replace('-', "")
+        } else {
+            id.to_string()
+        };
         let (aid, aname) = self.current_actor();
         let item = self.store.put(
             &id,
@@ -526,8 +562,15 @@ impl MemoService {
             return Ok(());
         }
         let plain = crypto::decrypt_string(&self.key, &item.content)?;
-        let ciphertext =
-            crate::hosted::HostedMemoPayload::encode_ciphertext(&self.key, &item.title, &plain)?;
+        let data_dir = Path::new(&self.cfg.data_dir);
+        let atts =
+            crate::attachments::pack_for_content(data_dir, &item.id, &plain).unwrap_or_default();
+        let ciphertext = crate::hosted::HostedMemoPayload::encode_ciphertext(
+            &self.key,
+            item,
+            &plain,
+            atts,
+        )?;
         let blob = HostedBlob {
             owner_fp: item.owner_fp.clone(),
             memo_id: item.id.clone(),
@@ -555,7 +598,7 @@ impl MemoService {
         let blobs = self.hosted.blobs_for_owner(&self.session_fp);
         let mut n = 0usize;
         for blob in blobs {
-            let (title, content_ct) = match crate::hosted::HostedMemoPayload::decode_for_restore(
+            let restored = match crate::hosted::HostedMemoPayload::decode_for_restore(
                 &self.key,
                 &blob.ciphertext,
                 &blob.title_hint,
@@ -563,6 +606,11 @@ impl MemoService {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            let _ = crate::attachments::restore_packed(
+                Path::new(&self.cfg.data_dir),
+                &blob.memo_id,
+                &restored.attachments,
+            );
             let existing = self.store.get(&blob.memo_id);
             if let Some(ex) = &existing {
                 if ex.version > blob.version {
@@ -573,18 +621,28 @@ impl MemoService {
                     let align_deleted = blob.deleted && !ex.deleted;
                     let can_fix_title = !blob.deleted
                         && crate::hosted::is_restore_placeholder(&ex.title)
-                        && !crate::hosted::is_restore_placeholder(&title)
-                        && ex.title != title;
+                        && !crate::hosted::is_restore_placeholder(&restored.title)
+                        && ex.title != restored.title;
                     if !align_deleted && !can_fix_title {
                         continue;
                     }
                 }
             }
+            // v3：用载荷导航元数据；v1/v2：尽量保留本地已有非占位条目的元数据
+            let nav = if let Some(nav) = restored.nav {
+                nav
+            } else if let Some(ex) = existing.as_ref().filter(|ex| {
+                !crate::hosted::is_restore_placeholder(&ex.title) || !ex.due_date.is_empty()
+            }) {
+                crate::hosted::HostedNavMeta::from_existing(ex)
+            } else {
+                crate::hosted::HostedNavMeta::default()
+            };
             let (aid, aname) = self.current_actor();
             let item = MemoItem {
                 id: blob.memo_id.clone(),
-                title,
-                content: content_ct,
+                title: restored.title,
+                content: restored.content_ct,
                 deleted: blob.deleted,
                 version: blob.version.max(1),
                 node_id: self.cfg.node_id.clone(),
@@ -607,14 +665,14 @@ impl MemoService {
                 } else {
                     String::new()
                 },
-                category: MemoCategory::General,
-                due_date: String::new(),
-                end_date: String::new(),
-                remind_before_days: 0,
-                remind_seen_for: String::new(),
-                done: false,
-                tags: vec![],
-                priority: MemoPriority::Normal,
+                category: nav.category,
+                due_date: nav.due_date,
+                end_date: nav.end_date,
+                remind_before_days: nav.remind_before_days,
+                remind_seen_for: nav.remind_seen_for,
+                done: nav.done,
+                tags: nav.tags,
+                priority: nav.priority,
             };
             self.store.force_put_restored(item)?;
             n += 1;
@@ -733,6 +791,7 @@ impl MemoService {
         }
         let (aid, aname) = self.current_actor();
         let item = self.store.purge(id, &aid, &aname)?;
+        crate::attachments::delete_memo_dir(Path::new(&self.cfg.data_dir), id);
         if item.visibility == MemoVisibility::Private {
             let owner = if item.owner_fp.is_empty() {
                 self.session_fp.as_str()
@@ -800,8 +859,12 @@ impl MemoService {
     pub fn import_backup(&self, path: &Path, password: &str) -> anyhow::Result<usize> {
         let bundle = backup::import_encrypted(path, password)?;
         let mut n = 0usize;
-        for it in &bundle.memos {
+        let data_dir = Path::new(&self.cfg.data_dir);
+        for (i, it) in bundle.memos.iter().enumerate() {
             self.upsert_imported(it)?;
+            if let Some(atts) = bundle.memo_attachments.get(i) {
+                let _ = crate::attachments::restore_packed(data_dir, &it.id, atts);
+            }
             n += 1;
         }
         for p in &bundle.persons {
@@ -1251,4 +1314,194 @@ pub fn unlock_with_identity(
 /// 兼容旧 API：已废弃。
 pub fn unlock(_cfg: Config, _password: &[u8]) -> anyhow::Result<(Arc<MemoService>, Arc<AuditLog>)> {
     anyhow::bail!("请使用身份密钥对登录（unlock_with_identity）")
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use crate::hosted::HostedMemoPayload;
+    use crate::store::MemoCategory;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "memo-restore-{}-{}",
+            tag,
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn open_svc(tag: &str) -> (Arc<MemoService>, PathBuf, IdentityKeys) {
+        let dir = tmp_dir(tag);
+        let id = IdentityKeys::generate("restore-test");
+        id.seal_local_password(&dir, "pass1234").unwrap();
+        let mut cfg = crate::config::default_config().unwrap();
+        cfg.data_dir = dir.to_string_lossy().into_owned();
+        cfg.backup_enabled = true;
+        let (svc, _) = unlock_with_identity(cfg, &id, "pass1234").unwrap();
+        (svc, dir, id)
+    }
+
+    /// 与 shell::filter_memos 页签归属一致。
+    fn page_bucket(category: MemoCategory, due_date: &str) -> &'static str {
+        let c = category.canonical();
+        if c.is_gender_private() {
+            "private"
+        } else if c == MemoCategory::Credentials
+            || (is_archive_cat(c) && due_date.trim().is_empty())
+        {
+            "memo"
+        } else {
+            "calendar"
+        }
+    }
+
+    fn is_archive_cat(c: MemoCategory) -> bool {
+        matches!(
+            c,
+            MemoCategory::General
+                | MemoCategory::Work
+                | MemoCategory::Life
+                | MemoCategory::Finance
+                | MemoCategory::Emergency
+                | MemoCategory::Inspiration
+        )
+    }
+
+    #[test]
+    fn restore_v3_keeps_three_page_buckets() {
+        let (svc, dir, _) = open_svc("v3");
+        let key = svc.key.clone();
+        let fp = svc.session_fp().to_string();
+
+        let cases = [
+            ("id-priv", "私密条", MemoCategory::GenderPrivate, "", "private"),
+            (
+                "id-todo",
+                "任务条",
+                MemoCategory::Todo,
+                "2026-10-21 10:00",
+                "calendar",
+            ),
+            ("id-cred", "备忘条", MemoCategory::Credentials, "", "memo"),
+        ];
+
+        for (id, title, cat, due, expect) in cases {
+            assert_eq!(page_bucket(cat, due), expect);
+            let item = MemoItem {
+                id: id.into(),
+                title: title.into(),
+                content: String::new(),
+                deleted: false,
+                version: 1,
+                node_id: "n".into(),
+                modified_by_person_id: String::new(),
+                modified_by_name: String::new(),
+                visibility: MemoVisibility::Private,
+                owner_fp: fp.clone(),
+                modified_at: chrono::Local::now().to_rfc3339(),
+                lifecycle: MemoLifecycle::Permanent,
+                deleted_at: String::new(),
+                category: cat,
+                due_date: due.into(),
+                end_date: String::new(),
+                remind_before_days: 0,
+                remind_seen_for: String::new(),
+                done: false,
+                tags: vec![],
+                priority: MemoPriority::Normal,
+            };
+            let ciphertext =
+                HostedMemoPayload::encode_ciphertext(&key, &item, "body", vec![]).unwrap();
+            svc.hosted
+                .upsert_blob(HostedBlob {
+                    owner_fp: fp.clone(),
+                    memo_id: id.into(),
+                    version: 1,
+                    ciphertext,
+                    title_hint: title.into(),
+                    visibility: "private".into(),
+                    content_modified_at: item.modified_at.clone(),
+                    backed_up_at: String::new(),
+                    updated_at: chrono::Local::now().to_rfc3339(),
+                    source_node: "n".into(),
+                    lifecycle: MemoLifecycle::Permanent,
+                    deleted: false,
+                    deleted_at: String::new(),
+                })
+                .unwrap();
+        }
+
+        let n = svc.restore_from_hosted().unwrap();
+        assert!(n >= 3);
+
+        for (id, _, cat, due, expect) in cases {
+            let got = svc.store.get(id).expect("restored");
+            assert_eq!(got.category, cat);
+            assert_eq!(got.due_date, due);
+            assert_eq!(page_bucket(got.category, &got.due_date), expect);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_v2_preserves_local_category() {
+        let (svc, dir, _) = open_svc("v2-keep");
+        let id = svc
+            .add_full(
+                "本地私密",
+                "正文",
+                MemoVisibility::Private,
+                MemoLifecycle::Permanent,
+                MemoCategory::GenderPrivate,
+                "",
+                "",
+                &[],
+                MemoPriority::Normal,
+                0,
+            )
+            .unwrap();
+        let local = svc.store.get(&id).unwrap();
+        assert_eq!(local.category, MemoCategory::GenderPrivate);
+
+        // 用更高版本的 v2 blob 覆盖（无导航元数据）
+        let v2_json = serde_json::json!({
+            "format": "memo-hosted-v2",
+            "title": "主机正文标题",
+            "content": "主机新正文",
+            "attachments": []
+        });
+        let ciphertext =
+            crypto::encrypt_string(&svc.key, &v2_json.to_string()).unwrap();
+        svc.hosted
+            .upsert_blob(HostedBlob {
+                owner_fp: svc.session_fp().to_string(),
+                memo_id: id.clone(),
+                version: local.version + 1,
+                ciphertext,
+                title_hint: "主机正文标题".into(),
+                visibility: "private".into(),
+                content_modified_at: chrono::Local::now().to_rfc3339(),
+                backed_up_at: String::new(),
+                updated_at: chrono::Local::now().to_rfc3339(),
+                source_node: "remote".into(),
+                lifecycle: MemoLifecycle::Permanent,
+                deleted: false,
+                deleted_at: String::new(),
+            })
+            .unwrap();
+
+        let n = svc.restore_from_hosted().unwrap();
+        assert_eq!(n, 1);
+        let got = svc.store.get(&id).unwrap();
+        assert_eq!(got.category, MemoCategory::GenderPrivate);
+        assert_eq!(got.title, "主机正文标题");
+        let plain = crypto::decrypt_string(&svc.key, &got.content).unwrap();
+        assert_eq!(plain, "主机新正文");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

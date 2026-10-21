@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+use crate::attachments::{self, PackedAttachment};
 use crate::config::{Argon2Params, Config};
 use crate::crypto::{self, derive_key, resolve_salt};
 use crate::person::PersonView;
 use crate::service::MemoView;
 
-const FORMAT: &str = "memo-bak-v1";
+const FORMAT_V1: &str = "memo-bak-v1";
+const FORMAT_V2: &str = "memo-bak-v2";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BackupFile {
@@ -39,6 +41,24 @@ struct BackupMemo {
     content: String,
     version: u64,
     node_id: String,
+    #[serde(default)]
+    attachments: Vec<PackedAttachment>,
+    #[serde(default)]
+    category: crate::store::MemoCategory,
+    #[serde(default)]
+    due_date: String,
+    #[serde(default)]
+    end_date: String,
+    #[serde(default)]
+    done: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    priority: crate::store::MemoPriority,
+    #[serde(default)]
+    remind_before_days: u32,
+    #[serde(default)]
+    remind_seen_for: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,9 +78,11 @@ struct BackupPerson {
 pub struct BackupBundle {
     pub memos: Vec<MemoView>,
     pub persons: Vec<PersonView>,
+    /// 与 memos 一一对应的附件包（可能为空）
+    pub memo_attachments: Vec<Vec<PackedAttachment>>,
 }
 
-/// 用给定密码加密导出全部可见备忘（及人员元数据）。
+/// 用给定密码加密导出全部可见备忘（及人员元数据）；携带插图等附件。
 pub fn export_encrypted(
     path: &Path,
     cfg: &Config,
@@ -79,6 +101,7 @@ pub fn export_encrypted(
             fs::create_dir_all(parent)?;
         }
     }
+    let data_dir = Path::new(&cfg.data_dir);
     let salt = resolve_salt(cfg)?;
     let key = derive_key(password.as_bytes(), &salt, &cfg.argon2)?;
     let payload = BackupPayload {
@@ -86,12 +109,25 @@ pub fn export_encrypted(
         exported_at: chrono::Utc::now().to_rfc3339(),
         memos: items
             .iter()
-            .map(|m| BackupMemo {
-                id: m.id.clone(),
-                title: m.title.clone(),
-                content: m.content.clone(),
-                version: m.version,
-                node_id: m.node_id.clone(),
+            .map(|m| {
+                let attachments =
+                    attachments::pack_for_content(data_dir, &m.id, &m.content).unwrap_or_default();
+                BackupMemo {
+                    id: m.id.clone(),
+                    title: m.title.clone(),
+                    content: m.content.clone(),
+                    version: m.version,
+                    node_id: m.node_id.clone(),
+                    attachments,
+                    category: m.category.canonical(),
+                    due_date: m.due_date.clone(),
+                    end_date: m.end_date.clone(),
+                    done: m.done,
+                    tags: m.tags.clone(),
+                    priority: m.priority,
+                    remind_before_days: m.remind_before_days,
+                    remind_seen_for: m.remind_seen_for.clone(),
+                }
             })
             .collect(),
         persons: persons
@@ -111,7 +147,7 @@ pub fn export_encrypted(
     let plain = serde_json::to_string(&payload)?;
     let ciphertext = crypto::encrypt_string(&key, &plain)?;
     let file = BackupFile {
-        format: FORMAT.into(),
+        format: FORMAT_V2.into(),
         salt_hex: cfg.salt_hex.clone(),
         argon2: cfg.argon2.clone(),
         ciphertext,
@@ -127,7 +163,7 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
     }
     let raw = fs::read_to_string(path)?;
     let file: BackupFile = serde_json::from_str(&raw)?;
-    if file.format != FORMAT {
+    if file.format != FORMAT_V1 && file.format != FORMAT_V2 {
         anyhow::bail!("不支持的备份格式: {}", file.format);
     }
     let salt = hex::decode(file.salt_hex.trim())?;
@@ -139,11 +175,13 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
         .map_err(|_| anyhow::anyhow!("备份密码错误或文件损坏"))?;
     let payload: BackupPayload = serde_json::from_str(&plain)?;
     let _ = payload.tasks; // 忽略旧版任务
-    Ok(BackupBundle {
-        memos: payload
-            .memos
-            .into_iter()
-            .map(|m| MemoView {
+    let mut memo_attachments = Vec::with_capacity(payload.memos.len());
+    let memos = payload
+        .memos
+        .into_iter()
+        .map(|m| {
+            memo_attachments.push(m.attachments);
+            MemoView {
                 id: m.id,
                 title: m.title,
                 content: m.content,
@@ -155,16 +193,19 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 modified_at: String::new(),
                 lifecycle: crate::store::MemoLifecycle::Permanent,
                 deleted_at: String::new(),
-                category: crate::store::MemoCategory::General,
-            due_date: String::new(),
-            end_date: String::new(),
-            remind_before_days: 0,
-                remind_seen_for: String::new(),
-                done: false,
-                tags: vec![],
-                priority: crate::store::MemoPriority::Normal,
-            })
-            .collect(),
+                category: m.category.canonical(),
+                due_date: m.due_date,
+                end_date: m.end_date,
+                remind_before_days: m.remind_before_days,
+                remind_seen_for: m.remind_seen_for,
+                done: m.done,
+                tags: m.tags,
+                priority: m.priority,
+            }
+        })
+        .collect();
+    Ok(BackupBundle {
+        memos,
         persons: payload
             .persons
             .into_iter()
@@ -177,5 +218,6 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 gender: p.gender,
             })
             .collect(),
+        memo_attachments,
     })
 }

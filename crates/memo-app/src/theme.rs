@@ -1089,7 +1089,8 @@ fn menu_item_ex(
     label: &str,
     is_danger: bool,
 ) -> egui::Response {
-    let w = ui.available_width().max(160.0);
+    let a = ui.available_width();
+    let w = if a.is_finite() && a > 0.0 { a } else { 1.0 };
     let h = 32.0_f32;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     if resp.hovered() {

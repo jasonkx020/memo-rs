@@ -1,5 +1,6 @@
 //! 分布式安全备忘录核心：配置、加密、审计、LWW 存储与服务。
 
+pub mod attachments;
 pub mod audit;
 pub mod backup;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod hosted;
 pub mod identity_keys;
 pub mod license;
 pub mod male_health;
+pub mod memo_doc;
 pub mod peer_acl;
 pub mod person;
 pub mod service;

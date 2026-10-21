@@ -269,14 +269,14 @@ pub fn show(
         .auto_shrink([false, false])
         .max_height(avail_h)
         .show(ui, |ui| {
-            ui.set_width(avail_w);
+            ui.set_width(ui.available_width().min(avail_w).max(1.0));
             Frame::none()
                 .fill(theme::card())
                 .stroke(Stroke::new(1.0, theme::border()))
                 .rounding(Rounding::same(14.0))
                 .inner_margin(Margin::symmetric(18.0, 16.0))
                 .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                    ui.set_width(ui.available_width().max(1.0));
 
                     ui.horizontal(|ui| {
                         ui.label(
@@ -480,8 +480,9 @@ fn show_calendar(
     .map(|d| (d - first).num_days() as u32)
     .unwrap_or(30);
     let start_pad = first.weekday().num_days_from_monday() as usize;
-    let grid_w = ui.available_width().max(210.0);
-    let cell = ((grid_w - 6.0) / 7.0).clamp(28.0, 48.0);
+    let grid_w = ui.available_width().max(1.0);
+    // 勿 clamp 下限 28：窄栏 7×28 会超过 available → allocate 退进程
+    let cell = ((grid_w - 6.0) / 7.0).clamp(1.0, 48.0);
 
     ui.horizontal(|ui| {
         for w in ["一", "二", "三", "四", "五", "六", "日"] {

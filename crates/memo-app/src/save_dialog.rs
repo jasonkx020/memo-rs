@@ -63,6 +63,26 @@ pub fn open_memokey_dialog() -> Option<PathBuf> {
     }
 }
 
+/// 选择图片（png / jpeg）。
+pub fn open_image_dialog() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows_open_dialog(
+            "选择图片",
+            &[
+                ("图片 (*.png;*.jpg;*.jpeg)", "*.png;*.jpg;*.jpeg"),
+                ("PNG (*.png)", "*.png"),
+                ("JPEG (*.jpg;*.jpeg)", "*.jpg;*.jpeg"),
+                ("所有文件 (*.*)", "*.*"),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// 选择文件夹。`initial` 为初始路径提示（可为空）。用户取消返回 `None`。
 pub fn pick_folder_dialog(initial: &str) -> Option<PathBuf> {
     #[cfg(windows)]

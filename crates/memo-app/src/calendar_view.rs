@@ -1492,7 +1492,7 @@ fn show_task_cards(
         }
         CalListLayout::Grid => {
             let gap = 8.0_f32;
-            let col_w = ((ui.available_width() - gap) * 0.5).max(140.0);
+            let col_w = page_shell::split_col_width(ui.available_width(), 2, gap);
             egui::Grid::new("cal_task_grid")
                 .num_columns(2)
                 .spacing([gap, gap])
@@ -1500,11 +1500,12 @@ fn show_task_cards(
                 .show(ui, |ui| {
                     for (i, m) in list.iter().enumerate() {
                         let accent = task_accent(m);
+                        let cw = page_shell::fit_avail_width(ui, col_w);
                         ui.allocate_ui_with_layout(
-                            Vec2::new(col_w, 0.0),
+                            Vec2::new(cw, 0.0),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                ui.set_max_width(col_w);
+                                ui.set_max_width(cw);
                                 warn_task_card(
                                     ui,
                                     svc,
@@ -1739,10 +1740,13 @@ fn warn_task_card(
                 }
                 ui.add_space(8.0);
 
-                let right_w = 128.0_f32;
-                let mid_w = (ui.available_width() - right_w - 6.0).max(80.0);
+                let right_w = 128.0_f32.min(ui.available_width() * 0.4).max(1.0);
+                let mid_w = page_shell::fit_avail_width(
+                    ui,
+                    (ui.available_width() - right_w - 6.0).max(1.0),
+                );
                 ui.allocate_ui_with_layout(
-                    Vec2::new(mid_w, ui.available_height()),
+                    Vec2::new(mid_w, ui.available_height().max(1.0)),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_max_width(mid_w);
@@ -1777,7 +1781,9 @@ fn warn_task_card(
                 );
 
                 ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
-                    ui.set_min_width(right_w);
+                    let rw = page_shell::fit_avail_width(ui, right_w);
+                    ui.set_max_width(rw);
+                    ui.set_min_width(rw.min(ui.available_width().max(1.0)));
                     task_priority_pill(ui, m);
                     ui.add_space(3.0);
                     let due_line = format_task_due_line(m, deadline, accent);
@@ -2318,21 +2324,33 @@ fn show_week_side(
         });
 }
 
-/// 右侧详情抽屉：遮罩 + 面板（滑入/滑出）。返回是否已关闭完成。
+/// 右侧统一抽屉（预览 / 编辑共用壳）：遮罩 + 面板滑入滑出。
+/// `dismissible`：仅预览态允许点遮罩关闭；编辑态为 false，仅「×」/「取消」可关（无 Esc）。
+/// `has_footer` 为真时预留下方操作条高度（编辑保存/取消）。
+/// 返回是否已关闭完成。
 pub fn show_cal_drawer(
     ctx: &egui::Context,
     host: egui::Rect,
+    id_salt: &str,
+    title: &str,
+    dismissible: bool,
+    has_footer: bool,
+    drawer_w: &mut f32,
+    drawer_dirty: &mut bool,
     add_contents: impl FnOnce(&mut egui::Ui),
+    add_footer: impl FnOnce(&mut egui::Ui),
 ) -> bool {
-    let anim = page_shell::drawer_anim_begin(ctx, "cal_detail");
-    let mut request_close =
-        !anim.closing && ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    let drawer_w = host.width().min(page_shell::PAGE_RAIL_TARGET);
+    let anim = page_shell::drawer_anim_begin(ctx, id_salt);
+    // Esc 仅预览；编辑态由壳层去掉 Esc，只留 ×/取消
+    let mut request_close = !anim.closing
+        && dismissible
+        && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    *drawer_w = page_shell::clamp_drawer_w(*drawer_w, host.width());
     let (panel, dim, alpha) =
-        page_shell::drawer_layout(host, drawer_w, anim.t.max(0.001));
+        page_shell::drawer_layout(host, *drawer_w, anim.t.max(0.001));
 
     if dim.width() > 1.0 && dim.height() > 1.0 {
-        egui::Area::new(Id::new("cal_drawer_backdrop"))
+        egui::Area::new(Id::new(("side_drawer_bg", id_salt)))
             .order(Order::Middle)
             .fixed_pos(dim.min)
             .interactable(true)
@@ -2340,18 +2358,24 @@ pub fn show_cal_drawer(
                 let (rect, resp) = ui.allocate_exact_size(dim.size(), Sense::click());
                 ui.painter()
                     .rect_filled(rect, Rounding::ZERO, Color32::from_black_alpha(alpha));
-                if resp.clicked() && !anim.closing {
+                // 预览可点遮罩关；编辑/新建不可（防误关 + 防收起动画 allocate 退进程）
+                if dismissible && resp.clicked() && !anim.closing {
                     request_close = true;
                 }
             });
     }
 
-    // 内高须扣 Frame 上下 margin + 描边，否则外高撑破 host 盖住底栏
+    // 紧凑抽屉：pad 12×8、头 32、底 44（与 memo-form-compact-focus 对齐）
     const PAD_X: f32 = 12.0;
-    const PAD_Y: f32 = 10.0;
+    const PAD_Y: f32 = 8.0;
     let inner_h = (panel.height() - PAD_Y * 2.0 - 2.0).max(80.0);
+    let header_h = 32.0;
+    let footer_h = if has_footer { 44.0 } else { 0.0 };
+    let scroll_h = (inner_h - header_h - footer_h).max(80.0);
+    let skip_body = anim.closing
+        || page_shell::drawer_panel_too_narrow(panel.width(), PAD_X);
 
-    egui::Area::new(Id::new("cal_drawer_panel"))
+    egui::Area::new(Id::new(("side_drawer_panel", id_salt)))
         .order(Order::Foreground)
         .fixed_pos(panel.min)
         .interactable(true)
@@ -2359,46 +2383,90 @@ pub fn show_cal_drawer(
         .show(ctx, |ui| {
             ui.set_max_size(panel.size());
             ui.set_clip_rect(panel);
+            if skip_body {
+                // 收起/过窄：只画壳，不进 Frame 内布局
+                ui.painter().rect_filled(
+                    panel,
+                    Rounding::ZERO,
+                    theme::panel(),
+                );
+                return;
+            }
             Frame::none()
                 .fill(theme::panel())
                 .stroke(Stroke::new(1.0, theme::border()))
                 .inner_margin(Margin::symmetric(PAD_X, PAD_Y))
                 .show(ui, |ui| {
-                    // Frame 已含 PAD；勿再按外宽 drawer_w 设最小宽，否则右溢
-                    let content_w = ui.available_width();
+                    let content_w = ui.available_width().max(1.0);
                     ui.set_min_height(inner_h);
                     ui.set_max_height(inner_h);
                     ui.set_max_width(content_w);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("关闭")
-                                        .size(13.0)
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(content_w, header_h),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            if !title.is_empty() {
+                                ui.label(
+                                    RichText::new(title)
+                                        .size(14.0)
                                         .strong()
-                                        .color(theme::text_muted()),
-                                )
-                                .fill(Color32::TRANSPARENT),
-                            )
-                            .clicked()
-                            && !anim.closing
-                        {
-                            request_close = true;
-                        }
+                                        .color(theme::text()),
+                                );
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("×")
+                                                .size(16.0)
+                                                .color(theme::text_muted()),
+                                        )
+                                        .fill(Color32::TRANSPARENT)
+                                        .frame(false)
+                                        .min_size(Vec2::new(24.0, 24.0)),
+                                    )
+                                    .clicked()
+                                    && !anim.closing
+                                {
+                                    request_close = true;
+                                }
+                            });
+                        },
+                    );
+                    ctx.data_mut(|d| {
+                        d.insert_temp(Id::new("form_viewport_h"), scroll_h);
                     });
-                    ui.add_space(4.0);
                     egui::ScrollArea::vertical()
-                        .id_source("cal_drawer_scroll")
+                        .id_source(("side_drawer_scroll", id_salt))
                         .auto_shrink([false, false])
-                        .max_height((inner_h - 48.0).max(80.0))
+                        .max_height(scroll_h)
                         .show(ui, |ui| {
-                            let w = ui.available_width();
-                            ui.set_min_width(w);
+                            let w = ui.available_width().max(1.0);
                             ui.set_max_width(w);
                             add_contents(ui);
                         });
+                    if has_footer {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(content_w, footer_h),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                add_footer(ui);
+                            },
+                        );
+                    }
                 });
         });
+
+    if page_shell::drawer_resize_edge(
+        ctx,
+        id_salt,
+        panel,
+        drawer_w,
+        host.width(),
+        anim.t,
+    ) {
+        *drawer_dirty = true;
+    }
 
     page_shell::drawer_anim_end(ctx, &anim, request_close)
 }
@@ -2479,7 +2547,7 @@ fn show_unscheduled_block(
 }
 
 /// 日历选中备忘后的只读详情卡。
-/// 返回 `true` 表示用户点了「编辑」（由壳层打开表单抽屉，详情保持只读）。
+/// 返回 `true` 表示用户点了「编辑」（由壳层在同一抽屉内切到编辑态）。
 pub fn show_event_detail(
     ui: &mut egui::Ui,
     svc: &Arc<MemoService>,
@@ -2516,9 +2584,11 @@ pub fn show_event_detail(
         .auto_shrink([false, false])
         .max_height(scroll_h)
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            let content_w = ui.available_width();
+            ui.set_min_width(content_w);
+            ui.set_max_width(content_w);
 
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let dot = if memo_overdue(m) {
                     theme::warn_overdue_fg()
                 } else if m.priority == MemoPriority::High {
@@ -2543,7 +2613,11 @@ pub fn show_event_detail(
                 if m.done {
                     heading = heading.strikethrough();
                 }
-                ui.add(egui::Label::new(heading).wrap(true));
+                let title_w = ui.available_width();
+                ui.allocate_ui(Vec2::new(title_w, 0.0), |ui| {
+                    ui.set_max_width(title_w);
+                    ui.add(egui::Label::new(heading).wrap(true));
+                });
             });
             ui.add_space(14.0);
 
@@ -2585,6 +2659,13 @@ pub fn show_event_detail(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.spacing_mut().item_spacing.y = 6.0;
+                let id_short: String = m.id.chars().take(8).collect();
+                detail_attr_pill(
+                    ui,
+                    &format!("编号：{id_short}"),
+                    theme::panel(),
+                    theme::text_muted(),
+                );
                 let pri = match m.priority {
                     MemoPriority::High => "高",
                     MemoPriority::Normal => "普通",
@@ -2622,17 +2703,27 @@ pub fn show_event_detail(
                 .rounding(Rounding::same(10.0))
                 .inner_margin(Margin::same(12.0))
                 .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
+                    let w = ui.available_width();
+                    ui.set_min_width(w);
+                    ui.set_max_width(w);
                     ui.set_min_height(72.0);
                     if m.content.trim().is_empty() {
-                        ui.label(
-                            RichText::new("情况说明，自由书写即可...")
-                                .size(13.0)
-                                .italics()
-                                .color(theme::text_muted()),
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("情况说明，自由书写即可...")
+                                    .size(13.0)
+                                    .italics()
+                                    .color(theme::text_muted()),
+                            )
+                            .wrap(true),
                         );
                     } else {
-                        doc_editor::show_viewer_body(ui, &m.content);
+                        doc_editor::show_viewer_body_ex(
+                            ui,
+                            &m.content,
+                            Some(Path::new(svc.config().data_dir.as_str())),
+                            &m.id,
+                        );
                     }
                 });
 
@@ -2688,16 +2779,20 @@ enum DetailTimeIcon {
 }
 
 fn detail_time_row(ui: &mut egui::Ui, kind: DetailTimeIcon, text: &str, text_color: Color32) {
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         let (irect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
         match kind {
             DetailTimeIcon::Calendar => paint_detail_calendar_icon(ui.painter(), irect),
             DetailTimeIcon::Clock => paint_detail_clock_icon(ui.painter(), irect),
         }
         ui.add_space(6.0);
-        ui.add(
-            egui::Label::new(RichText::new(text).size(13.5).color(text_color)).wrap(true),
-        );
+        let w = ui.available_width();
+        ui.allocate_ui(Vec2::new(w, 0.0), |ui| {
+            ui.set_max_width(w);
+            ui.add(
+                egui::Label::new(RichText::new(text).size(13.5).color(text_color)).wrap(true),
+            );
+        });
     });
 }
 

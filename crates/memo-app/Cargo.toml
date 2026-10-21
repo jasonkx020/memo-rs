@@ -7,7 +7,8 @@ edition.workspace = true
 memo-core = { workspace = true }
 memo-sync = { workspace = true }
 eframe = { workspace = true }
-image = { version = "=0.24.9", default-features = false, features = ["png"] }
+image = { version = "=0.24.9", default-features = false, features = ["png", "jpeg"] }
+uuid = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

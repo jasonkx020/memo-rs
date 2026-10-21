@@ -427,7 +427,7 @@ pub fn show(
         .auto_shrink([false, false])
         .max_height(avail_h)
         .show(ui, |ui| {
-            ui.set_width(avail_w);
+            ui.set_width(ui.available_width().min(avail_w).max(1.0));
             show_body(
                 ui,
                 svc,
@@ -1018,7 +1018,7 @@ fn draw_month_grid(
     // 固定 6 行，与任务月历一致，纵向刚好填满
     let n_rows = 6_usize;
 
-    let grid_w = ui.available_width().max(200.0);
+    let grid_w = ui.available_width().max(1.0);
     let gap = 3.0_f32;
     let cell_w = ((grid_w - gap * 6.0) / 7.0).max(1.0);
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -1405,7 +1405,7 @@ fn show_note_editor(
     ui.horizontal(|ui| {
         let te = ui.add(
             egui::TextEdit::multiline(&mut st.note_draft)
-                .desired_width((ui.available_width() - 64.0).max(120.0))
+                .desired_width((ui.available_width() - 64.0).max(1.0))
                 .desired_rows(2)
                 .hint_text(theme::hint("当天备注 / 健康日记…")),
         );
