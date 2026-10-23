@@ -641,8 +641,11 @@ fn kind_hint(kind: DateKind) -> &'static str {
     }
 }
 
-/// 紧凑分段控件「这是」（无脚注；说明放 hover）。
-fn show_kinds(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
+/// 与分类下拉同高，保证「分类 | 这是」两框中线对齐。
+const KIND_SEG_H: f32 = 30.0;
+
+/// 紧凑分段控件「这是」的选项条（不含标签；标签由调用方与分类列对称绘制）。
+fn show_kinds_seg(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
     let kinds = kinds_for(state.scope);
     if kinds.len() <= 1 {
         let k = kinds.first().copied().unwrap_or(state.kind);
@@ -651,25 +654,27 @@ fn show_kinds(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
             state.sync_kind_fields();
         }
     }
-    field_label(ui, "这是", false);
-    ui.add_space(2.0);
     let seg_w = fit_col_width(ui, ui.available_width());
+    // inner 2+2 + 按钮 26 = 30，与分类下拉 h 一致
     Frame::none()
         .fill(theme::panel())
         .stroke(Stroke::new(1.0, theme::border()))
         .rounding(Rounding::same(8.0))
-        .inner_margin(Margin::same(2.0))
+        .inner_margin(Margin::symmetric(2.0, 2.0))
         .show(ui, |ui| {
             let seg_w = fit_col_width(ui, seg_w);
             ui.set_max_width(seg_w);
             ui.set_width(seg_w);
+            // 固定行高内用 horizontal（勿 horizontal_centered：ScrollArea 里交叉轴会按整段可视高居中并撑破）
+            ui.set_height(KIND_SEG_H - 4.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let locked = kinds.len() <= 1;
                 let n = kinds.len().max(1) as f32;
-                let btn_w = ((ui.available_width() - 2.0 * (n - 1.0)) / n)
-                    .floor()
-                    .max(36.0);
+                let gaps = 2.0 * (n - 1.0);
+                let avail = (ui.available_width() - gaps).max(0.0);
+                // 绝不能 .max(36)：窄列会让 n×36 超过 available → allocate 退进程
+                let btn_w = (avail / n).floor().max(1.0);
                 for &k in kinds {
                     let on = state.kind == k;
                     let fill = if on {
@@ -1066,7 +1071,7 @@ pub fn show_fields(
         );
     });
 
-    // —— 分类 | 这是 ——
+    // —— 分类 | 这是 ——（两列同结构：标签 + 固定间隙 + 等高控件，中线对齐）
     let selected_cat = if state.category.is_gender_private() {
         MemoCategory::GenderPrivate
     } else {
@@ -1082,15 +1087,19 @@ pub fn show_fields(
             let half = fit_col_width(ui, half);
             ui.set_max_width(half);
             ui.set_width(half);
-            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().item_spacing.y = 0.0;
             field_label(ui, "分类", false);
+            ui.add_space(2.0);
             show_category_combo(ui, id_salt, cats, selected_cat, &stamp, state);
         });
         ui.vertical(|ui| {
             let half = fit_col_width(ui, half);
             ui.set_max_width(half);
             ui.set_width(half);
-            show_kinds(ui, state, &stamp);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            field_label(ui, "这是", false);
+            ui.add_space(2.0);
+            show_kinds_seg(ui, state, &stamp);
         });
     });
 
@@ -1196,7 +1205,11 @@ pub fn show_fields(
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(row_w);
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-            let tag_w = (ui.available_width() * 0.42).clamp(80.0, row_w.min(180.0));
+            // 窄抽屉时 row_w 可能 <80，勿 clamp(80, row_w) 导致 min>max 直接 panic
+            let tag_max = row_w.min(180.0).max(1.0);
+            let tag_w = (ui.available_width() * 0.42)
+                .max(1.0)
+                .min(tag_max);
             let tag_resp = ui.add(
                 egui::TextEdit::singleline(&mut state.tags)
                     .desired_width(tag_w)
@@ -1296,10 +1309,18 @@ mod tests {
                         egui::vec2(900.0, 700.0),
                     ));
                     let _ = ctx.begin_frame(input);
+                    // 更接近真抽屉：外层竖滚 + 高视口，避免漏掉 ScrollArea 布局路径
                     egui::CentralPanel::default().show(&ctx, |ui| {
                         ui.set_max_width(w);
                         ui.set_width(w);
-                        show_fields(ui, form, mode, salt);
+                        egui::ScrollArea::vertical()
+                            .id_source(("smoke_scroll", salt, w.to_bits()))
+                            .max_height(640.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_max_width(w);
+                                show_fields(ui, form, mode, salt);
+                            });
                     });
                     let _ = ctx.end_frame();
                 }

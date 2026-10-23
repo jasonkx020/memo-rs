@@ -1204,6 +1204,9 @@ pub fn show(
     local_disk: DiskSpace,
     backup_targets: &mut Vec<String>,
     tx: &Sender<BgMsg>,
+    // 有新版本时顶栏提示（版本号）；None 不显示
+    update_hint_ver: Option<&str>,
+    update_hint_url: Option<&str>,
 ) -> ShellAction {
     let nav_locked = show_new_memo || *editing;
     let mut action = ShellAction::default();
@@ -1348,6 +1351,10 @@ pub fn show(
                     editing,
                     nav_locked,
                 );
+
+                if let (Some(ver), Some(url)) = (update_hint_ver, update_hint_url) {
+                    show_update_hint(ui, ver, url);
+                }
 
                 // 右侧：搜索 + 图标工具托盘（外高与页签分段一致）
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2161,6 +2168,40 @@ enum BadgeKind {
     Gray,
     Blue,
     Soft,
+}
+
+/// 顶栏页签旁：有新版本时可点提示，打开官网下载页。
+fn show_update_hint(ui: &mut egui::Ui, latest: &str, download_url: &str) {
+    ui.add_space(6.0);
+    let label = if latest.is_empty() {
+        "有版本更新".to_string()
+    } else {
+        format!("有版本更新 {latest}")
+    };
+    let resp = ui.add(
+        egui::Button::new(
+            RichText::new(label)
+                .size(12.0)
+                .color(theme::shell_accent()),
+        )
+        .fill(theme::shell_accent_soft())
+        .stroke(Stroke::new(1.0, theme::shell_accent().linear_multiply(0.35)))
+        .rounding(Rounding::same(8.0))
+        .frame(true)
+        .min_size(Vec2::new(0.0, TOP_BAR_ITEM_H)),
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let tip = if latest.is_empty() {
+        "发现新版本，点击前往官网下载".to_string()
+    } else {
+        format!("发现新版本 {latest}，点击前往官网下载")
+    };
+    let resp = resp.on_hover_text(tip);
+    if resp.clicked() {
+        crate::update_check::open_download_page(download_url);
+    }
 }
 
 fn show_top_tabs(
@@ -3635,7 +3676,7 @@ pub fn show_memo_form_drawer(
     }
     let anim = page_shell::drawer_anim_begin(ctx, id_salt);
     let mut request_close = false;
-    *drawer_w = page_shell::clamp_drawer_w(*drawer_w, host.width());
+    page_shell::scale_drawer_w_with_host(ctx, id_salt, drawer_w, host.width());
     let (panel, dim, alpha) =
         page_shell::drawer_layout(host, *drawer_w, anim.t.max(0.001));
 

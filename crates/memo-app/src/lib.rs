@@ -23,6 +23,7 @@ mod shell;
 mod single_instance;
 mod sticky_note;
 mod theme;
+mod update_check;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText};
 use identity_gate::{GateAction, IdentityGateState};
@@ -216,6 +217,14 @@ pub struct MemoApp {
     change_pw_new2: String,
     /// 保存需重启的设置后，确认是否立即重启
     show_restart_confirm: bool,
+    /// 版本检查：远端最新 / 下载页 / 是否有新版本
+    update_latest: Option<String>,
+    update_download_url: Option<String>,
+    update_newer: bool,
+    update_check_busy: bool,
+    update_check_msg: String,
+    /// 本会话是否已做过静默检查
+    update_silent_done: bool,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
@@ -255,6 +264,57 @@ impl MemoApp {
             change_pw_new: String::new(),
             change_pw_new2: String::new(),
             show_restart_confirm: false,
+            update_latest: None,
+            update_download_url: None,
+            update_newer: false,
+            update_check_busy: false,
+            update_check_msg: String::new(),
+            update_silent_done: false,
+        }
+    }
+
+    fn spawn_update_check(&mut self, silent: bool) {
+        if self.update_check_busy {
+            return;
+        }
+        self.update_check_busy = true;
+        if !silent {
+            self.update_check_msg = "正在检查更新…".into();
+        }
+        let tx = self.tx.clone();
+        let local = APP_VERSION.to_string();
+        std::thread::spawn(move || {
+            let result = update_check::check_against_local(&local);
+            let _ = tx.send(BgMsg::UpdateCheckResult { silent, result });
+        });
+    }
+
+    fn apply_update_check_result(
+        &mut self,
+        silent: bool,
+        result: Result<update_check::UpdateInfo, String>,
+    ) {
+        self.update_check_busy = false;
+        match result {
+            Ok(info) => {
+                self.update_latest = Some(info.latest.clone());
+                self.update_download_url = Some(info.download_url.clone());
+                self.update_newer = info.newer;
+                if info.newer {
+                    self.update_check_msg =
+                        format!("发现新版本 {}，可前往官网下载。", info.latest);
+                } else if !silent {
+                    self.update_check_msg = "已是最新版本。".into();
+                } else {
+                    self.update_check_msg.clear();
+                }
+            }
+            Err(e) => {
+                self.update_newer = false;
+                if !silent {
+                    self.update_check_msg = e;
+                }
+            }
         }
     }
 
@@ -398,12 +458,13 @@ impl MemoApp {
         }
     }
 
-    fn draw_help_about_windows(ctx: &egui::Context, show_help: &mut bool, show_about: &mut bool) {
-        if *show_help {
+    fn draw_help_about_windows(&mut self, ctx: &egui::Context) {
+        if self.show_help {
             let modal = theme::begin_modal(ctx, "help_modal");
+            let mut open = self.show_help;
             theme::modal_fixed(ctx, "使用说明", [660.0, 540.0])
                 .id(modal.window_id)
-                .open(show_help)
+                .open(&mut open)
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     ui.label(theme::muted_label("以下内容已嵌入本程序，可离线阅读。").small());
@@ -417,15 +478,23 @@ impl MemoApp {
                             help_view::show(ui, HELP_DOC);
                         });
                 });
-            if modal.end(ctx, *show_help) {
-                *show_help = false;
+            self.show_help = open;
+            if modal.end(ctx, self.show_help) {
+                self.show_help = false;
             }
         }
-        if *show_about {
+        if self.show_about {
             let modal = theme::begin_modal(ctx, "about_modal");
-            theme::modal_fixed(ctx, "关于", [480.0, 420.0])
+            let mut open = self.show_about;
+            let mut want_check = false;
+            let mut want_download = false;
+            let busy = self.update_check_busy;
+            let newer = self.update_newer;
+            let msg = self.update_check_msg.clone();
+            let latest = self.update_latest.clone();
+            theme::modal_fixed(ctx, "关于", [480.0, 480.0])
                 .id(modal.window_id)
-                .open(show_about)
+                .open(&mut open)
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         app_icon::show(ui, 48.0);
@@ -436,6 +505,43 @@ impl MemoApp {
                                 .color(theme::text_muted()),
                         );
                     });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            if theme::page_outline_button(ui, "检查更新").clicked() {
+                                want_check = true;
+                            }
+                        });
+                        if newer {
+                            if theme::page_primary_button(ui, "前往下载").clicked() {
+                                want_download = true;
+                            }
+                        }
+                    });
+                    if !msg.is_empty() {
+                        ui.add_space(6.0);
+                        let fg = if newer {
+                            theme::shell_accent()
+                        } else {
+                            theme::text_muted()
+                        };
+                        ui.label(RichText::new(&msg).size(12.5).color(fg));
+                        if newer {
+                            if let Some(v) = latest.as_ref() {
+                                ui.label(
+                                    RichText::new(format!("最新版本 {v}"))
+                                        .size(12.0)
+                                        .color(theme::text_muted()),
+                                );
+                            }
+                        }
+                    } else {
+                        ui.add_space(4.0);
+                        ui.label(
+                            theme::muted_label("检查更新仅提示并跳转官网，不会自动安装。")
+                                .small(),
+                        );
+                    }
                     ui.add_space(12.0);
                     about_kv(ui, "产品", theme::APP_NAME);
                     about_kv(ui, "说明", theme::APP_DESCRIPTION);
@@ -463,8 +569,19 @@ impl MemoApp {
                         );
                     }
                 });
-            if modal.end(ctx, *show_about) {
-                *show_about = false;
+            self.show_about = open;
+            if modal.end(ctx, self.show_about) {
+                self.show_about = false;
+            }
+            if want_check {
+                self.spawn_update_check(false);
+            }
+            if want_download {
+                let url = self
+                    .update_download_url
+                    .as_deref()
+                    .unwrap_or(update_check::DOWNLOAD_PAGE_URL);
+                update_check::open_download_page(url);
             }
         }
     }
@@ -495,6 +612,14 @@ impl MemoApp {
                     let list = rt.svc.list();
                     let _ = period_view::ensure_daily_predict_recalc(&rt.svc, &list);
                     self.screen = Self::make_main(rt, &cfg);
+                    // 进主壳后静默检查一次（stub 未配置时不打扰）
+                    self.update_silent_done = false;
+                    self.update_newer = false;
+                    self.update_latest = None;
+                    self.update_download_url = None;
+                    self.update_check_msg.clear();
+                    self.spawn_update_check(true);
+                    self.update_silent_done = true;
                 }
                 BgMsg::UnlockResult(Err(e)) => {
                     if let Screen::IdentityGate(st) = &mut self.screen {
@@ -692,6 +817,9 @@ impl MemoApp {
                             }
                         }
                     }
+                }
+                BgMsg::UpdateCheckResult { silent, result } => {
+                    self.apply_update_check_result(silent, result);
                 }
             }
             ctx.request_repaint();
@@ -1121,6 +1249,16 @@ impl eframe::App for MemoApp {
                     rt.svc.disk_space(),
                     &mut settings_draft.backup_targets,
                     &self.tx,
+                    if self.update_newer {
+                        self.update_latest.as_deref()
+                    } else {
+                        None
+                    },
+                    if self.update_newer {
+                        self.update_download_url.as_deref()
+                    } else {
+                        None
+                    },
                 );
                 if shell_action.backup_dirty {
                     let _ = config::save_settings(settings_draft);
@@ -2516,7 +2654,7 @@ impl eframe::App for MemoApp {
 
         self.show_help = show_help;
         self.show_about = show_about;
-        Self::draw_help_about_windows(ctx, &mut self.show_help, &mut self.show_about);
+        self.draw_help_about_windows(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

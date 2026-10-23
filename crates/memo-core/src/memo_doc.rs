@@ -1,4 +1,5 @@
-//! 备忘正文自有格式 `memo-doc/v1`（块 + 行内样式 + 插图引用）。
+//! 旧格式 `memo-doc/v1`（块 + 行内样式）仅用于加载时拍平成纯文本；
+//! 新正文直接存 UTF-8 纯 TXT，不再写回本格式。
 
 use serde::{Deserialize, Serialize};
 
@@ -98,7 +99,7 @@ pub fn serialize_body(blocks: &[Block]) -> String {
     }
 }
 
-/// 解析正文：新格式或旧 Markdown 风格。
+/// 解析正文：`memo-doc/v1` 或旧 Markdown 风格块（仅供拍平 / 迁移）。
 pub fn parse_body(content: &str) -> DocBody {
     let t = content.trim_start();
     if let Some(rest) = t.strip_prefix(MAGIC) {
@@ -119,8 +120,57 @@ pub fn parse_body(content: &str) -> DocBody {
     }
 }
 
-/// 收集正文中引用的附件 file_id。
+/// 转为可编辑/落盘的纯 TXT。
+///
+/// - 带 `memo-doc/v1`：拍平（样式/链接只留可见字；图丢弃；表/列表变字面量）。
+/// - 否则原样返回（已是纯文本，不再把像列表/表格的行解析成结构）。
+pub fn to_plain(content: &str) -> String {
+    let t = content.trim_start();
+    if t.starts_with(MAGIC) {
+        let body = parse_body(content);
+        return blocks_to_plain(&body.blocks);
+    }
+    content.to_string()
+}
+
+fn blocks_to_plain(blocks: &[Block]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for b in blocks {
+        let chunk = match b {
+            Block::Paragraph { spans } => spans.iter().map(|s| s.text.as_str()).collect::<String>(),
+            Block::Items { items, list_kind } => {
+                let mut lines = Vec::with_capacity(items.len());
+                for (i, it) in items.iter().enumerate() {
+                    match list_kind {
+                        ListKind::Numbered => lines.push(format!("{}. {}", i + 1, it)),
+                        ListKind::Bullet => lines.push(format!("- {it}")),
+                    }
+                }
+                lines.join("\n")
+            }
+            Block::Table { headers, rows } => {
+                let mut lines = Vec::with_capacity(1 + rows.len());
+                lines.push(format!("| {} |", headers.join(" | ")));
+                for row in rows {
+                    lines.push(format!("| {} |", row.join(" | ")));
+                }
+                lines.join("\n")
+            }
+            Block::Image { .. } => String::new(),
+        };
+        if !chunk.is_empty() {
+            parts.push(chunk);
+        }
+    }
+    parts.join("\n\n")
+}
+
+/// 收集正文中引用的附件 file_id（仅旧 `memo-doc/v1` 插图；纯 TXT 无引用）。
 pub fn collect_file_ids(content: &str) -> Vec<String> {
+    let t = content.trim_start();
+    if !t.starts_with(MAGIC) {
+        return Vec::new();
+    }
     let body = parse_body(content);
     let mut ids = Vec::new();
     for b in &body.blocks {
@@ -303,18 +353,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_rich() {
+    fn to_plain_strips_styles_links_images() {
         let blocks = vec![
             Block::Paragraph {
                 spans: vec![Span {
                     text: "你好".into(),
                     color: Some("#C62828".into()),
-                    link: None,
+                    link: Some("https://example.com".into()),
                     bold: true,
                     italic: false,
                     underline: false,
                     size: Some(14),
                 }],
+            },
+            Block::Items {
+                items: vec!["甲".into(), "乙".into()],
+                list_kind: ListKind::Numbered,
+            },
+            Block::Table {
+                headers: vec!["A".into(), "B".into()],
+                rows: vec![vec!["1".into(), "2".into()]],
             },
             Block::Image {
                 file_id: "abc123.png".into(),
@@ -322,10 +380,22 @@ mod tests {
             },
         ];
         let s = serialize_body(&blocks);
-        assert!(s.starts_with(MAGIC));
-        let body = parse_body(&s);
-        assert_eq!(body.blocks, blocks);
         assert_eq!(collect_file_ids(&s), vec!["abc123.png".to_string()]);
+        let plain = to_plain(&s);
+        assert_eq!(
+            plain,
+            "你好\n\n1. 甲\n2. 乙\n\n| A | B |\n| 1 | 2 |"
+        );
+        assert!(!plain.contains("example.com"));
+        assert!(!plain.contains("abc123"));
+        assert_eq!(to_plain(&plain), plain);
+        assert!(collect_file_ids(&plain).is_empty());
+    }
+
+    #[test]
+    fn plain_txt_not_reparsed_as_blocks() {
+        let raw = "hello\n\n1. a\n2. b\n";
+        assert_eq!(to_plain(raw), raw);
     }
 
     #[test]

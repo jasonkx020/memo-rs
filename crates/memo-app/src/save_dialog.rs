@@ -63,7 +63,8 @@ pub fn open_memokey_dialog() -> Option<PathBuf> {
     }
 }
 
-/// 选择图片（png / jpeg）。
+/// 选择图片（png / jpeg）。正文已改为纯 TXT，暂无调用方。
+#[allow(dead_code)]
 pub fn open_image_dialog() -> Option<PathBuf> {
     #[cfg(windows)]
     {

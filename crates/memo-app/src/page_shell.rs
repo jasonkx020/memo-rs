@@ -96,11 +96,31 @@ fn drawer_prefs_path(data_dir: &Path, person_fp: &str) -> PathBuf {
         .join("drawer_ui.json")
 }
 
-/// 相对当前内容区宽度钳制。
+/// 相对当前内容区宽度钳制（最大约 85% 宿主宽，随窗口放大，无固定像素顶）。
 pub fn clamp_drawer_w(w: f32, host_w: f32) -> f32 {
     let host_w = host_w.max(DRAWER_W_MIN);
-    let max_w = (host_w * 0.85).min(900.0).max(DRAWER_W_MIN);
+    let max_w = (host_w * 0.85).max(DRAWER_W_MIN);
     w.clamp(DRAWER_W_MIN, max_w.min(host_w))
+}
+
+/// 宿主宽度变化时按比例缩放抽屉宽，再钳制。
+/// `id_salt` 用于记住上一帧宿主宽（表单/详情各自一份）。
+pub fn scale_drawer_w_with_host(
+    ctx: &egui::Context,
+    id_salt: impl Hash,
+    width: &mut f32,
+    host_w: f32,
+) {
+    let host_w = host_w.max(1.0);
+    let id = Id::new(("drawer_last_host_w", &id_salt));
+    if let Some(prev) = ctx.data(|d| d.get_temp::<f32>(id)) {
+        if prev > 1.0 && (host_w - prev).abs() > 0.5 {
+            let ratio = (*width / prev).clamp(0.05, 0.85);
+            *width = (ratio * host_w).max(DRAWER_W_MIN);
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(id, host_w));
+    *width = clamp_drawer_w(*width, host_w);
 }
 
 impl DrawerWidths {
@@ -458,5 +478,15 @@ mod tests {
     fn drawer_narrow_threshold() {
         assert!(drawer_panel_too_narrow(70.0, 12.0));
         assert!(!drawer_panel_too_narrow(120.0, 12.0));
+    }
+
+    #[test]
+    fn clamp_drawer_scales_with_host_no_900_cap() {
+        // 大窗口下允许超过旧 900 硬顶（约 85% 宿主）
+        let w = clamp_drawer_w(1000.0, 1600.0);
+        assert!(w > 900.0);
+        assert!((w - 1600.0 * 0.85).abs() < 1.0 || w <= 1600.0 * 0.85);
+        let half = clamp_drawer_w(440.0 * (1600.0 / 1000.0), 1600.0);
+        assert!((half - 704.0).abs() < 1.0);
     }
 }
