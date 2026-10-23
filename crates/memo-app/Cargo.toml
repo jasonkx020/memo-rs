@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 memo-core = { workspace = true }
 memo-sync = { workspace = true }
+memo-text = { workspace = true }
 eframe = { workspace = true }
 image = { version = "=0.24.9", default-features = false, features = ["png", "jpeg"] }
 uuid = { workspace = true }

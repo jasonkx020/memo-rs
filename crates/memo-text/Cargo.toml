@@ -1,0 +1,11 @@
+[package]
+name = "memo-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable plain-text flow editor for egui (styled runs, lists)"
+
+[dependencies]
+eframe = { workspace = true }
+
+[dev-dependencies]

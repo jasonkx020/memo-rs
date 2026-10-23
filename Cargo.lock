@@ -1912,6 +1912,7 @@ dependencies = [
  "lunar_rust",
  "memo-core",
  "memo-sync",
+ "memo-text",
  "parking_lot",
  "password-hash",
  "raw-window-handle 0.6.2",
@@ -1991,6 +1992,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+]
+
+[[package]]
+name = "memo-text"
+version = "0.1.0"
+dependencies = [
+ "eframe",
 ]
 
 [[package]]

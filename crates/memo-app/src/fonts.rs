@@ -122,6 +122,32 @@ pub fn configure_cjk_fonts(ctx: &egui::Context) {
         }
     }
 
+    // 正文加粗：优先黑体/雅黑 Bold；没有则回退到 cjk
+    let bold_family = FontFamily::Name("bold".into());
+    let mut bold_loaded = false;
+    #[cfg(windows)]
+    {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let fonts_dir = PathBuf::from(windir).join("Fonts");
+        for name in ["msyhbd.ttf", "msyhbd.ttc", "simhei.ttf", "simkai.ttf"] {
+            let path = fonts_dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            if let Ok(data) = fs::read(&path) {
+                fonts
+                    .font_data
+                    .insert("cjk_bold".to_owned(), FontData::from_owned(data));
+                push_family_font(&mut fonts, bold_family.clone(), "cjk_bold", 0);
+                bold_loaded = true;
+                break;
+            }
+        }
+    }
+    if !bold_loaded && fonts.font_data.contains_key("cjk") {
+        push_family_font(&mut fonts, bold_family, "cjk", 0);
+    }
+
     // CJK 之后插入系统符号字体，避免 ☐✓◀ 等落到 CJK 缺字方框且无法回退。
     let mut insert_at = if fonts.font_data.contains_key("cjk") {
         1

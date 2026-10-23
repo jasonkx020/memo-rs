@@ -8,7 +8,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// 列表样式（Word 编号 / 项目符号）。
+/// 列表样式（仅供反序列化旧 `Items` 块；规范化后不再出现）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ListKind {
@@ -56,6 +56,7 @@ pub enum Block {
     Paragraph {
         spans: Vec<Span>,
     },
+    /// 旧版列表块；读入后由 [`normalize_blocks`] 迁成带前缀的段落。
     Items {
         items: Vec<String>,
         #[serde(default)]
@@ -87,10 +88,36 @@ impl DocBody {
     }
 }
 
+/// 将旧 `Items` 迁成带前缀的纯文本段落；保证写出不再含列表块。
+pub fn normalize_blocks(blocks: Vec<Block>) -> Vec<Block> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for b in blocks {
+        match b {
+            Block::Items { items, list_kind } => {
+                for (i, item) in items.into_iter().enumerate() {
+                    let text = match list_kind {
+                        ListKind::Numbered => format!("{}. {item}", i + 1),
+                        ListKind::Bullet => format!("- {item}"),
+                    };
+                    out.push(Block::Paragraph {
+                        spans: vec![Span::plain(text)],
+                    });
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    if out.is_empty() {
+        DocBody::empty().blocks
+    } else {
+        out
+    }
+}
+
 /// 序列化正文（不含标题）。
 pub fn serialize_body(blocks: &[Block]) -> String {
     let body = DocBody {
-        blocks: blocks.to_vec(),
+        blocks: normalize_blocks(blocks.to_vec()),
     };
     match serde_json::to_string(&body) {
         Ok(json) => format!("{MAGIC}\n{json}"),
@@ -104,14 +131,15 @@ pub fn parse_body(content: &str) -> DocBody {
     if let Some(rest) = t.strip_prefix(MAGIC) {
         let json = rest.trim_start_matches(['\r', '\n']);
         if let Ok(body) = serde_json::from_str::<DocBody>(json) {
-            if body.blocks.is_empty() {
+            let blocks = normalize_blocks(body.blocks);
+            if blocks.is_empty() {
                 return DocBody::empty();
             }
-            return body;
+            return DocBody { blocks };
         }
     }
-    // 旧正文：迁成块（段落 / 事项 / 表格），无颜色链接
-    let blocks = parse_legacy_blocks(content);
+    // 旧正文：迁成块（段落 / 表格），无颜色链接；列表已是带前缀段落
+    let blocks = normalize_blocks(parse_legacy_blocks(content));
     if blocks.is_empty() {
         DocBody::empty()
     } else {
@@ -184,39 +212,42 @@ fn parse_legacy_blocks(md: &str) -> Vec<Block> {
 
         if let Some((_n, item)) = ordered_item(line) {
             flush_para(&mut para, &mut blocks);
-            let mut items = vec![item.to_string()];
+            let mut n = 1usize;
+            blocks.push(Block::Paragraph {
+                spans: vec![Span::plain(format!("{n}. {item}"))],
+            });
+            n += 1;
             i += 1;
             while i < lines.len() {
                 if let Some((_n, it)) = ordered_item(lines[i].trim_end()) {
-                    items.push(it.to_string());
+                    blocks.push(Block::Paragraph {
+                        spans: vec![Span::plain(format!("{n}. {it}"))],
+                    });
+                    n += 1;
                     i += 1;
                 } else {
                     break;
                 }
             }
-            blocks.push(Block::Items {
-                items,
-                list_kind: ListKind::Numbered,
-            });
             continue;
         }
 
         if let Some(item) = unordered_item(line) {
             flush_para(&mut para, &mut blocks);
-            let mut items = vec![item.to_string()];
+            blocks.push(Block::Paragraph {
+                spans: vec![Span::plain(format!("- {item}"))],
+            });
             i += 1;
             while i < lines.len() {
                 if let Some(it) = unordered_item(lines[i].trim_end()) {
-                    items.push(it.to_string());
+                    blocks.push(Block::Paragraph {
+                        spans: vec![Span::plain(format!("- {it}"))],
+                    });
                     i += 1;
                 } else {
                     break;
                 }
             }
-            blocks.push(Block::Items {
-                items,
-                list_kind: ListKind::Bullet,
-            });
             continue;
         }
 
@@ -332,6 +363,35 @@ mod tests {
     fn legacy_paragraph() {
         let body = parse_body("hello\n\n1. a\n2. b\n");
         assert!(matches!(body.blocks[0], Block::Paragraph { .. }));
-        assert!(matches!(body.blocks[1], Block::Items { .. }));
+        assert!(matches!(body.blocks[1], Block::Paragraph { .. }));
+        assert!(matches!(body.blocks[2], Block::Paragraph { .. }));
+        if let Block::Paragraph { spans } = &body.blocks[1] {
+            assert_eq!(spans[0].text, "1. a");
+        }
+        if let Block::Paragraph { spans } = &body.blocks[2] {
+            assert_eq!(spans[0].text, "2. b");
+        }
+    }
+
+    #[test]
+    fn migrate_old_items_json() {
+        let json = format!(
+            "{MAGIC}\n{}",
+            r#"{"blocks":[{"type":"paragraph","spans":[{"text":"hi"}]},{"type":"items","items":["a","b"],"list_kind":"numbered"},{"type":"items","items":["x"],"list_kind":"bullet"}]}"#
+        );
+        let body = parse_body(&json);
+        assert_eq!(body.blocks.len(), 4);
+        assert!(body.blocks.iter().all(|b| !matches!(b, Block::Items { .. })));
+        if let Block::Paragraph { spans } = &body.blocks[1] {
+            assert_eq!(spans[0].text, "1. a");
+        }
+        if let Block::Paragraph { spans } = &body.blocks[2] {
+            assert_eq!(spans[0].text, "2. b");
+        }
+        if let Block::Paragraph { spans } = &body.blocks[3] {
+            assert_eq!(spans[0].text, "- x");
+        }
+        let again = serialize_body(&body.blocks);
+        assert!(!again.contains("\"items\""));
     }
 }

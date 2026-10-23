@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/memo-core",
     "crates/memo-sync",
+    "crates/memo-text",
     "crates/memo-app",
     "crates/memo-cli",
 ]
@@ -16,6 +17,7 @@ license = "MIT"
 [workspace.dependencies]
 memo-core = { path = "crates/memo-core" }
 memo-sync = { path = "crates/memo-sync" }
+memo-text = { path = "crates/memo-text" }
 memo-app = { path = "crates/memo-app" }
 
 serde = { version = "=1.0.197", features = ["derive"] }

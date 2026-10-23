@@ -2345,7 +2345,7 @@ pub fn show_cal_drawer(
     let mut request_close = !anim.closing
         && dismissible
         && ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    *drawer_w = page_shell::clamp_drawer_w(*drawer_w, host.width());
+    page_shell::scale_drawer_w_with_host(ctx, id_salt, drawer_w, host.width());
     let (panel, dim, alpha) =
         page_shell::drawer_layout(host, *drawer_w, anim.t.max(0.001));
 
@@ -2436,9 +2436,11 @@ pub fn show_cal_drawer(
                     ctx.data_mut(|d| {
                         d.insert_temp(Id::new("form_viewport_h"), scroll_h);
                     });
+                    // 关拖拽滚动，避免抢走备注 TextEdit 的拖选
                     egui::ScrollArea::vertical()
                         .id_source(("side_drawer_scroll", id_salt))
                         .auto_shrink([false, false])
+                        .drag_to_scroll(false)
                         .max_height(scroll_h)
                         .show(ui, |ui| {
                             let w = ui.available_width().max(1.0);
