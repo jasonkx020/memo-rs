@@ -225,6 +225,8 @@ pub struct MemoApp {
     update_check_msg: String,
     /// 本会话是否已做过静默检查
     update_silent_done: bool,
+    /// 登录会话运行时（与 Screen 解耦：锁定 UI 时仍保持 LAN 监听）
+    session_rt: Option<Arc<AppRuntime>>,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
@@ -270,6 +272,14 @@ impl MemoApp {
             update_check_busy: false,
             update_check_msg: String::new(),
             update_silent_done: false,
+            session_rt: None,
+        }
+    }
+
+    fn stop_session_rt(&mut self) {
+        if let Some(rt) = self.session_rt.take() {
+            rt.engine.stop();
+            drop(rt);
         }
     }
 
@@ -592,6 +602,7 @@ impl MemoApp {
                 BgMsg::UnlockResult(Ok((rt, local_password))) => {
                     let cfg = rt.cfg.clone();
                     self.cfg = cfg.clone();
+                    self.session_rt = Some(rt.clone());
                     self.shell = ShellUi::default();
                     self.shell.cal.load_prefs(
                         Path::new(&cfg.data_dir),
@@ -891,11 +902,16 @@ impl eframe::App for MemoApp {
         // 托盘退出快路径（主循环仍在转时）：落盘 + dispose + exit。
         // 若主窗最小化/SW_HIDE 导致 update 不跑，由 tray::force_quit_process 兜底。
         if self.quit_requested {
-            let rt_for_flush = if let Screen::Main { rt, .. } = &self.screen {
-                Some(rt.clone())
-            } else {
-                None
-            };
+            let rt_for_flush = self
+                .session_rt
+                .clone()
+                .or_else(|| {
+                    if let Screen::Main { rt, .. } = &self.screen {
+                        Some(rt.clone())
+                    } else {
+                        None
+                    }
+                });
             if let Some(rt) = rt_for_flush {
                 let mut dummy = String::new();
                 self.flush_dirty_stickies(&rt, &mut dummy);
@@ -903,6 +919,7 @@ impl eframe::App for MemoApp {
             self.save_sticky_session_now();
             self.close_all_sticky_viewports(ctx);
             self.stickies.clear();
+            self.stop_session_rt();
             if let Some(t) = self.tray.take() {
                 t.dispose();
             }
@@ -916,14 +933,24 @@ impl eframe::App for MemoApp {
         }
 
         if self.pending_switch_person {
-            let rt_for_flush = if let Screen::Main { rt, .. } = &self.screen {
-                Some(rt.clone())
-            } else {
-                None
-            };
-            if let Some(rt) = rt_for_flush {
+            // 锁定 / 自动锁定：只挡 UI，保留 session_rt 使主节点继续 LAN 监听
+            let rt_for_flush = self
+                .session_rt
+                .clone()
+                .or_else(|| {
+                    if let Screen::Main { rt, .. } = &self.screen {
+                        Some(rt.clone())
+                    } else {
+                        None
+                    }
+                });
+            if let Some(rt) = &rt_for_flush {
                 let mut dummy = String::new();
-                self.flush_dirty_stickies(&rt, &mut dummy);
+                self.flush_dirty_stickies(rt, &mut dummy);
+                // 确保 Arc 挂在 session_rt（离开 Main 后仍存活）
+                if self.session_rt.is_none() {
+                    self.session_rt = Some(rt.clone());
+                }
             }
             self.save_sticky_session_now();
             self.close_all_sticky_viewports(ctx);
@@ -995,6 +1022,17 @@ impl eframe::App for MemoApp {
                         };
                         let tx = self.tx.clone();
                         let session_pw = local_password.clone();
+                        let fp = identity.fingerprint.clone();
+                        // 同身份：复用已在听的 session_rt，避免重复 bind
+                        let reuse = self
+                            .session_rt
+                            .as_ref()
+                            .filter(|rt| rt.svc.session_fp() == fp)
+                            .cloned();
+                        if reuse.is_none() {
+                            // 换身份：停掉旧引擎再开新会话
+                            self.stop_session_rt();
+                        }
                         ctx.request_repaint();
                         std::thread::spawn(move || {
                             let res: Result<(Arc<AppRuntime>, String), String> = (|| {
@@ -1007,7 +1045,18 @@ impl eframe::App for MemoApp {
                                 config::ensure_data_dir(&cfg)?;
                                 let mut id = identity;
                                 id.exported_once = true;
-                                let rt = unlock_runtime_identity(cfg, id, &local_password)?;
+                                let rt = if let Some(existing) = reuse {
+                                    // 校验登录密码后复用运行时（监听不中断）
+                                    IdentityKeys::load(
+                                        Path::new(&cfg.data_dir),
+                                        &fp,
+                                        &local_password,
+                                    )?;
+                                    let _ = id;
+                                    existing
+                                } else {
+                                    unlock_runtime_identity(cfg, id, &local_password)?
+                                };
                                 Ok((rt, session_pw))
                             })()
                             .map_err(|e: anyhow::Error| e.to_string());
@@ -1182,7 +1231,14 @@ impl eframe::App for MemoApp {
                                     RichText::new("审计完整").small().color(theme::success()),
                                 );
                             }
-                            if !status_line.is_empty() {
+                            if let Some(err) = rt.engine.listen_error() {
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(err)
+                                        .small()
+                                        .color(theme::warn()),
+                                );
+                            } else if !status_line.is_empty() {
                                 ui.separator();
                                 ui.label(
                                     RichText::new(status_line.as_str())
@@ -1204,6 +1260,7 @@ impl eframe::App for MemoApp {
                         });
                     });
 
+                let listen_err = rt.engine.listen_error();
                 let shell_action: ShellAction = shell::show(
                     ctx,
                     &rt.svc,
@@ -1259,6 +1316,7 @@ impl eframe::App for MemoApp {
                     } else {
                         None
                     },
+                    listen_err.as_deref(),
                 );
                 if shell_action.backup_dirty {
                     let _ = config::save_settings(settings_draft);
@@ -2658,16 +2716,26 @@ impl eframe::App for MemoApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Screen::Main { rt, .. } = &self.screen {
-            self.shell.cal.save_prefs_if_dirty(
-                Path::new(&self.cfg.data_dir),
-                rt.svc.session_fp(),
-            );
-            self.shell.drawer.save_if_dirty(
-                Path::new(&self.cfg.data_dir),
-                rt.svc.session_fp(),
-            );
+        let fp = self
+            .session_rt
+            .as_ref()
+            .map(|rt| rt.svc.session_fp().to_string())
+            .or_else(|| {
+                if let Screen::Main { rt, .. } = &self.screen {
+                    Some(rt.svc.session_fp().to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(fp) = fp.as_deref() {
+            self.shell
+                .cal
+                .save_prefs_if_dirty(Path::new(&self.cfg.data_dir), fp);
+            self.shell
+                .drawer
+                .save_if_dirty(Path::new(&self.cfg.data_dir), fp);
         }
+        self.stop_session_rt();
         if let Some(t) = self.tray.take() {
             t.dispose();
         }

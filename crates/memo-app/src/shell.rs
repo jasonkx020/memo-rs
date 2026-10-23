@@ -441,6 +441,7 @@ fn show_nodes_panel(
     local_disk: DiskSpace,
     backup_targets: &mut Vec<String>,
     online_count: usize,
+    listen_error: Option<&str>,
     action: &mut ShellAction,
 ) {
     ui.horizontal(|ui| {
@@ -470,6 +471,14 @@ fn show_nodes_panel(
         .size(11.0)
         .color(theme::text_muted()),
     );
+    if let Some(err) = listen_error.filter(|e| !e.is_empty()) {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(err)
+                .size(11.0)
+                .color(theme::warn()),
+        );
+    }
     ui.add_space(8.0);
 
     ui.label(
@@ -1207,6 +1216,8 @@ pub fn show(
     // 有新版本时顶栏提示（版本号）；None 不显示
     update_hint_ver: Option<&str>,
     update_hint_url: Option<&str>,
+    // TCP/UDP 监听异常（监督重绑中）
+    listen_error: Option<&str>,
 ) -> ShellAction {
     let nav_locked = show_new_memo || *editing;
     let mut action = ShellAction::default();
@@ -1455,6 +1466,7 @@ pub fn show(
                     local_disk,
                     backup_targets,
                     online_count,
+                    listen_error,
                     &mut action,
                 );
             });

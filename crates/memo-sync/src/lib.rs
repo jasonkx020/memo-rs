@@ -486,13 +486,13 @@ impl SyncEngine {
     }
 
     fn push_error(&self, msg: String) {
+        *self.listen_error.write() = Some(msg);
+    }
+
+    fn clear_listen_error_if(&self, needle: &str) {
         let mut g = self.listen_error.write();
-        match g.as_mut() {
-            Some(prev) => {
-                prev.push_str("; ");
-                prev.push_str(&msg);
-            }
-            None => *g = Some(msg),
+        if g.as_ref().is_some_and(|s| s.contains(needle)) {
+            *g = None;
         }
     }
 
@@ -515,9 +515,7 @@ impl SyncEngine {
     pub fn start(self: &Arc<Self>) {
         let eng = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = eng.clone().accept_loop().await {
-                eng.push_error(format!("TCP 监听 {}: {}", eng.port, e));
-            }
+            eng.accept_loop_supervised().await;
         });
         let eng = self.clone();
         tokio::spawn(async move {
@@ -526,27 +524,71 @@ impl SyncEngine {
         if self.lan_discovery {
             let eng = self.clone();
             tokio::spawn(async move {
-                eng.discover_loop().await;
+                eng.discover_loop_supervised().await;
             });
         }
     }
 
-    async fn accept_loop(self: Arc<Self>) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(("0.0.0.0", self.port)).await?;
+    /// TCP 监听监督：bind/连续 accept 失败则退避重绑，登录期间保持可恢复。
+    async fn accept_loop_supervised(self: Arc<Self>) {
+        let mut backoff = std::time::Duration::from_secs(1);
         loop {
-            tokio::select! {
-                _ = self.stop.notified() => break,
-                res = listener.accept() => {
-                    if let Ok((stream, addr)) = res {
-                        let eng = self.clone();
-                        tokio::spawn(async move {
-                            let _ = eng.handle_conn(stream, addr.to_string(), false).await;
-                        });
+            let listener = match TcpListener::bind(("0.0.0.0", self.port)).await {
+                Ok(l) => {
+                    self.clear_listen_error_if("TCP");
+                    backoff = std::time::Duration::from_secs(1);
+                    l
+                }
+                Err(e) => {
+                    self.push_error(format!("TCP 监听 {}: {}（重试中）", self.port, e));
+                    if self.sleep_or_stop(backoff).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+                    continue;
+                }
+            };
+            let mut consecutive_err = 0u32;
+            loop {
+                tokio::select! {
+                    _ = self.stop.notified() => return,
+                    res = listener.accept() => {
+                        match res {
+                            Ok((stream, addr)) => {
+                                consecutive_err = 0;
+                                let eng = self.clone();
+                                tokio::spawn(async move {
+                                    let _ = eng.handle_conn(stream, addr.to_string(), false).await;
+                                });
+                            }
+                            Err(_) => {
+                                consecutive_err = consecutive_err.saturating_add(1);
+                                if consecutive_err >= 32 {
+                                    self.push_error(format!(
+                                        "TCP 监听 {} 连续失败，重新绑定",
+                                        self.port
+                                    ));
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+                        }
                     }
                 }
             }
+            if self.sleep_or_stop(backoff).await {
+                return;
+            }
+            backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
         }
-        Ok(())
+    }
+
+    /// 返回 true 表示收到 stop。
+    async fn sleep_or_stop(&self, d: std::time::Duration) -> bool {
+        tokio::select! {
+            _ = self.stop.notified() => true,
+            _ = tokio::time::sleep(d) => false,
+        }
     }
 
     /// 从机：拨所有已发现主机。主机：仅拨其他主机（较小 node_id 主动拨）。
@@ -717,27 +759,54 @@ impl SyncEngine {
         }
     }
 
-    async fn discover_loop(self: Arc<Self>) {
-        let sock = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await {
-            Ok(s) => s,
-            Err(e) => {
-                self.push_error(format!("UDP 发现端口 {DISCOVERY_PORT} 绑定失败: {e}"));
+    /// UDP 发现监督：bind 失败则退避重试，勿一次失败永久停播。
+    async fn discover_loop_supervised(self: Arc<Self>) {
+        let mut backoff = std::time::Duration::from_secs(1);
+        loop {
+            let sock = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await {
+                Ok(s) => {
+                    self.clear_listen_error_if("UDP");
+                    backoff = std::time::Duration::from_secs(1);
+                    s
+                }
+                Err(e) => {
+                    self.push_error(format!(
+                        "UDP 发现端口 {DISCOVERY_PORT} 绑定失败: {e}（重试中）"
+                    ));
+                    if self.sleep_or_stop(backoff).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+                    continue;
+                }
+            };
+            if let Err(e) = sock.set_broadcast(true) {
+                self.push_error(format!("UDP 广播开启失败: {e}"));
+            }
+            if self.discover_loop_once(sock).await {
+                return; // stop
+            }
+            // socket 异常退出：退避后重绑
+            self.push_error(format!("UDP 发现异常，重新绑定 {DISCOVERY_PORT}"));
+            if self.sleep_or_stop(backoff).await {
                 return;
             }
-        };
-        if let Err(e) = sock.set_broadcast(true) {
-            self.push_error(format!("UDP 广播开启失败: {e}"));
+            backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
         }
+    }
 
+    /// 跑一轮发现循环；返回 true 表示收到 stop。
+    async fn discover_loop_once(self: &Arc<Self>, sock: UdpSocket) -> bool {
         let broadcast: SocketAddr = format!("255.255.255.255:{DISCOVERY_PORT}")
             .parse()
             .expect("broadcast addr");
         let mut buf = [0u8; 2048];
         let mut interval = tokio::time::interval(DISCOVER_INTERVAL);
+        let mut consecutive_recv_err = 0u32;
 
         loop {
             tokio::select! {
-                _ = self.stop.notified() => break,
+                _ = self.stop.notified() => return true,
                 _ = interval.tick() => {
                     self.prune_discovered();
                     if !self.should_broadcast_udp() {
@@ -770,7 +839,15 @@ impl SyncEngine {
                     }
                 }
                 res = sock.recv_from(&mut buf) => {
-                    let Ok((n, from)) = res else { continue };
+                    let Ok((n, from)) = res else {
+                        consecutive_recv_err = consecutive_recv_err.saturating_add(1);
+                        if consecutive_recv_err >= 32 {
+                            return false; // 重绑
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    };
+                    consecutive_recv_err = 0;
                     let Ok(ann) = serde_json::from_slice::<Announce>(&buf[..n]) else {
                         continue;
                     };
