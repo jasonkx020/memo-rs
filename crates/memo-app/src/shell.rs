@@ -368,18 +368,16 @@ pub struct ShellAction {
     pub open_sticky: Option<String>,
 }
 
-/// 若在私密页（顶栏或置顶入口），切回任务页并清选中；返回是否曾在私密。
+/// 若在私密页（顶栏或置顶入口），切回任务页；保留选中/编辑供锁定前 flush+快照。
 pub fn leave_private_for_lock(
     shell: &mut ShellUi,
     selected: &mut Option<String>,
-    editing: &mut bool,
+    _editing: &mut bool,
 ) -> bool {
     let on_private = shell.nav.is_gender_private()
         || selected.as_deref() == Some(HUB_GENDER_PRIVATE);
     if on_private {
         shell.nav = NavItem::Calendar;
-        *selected = None;
-        *editing = false;
     }
     on_private
 }

@@ -2,6 +2,7 @@ mod calendar_view;
 mod app_icon;
 mod autostart;
 mod date_field;
+mod editor_session;
 mod huangli;
 mod tray;
 mod doc_editor;
@@ -31,7 +32,7 @@ use memo_core::config::{self, Config, NodeRole};
 use memo_core::identity_keys::IdentityKeys;
 use memo_core::person::Gender;
 use memo_core::service::HistoryEvent;
-use memo_core::store::{MemoCategory, MemoPriority, MemoVisibility};
+use memo_core::store::{MemoCategory, MemoLifecycle, MemoPriority, MemoVisibility};
 use memo_form::{FormMode, MemoFormState};
 use memo_sync::{EngineBroadcaster, SyncEngine};
 use msg::BgMsg;
@@ -227,6 +228,8 @@ pub struct MemoApp {
     update_silent_done: bool,
     /// 登录会话运行时（与 Screen 解耦：锁定 UI 时仍保持 LAN 监听）
     session_rt: Option<Arc<AppRuntime>>,
+    /// 锁定前备忘编辑快照（同进程解锁优先；亦落盘）
+    editor_resume: Option<editor_session::EditorSession>,
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
@@ -273,6 +276,7 @@ impl MemoApp {
             update_check_msg: String::new(),
             update_silent_done: false,
             session_rt: None,
+            editor_resume: None,
         }
     }
 
@@ -412,6 +416,240 @@ impl MemoApp {
                 }
             }
         }
+    }
+
+    /// 锁定前：同步写回正在编辑的已有备忘，并快照新建/编辑 UI。
+    fn flush_and_snapshot_editor_on_lock(&mut self, rt: &AppRuntime) {
+        let fp = rt.svc.session_fp().to_string();
+        let (editing, show_new, selected_id) = match &self.screen {
+            Screen::Main {
+                selected,
+                editing,
+                show_new_memo,
+                ..
+            } => (*editing, *show_new_memo, selected.clone()),
+            _ => return,
+        };
+
+        let mut lock_status: Option<String> = None;
+        if editing {
+            if let Some(id) = selected_id.as_ref() {
+                if !shell::is_private_hub(id) && !shell::is_new_draft(id) {
+                    match memo_form::validate_title(&self.edit_form) {
+                        Ok((t, b)) => {
+                            let due = self.edit_form.due_date.clone();
+                            let end = self.edit_form.end_date.clone();
+                            let vis = self.edit_form.visibility;
+                            let cat = self.edit_form.category.canonical();
+                            let done = self.edit_form.done;
+                            let prio = self.edit_form.priority;
+                            let remind = self.edit_form.remind_before_days;
+                            let tags = memo_form::tags_vec(&self.edit_form);
+                            let tags_str = self.edit_form.tags.clone();
+                            let doc = self.edit_form.doc.clone();
+                            let meta = rt.svc.list().into_iter().find(|m| m.id == *id);
+                            let seen = meta
+                                .as_ref()
+                                .map(|m| {
+                                    if m.due_date.trim() == due.trim() {
+                                        m.remind_seen_for.clone()
+                                    } else {
+                                        String::new()
+                                    }
+                                })
+                                .unwrap_or_default();
+                            match rt.svc.edit_full(
+                                id,
+                                &t,
+                                &b,
+                                vis,
+                                MemoLifecycle::Permanent,
+                                cat,
+                                &due,
+                                &end,
+                                done,
+                                &tags,
+                                prio,
+                                remind,
+                                &seen,
+                            ) {
+                                Ok(()) => {
+                                    if let Screen::Main {
+                                        title_draft,
+                                        body_draft,
+                                        visibility_draft,
+                                        category_draft,
+                                        due_date_draft,
+                                        end_date_draft,
+                                        tags_draft,
+                                        done_draft,
+                                        priority_draft,
+                                        ..
+                                    } = &mut self.screen
+                                    {
+                                        *title_draft = t;
+                                        *body_draft = b;
+                                        *category_draft = cat;
+                                        *due_date_draft = due;
+                                        *end_date_draft = end;
+                                        *priority_draft = prio;
+                                        *tags_draft = tags_str;
+                                        *done_draft = done;
+                                        *visibility_draft = vis;
+                                    }
+                                    self.memo_doc = doc;
+                                }
+                                Err(e) => {
+                                    lock_status = Some(format!("锁定前保存失败: {e}"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            lock_status = Some(format!("锁定前未保存（{e}），将恢复草稿"));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let (Some(msg), Screen::Main { status_line, .. }) =
+            (lock_status, &mut self.screen)
+        {
+            *status_line = msg;
+        }
+
+        let session = match &self.screen {
+            Screen::Main {
+                selected,
+                title_draft,
+                body_draft,
+                visibility_draft,
+                category_draft,
+                due_date_draft,
+                end_date_draft,
+                tags_draft,
+                done_draft,
+                priority_draft,
+                ..
+            } => editor_session::capture(
+                &fp,
+                self.shell.nav,
+                selected,
+                editing,
+                show_new,
+                title_draft,
+                body_draft,
+                *visibility_draft,
+                *category_draft,
+                due_date_draft,
+                end_date_draft,
+                tags_draft,
+                *done_draft,
+                *priority_draft,
+                &self.edit_form,
+            ),
+            _ => return,
+        };
+        if session.worth_keeping() {
+            let _ = editor_session::save_session(Path::new(&self.cfg.data_dir), &session);
+            self.editor_resume = Some(session);
+        } else {
+            editor_session::clear_session_file(Path::new(&self.cfg.data_dir), &fp);
+            self.editor_resume = None;
+        }
+    }
+
+    fn clear_editor_session_at(
+        data_dir: &Path,
+        resume: &mut Option<editor_session::EditorSession>,
+        person_fp: &str,
+    ) {
+        *resume = None;
+        editor_session::clear_session_file(data_dir, person_fp);
+    }
+
+    fn clear_editor_session(&mut self, person_fp: Option<&str>) {
+        let fp = person_fp
+            .map(|s| s.to_string())
+            .or_else(|| {
+                self.session_rt
+                    .as_ref()
+                    .map(|rt| rt.svc.session_fp().to_string())
+            })
+            .or_else(|| {
+                if let Screen::Main { rt, .. } = &self.screen {
+                    Some(rt.svc.session_fp().to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(fp) = fp {
+            Self::clear_editor_session_at(
+                Path::new(&self.cfg.data_dir),
+                &mut self.editor_resume,
+                &fp,
+            );
+        }
+    }
+
+    fn restore_editor_from_session(&mut self, rt: &AppRuntime) {
+        let fp = rt.svc.session_fp().to_string();
+        let session = match self.editor_resume.take() {
+            Some(s) if s.person_fp == fp || s.person_fp.is_empty() => Some(s),
+            Some(_) => {
+                // 换身份：丢弃内存快照，尝试磁盘（应为该身份文件）
+                editor_session::load_session(Path::new(&self.cfg.data_dir), &fp)
+            }
+            None => editor_session::load_session(Path::new(&self.cfg.data_dir), &fp),
+        };
+        let Some(session) = session else {
+            return;
+        };
+        if !session.worth_keeping() {
+            editor_session::clear_session_file(Path::new(&self.cfg.data_dir), &fp);
+            return;
+        }
+
+        self.shell.nav = editor_session::nav_from_str(&session.nav);
+        self.edit_form =
+            editor_session::form_from_snapshot(&session.form, Path::new(&rt.cfg.data_dir));
+        self.memo_doc = self.edit_form.doc.clone();
+
+        let Screen::Main {
+            selected,
+            title_draft,
+            body_draft,
+            visibility_draft,
+            category_draft,
+            due_date_draft,
+            end_date_draft,
+            tags_draft,
+            done_draft,
+            priority_draft,
+            editing,
+            show_new_memo,
+            ..
+        } = &mut self.screen
+        else {
+            self.editor_resume = Some(session);
+            return;
+        };
+
+        *selected = session.selected.clone();
+        *editing = session.editing;
+        *show_new_memo = session.show_new_memo;
+        *title_draft = session.title_draft.clone();
+        *body_draft = session.body_draft.clone();
+        *visibility_draft = session.visibility_draft;
+        *category_draft = session.category_draft;
+        *due_date_draft = session.due_date_draft.clone();
+        *end_date_draft = session.end_date_draft.clone();
+        *tags_draft = session.tags_draft.clone();
+        *done_draft = session.done_draft;
+        *priority_draft = session.priority_draft;
+
+        // 恢复后仍保留磁盘会话，直到用户保存/取消
+        self.editor_resume = Some(session);
     }
 
     fn refresh_stickies_from_list(&mut self, rt: &AppRuntime) {
@@ -602,6 +840,15 @@ impl MemoApp {
                 BgMsg::UnlockResult(Ok((rt, local_password))) => {
                     let cfg = rt.cfg.clone();
                     self.cfg = cfg.clone();
+                    let unlock_fp = rt.svc.session_fp().to_string();
+                    // 换身份：丢掉上一身份内存草稿
+                    if self
+                        .editor_resume
+                        .as_ref()
+                        .is_some_and(|s| !s.person_fp.is_empty() && s.person_fp != unlock_fp)
+                    {
+                        self.editor_resume = None;
+                    }
                     self.session_rt = Some(rt.clone());
                     self.shell = ShellUi::default();
                     self.shell.cal.load_prefs(
@@ -622,7 +869,8 @@ impl MemoApp {
                     // 每天首次解锁：按手标重算经期预测（排卵/易孕/下次）
                     let list = rt.svc.list();
                     let _ = period_view::ensure_daily_predict_recalc(&rt.svc, &list);
-                    self.screen = Self::make_main(rt, &cfg);
+                    self.screen = Self::make_main(rt.clone(), &cfg);
+                    self.restore_editor_from_session(&rt);
                     // 进主壳后静默检查一次（stub 未配置时不打扰）
                     self.update_silent_done = false;
                     self.update_newer = false;
@@ -662,6 +910,11 @@ impl MemoApp {
                     priority,
                     tags,
                 } => {
+                    let created_fp = if let Screen::Main { rt, .. } = &self.screen {
+                        Some(rt.svc.session_fp().to_string())
+                    } else {
+                        None
+                    };
                     if let Screen::Main {
                         selected,
                         title_draft,
@@ -716,6 +969,9 @@ impl MemoApp {
                         );
                         self.edit_form.data_dir =
                             Some(std::path::PathBuf::from(&self.cfg.data_dir));
+                    }
+                    if let Some(fp) = created_fp.as_deref() {
+                        self.clear_editor_session(Some(fp));
                     }
                 }
                 BgMsg::Deleted => {
@@ -945,6 +1201,7 @@ impl eframe::App for MemoApp {
                     }
                 });
             if let Some(rt) = &rt_for_flush {
+                self.flush_and_snapshot_editor_on_lock(rt);
                 let mut dummy = String::new();
                 self.flush_dirty_stickies(rt, &mut dummy);
                 // 确保 Arc 挂在 session_rt（离开 Main 后仍存活）
@@ -1261,6 +1518,8 @@ impl eframe::App for MemoApp {
                     });
 
                 let listen_err = rt.engine.listen_error();
+                let editing_before = *editing;
+                let new_memo_before = *show_new_memo;
                 let shell_action: ShellAction = shell::show(
                     ctx,
                     &rt.svc,
@@ -1414,6 +1673,11 @@ impl eframe::App for MemoApp {
                                         *status_line = "正在创建…".into();
                                         *show_new_memo = false;
                                         self.edit_form.clear();
+                                        Self::clear_editor_session_at(
+                                            Path::new(&self.cfg.data_dir),
+                                            &mut self.editor_resume,
+                                            rt.svc.session_fp(),
+                                        );
                                     }
                                     Err(e) => {
                                         *status_line = e;
@@ -1424,6 +1688,11 @@ impl eframe::App for MemoApp {
                             MemoDrawerAction::Dismiss => {
                                 *show_new_memo = false;
                                 self.edit_form.clear();
+                                Self::clear_editor_session_at(
+                                    Path::new(&self.cfg.data_dir),
+                                    &mut self.editor_resume,
+                                    rt.svc.session_fp(),
+                                );
                                 if status_line.starts_with("在右侧抽屉填写新建")
                                     || status_line.starts_with("填写新建")
                                 {
@@ -1476,6 +1745,13 @@ impl eframe::App for MemoApp {
                                         status_line,
                                         &self.tx,
                                     );
+                                    if !*editing {
+                                        Self::clear_editor_session_at(
+                                            Path::new(&self.cfg.data_dir),
+                                            &mut self.editor_resume,
+                                            rt.svc.session_fp(),
+                                        );
+                                    }
                                 }
                                 MemoDrawerAction::Dismiss => {
                                     shell::cancel_memo_edit(
@@ -1494,11 +1770,24 @@ impl eframe::App for MemoApp {
                                         &mut self.memo_doc,
                                         &mut self.edit_form,
                                     );
+                                    Self::clear_editor_session_at(
+                                        Path::new(&self.cfg.data_dir),
+                                        &mut self.editor_resume,
+                                        rt.svc.session_fp(),
+                                    );
                                 }
                                 MemoDrawerAction::None => {}
                             }
                         }
                     }
+                }
+
+                if (editing_before && !*editing) || (new_memo_before && !*show_new_memo) {
+                    Self::clear_editor_session_at(
+                        Path::new(&self.cfg.data_dir),
+                        &mut self.editor_resume,
+                        rt.svc.session_fp(),
+                    );
                 }
 
                 if *show_delete {

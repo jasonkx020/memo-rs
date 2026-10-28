@@ -2,7 +2,10 @@
 //! 落盘为 UTF-8 字符串；旧 `memo-doc/v1` 在装入时拍平。
 
 use crate::theme;
-use eframe::egui::{self, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
+use eframe::egui::{
+    self, text::LayoutJob, text_selection::LabelSelectionState, FontFamily, FontId, Frame, Margin,
+    Rounding, Sense, Stroke, Vec2,
+};
 use memo_core::memo_doc;
 use memo_core::store::MemoCategory;
 use std::path::Path;
@@ -170,14 +173,34 @@ pub fn show_viewer_body_ex(
         ui.label(theme::muted_label("（正文为空）").size(15.0));
         return;
     }
+    // Label 默认可选命中框贴齐 galley 右缘，L→R 拖选常漏末字；右缘留 HIT_PAD 给命中。
+    const HIT_PAD_X: f32 = 14.0;
+    const FONT_SIZE: f32 = 15.0;
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), 0.0),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
-            ui.set_max_width(ui.available_width());
-            ui.add(
-                egui::Label::new(RichText::new(plain).size(15.0).color(theme::text())).wrap(true),
+            let avail = ui.available_width().max(1.0);
+            ui.set_max_width(avail);
+            // 折行宽略收，命中垫落在 available 内，避免被抽屉 clip 切掉
+            let wrap_w = (avail - HIT_PAD_X).max(1.0);
+            let job = LayoutJob::simple(
+                plain,
+                FontId::new(FONT_SIZE, FontFamily::Proportional),
+                theme::text(),
+                wrap_w,
             );
+            let galley = ui.fonts(|f| f.layout_job(job));
+            let size = Vec2::new(
+                (galley.size().x + HIT_PAD_X).min(avail).max(1.0),
+                galley.size().y.max(1.0),
+            );
+            let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+            let galley_pos = rect.left_top();
+            if ui.is_rect_visible(response.rect) {
+                ui.painter().galley(galley_pos, galley.clone(), theme::text());
+                LabelSelectionState::label_text_selection(ui, &response, galley_pos, &galley);
+            }
         },
     );
 }
