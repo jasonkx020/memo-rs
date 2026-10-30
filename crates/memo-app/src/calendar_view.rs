@@ -66,6 +66,10 @@ pub struct CalendarUi {
     scroll_overdue: bool,
     /// 偏好落盘脏标记
     prefs_dirty: bool,
+    /// 黄历下运势分段
+    pub fortune_tab: crate::fortune::FortuneTab,
+    /// 运势「去设置」补生日
+    pub request_open_settings: bool,
 }
 
 impl Default for CalendarUi {
@@ -82,6 +86,8 @@ impl Default for CalendarUi {
             week_monday: monday_of(t),
             scroll_overdue: false,
             prefs_dirty: false,
+            fortune_tab: crate::fortune::FortuneTab::Yun,
+            request_open_settings: false,
         }
     }
 }
@@ -474,7 +480,7 @@ pub fn show(
                     ui.set_min_height(full_h);
                     ui.set_max_height(full_h);
                     ui.set_clip_rect(ui.max_rect());
-                    show_month(ui, cal, all, &q, selected, editing, open_new, picked);
+                    show_month(ui, svc, cal, all, &q, selected, editing, open_new, picked);
                 },
             );
         },
@@ -709,6 +715,7 @@ pub(crate) fn split_cal_detail(ui: &egui::Ui) -> (f32, f32, f32) {
 
 pub(crate) fn show_month(
     ui: &mut egui::Ui,
+    svc: &Arc<MemoService>,
     cal: &mut CalendarUi,
     all: &[MemoView],
     q: &str,
@@ -764,6 +771,8 @@ pub(crate) fn show_month(
             });
             ui.add_space(4.0);
             show_huangli_row(ui, cal.selected);
+            ui.add_space(4.0);
+            show_fortune_panel(ui, svc, cal);
             ui.add_space(6.0);
             // 网格区关掉默认行距，只用显式 gap，避免底部多出空隙或溢出
             let gap = 3.0_f32;
@@ -1611,6 +1620,252 @@ fn section_header(ui: &mut egui::Ui, title: &str, n: usize, fg: Color32, badge_b
             });
     });
     ui.add_space(4.0);
+}
+
+/// 黄历下：命 / 运 / 财 / 衣 本地运势。
+fn show_fortune_panel(ui: &mut egui::Ui, svc: &Arc<MemoService>, cal: &mut CalendarUi) {
+    use crate::fortune::{self, FortuneMode, FortuneTab};
+
+    let (birth_ymd, birth_hour) = svc.current_person_birth();
+    let gender = svc.current_person_gender();
+    let fp = svc.session_fp();
+    let f = fortune::for_day(cal.selected, fp, &birth_ymd, birth_hour, gender);
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("今日运势")
+                .size(12.5)
+                .strong()
+                .color(theme::text()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for tab in FortuneTab::ALL {
+                let on = cal.fortune_tab == tab;
+                let btn = ui.add(
+                    egui::Button::new(
+                        RichText::new(tab.label())
+                            .size(11.5)
+                            .strong()
+                            .color(if on {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            }),
+                    )
+                    .fill(if on {
+                        theme::card()
+                    } else {
+                        theme::panel()
+                    })
+                    .stroke(Stroke::new(
+                        1.0,
+                        if on {
+                            theme::border_strong()
+                        } else {
+                            theme::border()
+                        },
+                    ))
+                    .rounding(Rounding::same(6.0))
+                    .min_size(Vec2::new(26.0, 22.0)),
+                );
+                if btn.clicked() {
+                    cal.fortune_tab = tab;
+                }
+            }
+        });
+    });
+    ui.add_space(4.0);
+
+    Frame::none()
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::same(10.0))
+        .show(ui, |ui| {
+            match cal.fortune_tab {
+                FortuneTab::Ming => {
+                    ui.label(
+                        RichText::new(&f.fate_header)
+                            .size(11.5)
+                            .color(theme::text_muted()),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (i, tag) in f.fate_tags.iter().enumerate() {
+                            let (fill, fg) = match i % 3 {
+                                0 => (theme::accent_soft(), theme::accent()),
+                                1 => (theme::success_soft(), theme::success()),
+                                _ => (theme::warn_due_today_bg(), theme::warn_due_today_fg()),
+                            };
+                            Frame::none()
+                                .fill(fill)
+                                .rounding(Rounding::same(10.0))
+                                .inner_margin(Margin::symmetric(8.0, 3.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(*tag).size(11.0).strong().color(fg),
+                                    );
+                                });
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(&f.fate_blurb)
+                            .size(12.5)
+                            .strong()
+                            .color(theme::text()),
+                    );
+                }
+                FortuneTab::Yun => {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("综合")
+                                .size(12.0)
+                                .color(theme::text_muted()),
+                        );
+                        ui.label(
+                            RichText::new(fortune::format_stars(f.stars_overall))
+                                .size(12.5)
+                                .color(Color32::from_rgb(0xb8, 0x86, 0x0b)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{}", f.score_overall))
+                                    .size(20.0)
+                                    .strong()
+                                    .color(theme::text()),
+                            );
+                        });
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(&f.one_liner)
+                            .size(12.5)
+                            .strong()
+                            .color(theme::text()),
+                    );
+                    ui.add_space(4.0);
+                    fortune_meta(ui, "宜", &f.yi);
+                    fortune_meta(ui, "忌", &f.ji);
+                    fortune_meta(ui, "方位", &f.direction);
+                }
+                FortuneTab::Cai => {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("财运")
+                                .size(12.0)
+                                .color(theme::text_muted()),
+                        );
+                        ui.label(
+                            RichText::new(fortune::format_stars(f.stars_wealth))
+                                .size(12.5)
+                                .color(Color32::from_rgb(0xb8, 0x86, 0x0b)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{}", f.score_wealth))
+                                    .size(20.0)
+                                    .strong()
+                                    .color(theme::text()),
+                            );
+                        });
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(&f.one_liner)
+                            .size(12.5)
+                            .strong()
+                            .color(theme::text()),
+                    );
+                    ui.add_space(4.0);
+                    fortune_meta(ui, "进", &f.wealth_in);
+                    fortune_meta(ui, "守", &f.wealth_out);
+                }
+                FortuneTab::Yi => {
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(32.0, 32.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(
+                            rect,
+                            Rounding::same(8.0),
+                            f.cloth.color,
+                        );
+                        ui.painter().rect_stroke(
+                            rect,
+                            Rounding::same(8.0),
+                            Stroke::new(1.0, theme::border()),
+                        );
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(f.cloth.name)
+                                    .size(13.0)
+                                    .strong()
+                                    .color(theme::text()),
+                            );
+                            ui.label(
+                                RichText::new(format!("主色 · {}", f.cloth.vibe))
+                                    .size(11.0)
+                                    .color(theme::text_muted()),
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
+                    fortune_meta(ui, "上", &f.cloth_top);
+                    fortune_meta(ui, "下", &f.cloth_bottom);
+                    fortune_meta(ui, "点", &f.cloth_accent);
+                }
+            }
+
+            if matches!(f.mode, FortuneMode::Anon) {
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("填写生日后推演更准。")
+                            .size(11.5)
+                            .color(Color32::from_rgb(0x6b, 0x5a, 0x22)),
+                    );
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("去设置")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(theme::accent()),
+                            )
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        cal.request_open_settings = true;
+                    }
+                });
+            }
+
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("仅供娱乐，非专业预测。")
+                    .size(10.5)
+                    .color(theme::text_muted()),
+            );
+        });
+}
+
+fn fortune_meta(ui: &mut egui::Ui, key: &str, val: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(key)
+                .size(11.5)
+                .color(theme::text_muted()),
+        );
+        ui.add(
+            egui::Label::new(RichText::new(val).size(12.0).color(theme::text_muted()))
+                .wrap(true),
+        );
+    });
 }
 
 /// 选中日黄历：宜忌后台算完再刷新；农历上行、宜忌下行可换行。

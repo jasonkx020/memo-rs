@@ -73,6 +73,10 @@ struct BackupPerson {
     needs_password_reset: bool,
     #[serde(default)]
     gender: crate::person::Gender,
+    #[serde(default)]
+    birth_ymd: String,
+    #[serde(default)]
+    birth_hour: Option<u8>,
 }
 
 pub struct BackupBundle {
@@ -140,6 +144,8 @@ pub fn export_encrypted(
                 node_id: p.node_id.clone(),
                 needs_password_reset: true,
                 gender: p.gender,
+                birth_ymd: p.birth_ymd.clone(),
+                birth_hour: p.birth_hour,
             })
             .collect(),
         tasks: Vec::new(),
@@ -216,6 +222,8 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 version: p.version,
                 node_id: p.node_id,
                 gender: p.gender,
+                birth_ymd: p.birth_ymd,
+                birth_hour: p.birth_hour,
             })
             .collect(),
         memo_attachments,

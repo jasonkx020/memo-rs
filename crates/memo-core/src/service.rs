@@ -204,6 +204,41 @@ impl MemoService {
         self.update_person(&id, &name, gender, disabled)
     }
 
+    pub fn current_person_birth(&self) -> (String, Option<u8>) {
+        self.current_person_id()
+            .and_then(|id| self.person_store.get(&id))
+            .map(|p| (p.birth_ymd, p.birth_hour))
+            .unwrap_or_default()
+    }
+
+    /// 设置当前身份可选生辰；`birth_ymd` 空表示清除；时辰 `None` 为未知。
+    pub fn set_current_person_birth(
+        &self,
+        birth_ymd: &str,
+        birth_hour: Option<u8>,
+    ) -> anyhow::Result<()> {
+        if let Some(h) = birth_hour {
+            if h > 23 {
+                anyhow::bail!("时辰无效");
+            }
+        }
+        let ymd = birth_ymd.trim();
+        if !ymd.is_empty()
+            && chrono::NaiveDate::parse_from_str(ymd, "%Y-%m-%d").is_err()
+        {
+            anyhow::bail!("生日格式应为 YYYY-MM-DD");
+        }
+        self.ensure_session_person()?;
+        let id = self
+            .current_person_id()
+            .ok_or_else(|| anyhow::anyhow!("请先完成身份解锁"))?;
+        let (aid, aname) = self.current_actor();
+        self.person_store
+            .set_birth(&id, ymd, birth_hour, &aid, &aname)?;
+        self.fire();
+        Ok(())
+    }
+
     pub fn set_current_person(&self, id: Option<String>) {
         *self.current_person_id.lock() = id;
     }

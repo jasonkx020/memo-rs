@@ -3,6 +3,7 @@ mod app_icon;
 mod autostart;
 mod date_field;
 mod editor_session;
+mod fortune;
 mod huangli;
 mod tray;
 mod doc_editor;
@@ -2517,6 +2518,206 @@ impl eframe::App for MemoApp {
                                                             let _ = self
                                                                 .tx
                                                                 .send(BgMsg::Error(e.to_string()));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            settings_item_gap(ui);
+                                            settings_item_header(
+                                                ui,
+                                                "生日（可选）",
+                                                "用于日历运势推演；不填则按娱乐模式。填写后更准。",
+                                            );
+                                            {
+                                                let (cur_ymd, cur_hour) =
+                                                    rt.svc.current_person_birth();
+                                                let draft_id = egui::Id::new("settings_birth_draft");
+                                                let hour_id =
+                                                    egui::Id::new("settings_birth_hour_draft");
+                                                let sync_id =
+                                                    egui::Id::new("settings_birth_synced");
+                                                let need_sync = ui.data(|d| {
+                                                    d.get_temp::<(String, Option<u8>)>(sync_id)
+                                                        != Some((cur_ymd.clone(), cur_hour))
+                                                });
+                                                if need_sync {
+                                                    ui.data_mut(|d| {
+                                                        d.insert_temp(draft_id, cur_ymd.clone());
+                                                        d.insert_temp(hour_id, cur_hour);
+                                                        d.insert_temp(
+                                                            sync_id,
+                                                            (cur_ymd.clone(), cur_hour),
+                                                        );
+                                                    });
+                                                }
+                                                let mut birth_ymd = ui.data(|d| {
+                                                    d.get_temp::<String>(draft_id)
+                                                        .unwrap_or_else(|| cur_ymd.clone())
+                                                });
+                                                let mut birth_hour: Option<u8> = ui
+                                                    .data(|d| {
+                                                        d.get_temp::<Option<u8>>(hour_id)
+                                                            .unwrap_or(cur_hour)
+                                                    });
+                                                // 设置窗在 ScrollArea+遮罩下，popup/ComboBox 一点就关；改内联选日与时辰
+                                                let picker_open_id =
+                                                    egui::Id::new("settings_birth_picker_open");
+                                                let mut picker_open = ui.data(|d| {
+                                                    d.get_temp::<bool>(picker_open_id)
+                                                        .unwrap_or(false)
+                                                });
+                                                let display = if birth_ymd.trim().is_empty() {
+                                                    "选择生日…".to_string()
+                                                } else if date_field::parse_ymd(&birth_ymd)
+                                                    .is_some()
+                                                {
+                                                    birth_ymd.trim().chars().take(10).collect()
+                                                } else {
+                                                    format!("{} (无效)", birth_ymd.trim())
+                                                };
+                                                ui.horizontal(|ui| {
+                                                    let open_btn = ui.add(
+                                                        egui::Button::new(
+                                                            RichText::new(format!("📅  {display}"))
+                                                                .size(13.5)
+                                                                .color(theme::text()),
+                                                        )
+                                                        .fill(theme::card())
+                                                        .stroke(egui::Stroke::new(
+                                                            1.0,
+                                                            theme::border(),
+                                                        ))
+                                                        .rounding(egui::Rounding::same(8.0))
+                                                        .min_size(egui::vec2(
+                                                            (field_w - 56.0).max(120.0),
+                                                            30.0,
+                                                        )),
+                                                    );
+                                                    if open_btn.clicked() {
+                                                        picker_open = !picker_open;
+                                                    }
+                                                    if !birth_ymd.trim().is_empty()
+                                                        && ui
+                                                            .add(
+                                                                egui::Button::new(
+                                                                    RichText::new("清除")
+                                                                        .size(12.0)
+                                                                        .color(theme::text_muted()),
+                                                                )
+                                                                .frame(false),
+                                                            )
+                                                            .clicked()
+                                                    {
+                                                        birth_ymd.clear();
+                                                        picker_open = false;
+                                                    }
+                                                });
+                                                if picker_open {
+                                                    ui.add_space(4.0);
+                                                    egui::Frame::none()
+                                                        .fill(theme::panel())
+                                                        .stroke(egui::Stroke::new(
+                                                            1.0,
+                                                            theme::border(),
+                                                        ))
+                                                        .rounding(egui::Rounding::same(8.0))
+                                                        .inner_margin(egui::Margin::same(8.0))
+                                                        .show(ui, |ui| {
+                                                            ui.set_max_width(field_w);
+                                                            if date_field::show_picker_body(
+                                                                ui,
+                                                                "settings_birth_inline",
+                                                                &mut birth_ymd,
+                                                                false,
+                                                            ) {
+                                                                picker_open = false;
+                                                            }
+                                                        });
+                                                }
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    RichText::new("时辰（可选）")
+                                                        .size(12.0)
+                                                        .color(theme::text_muted()),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    let mut known = birth_hour.is_some();
+                                                    if ui
+                                                        .checkbox(&mut known, "已知钟点")
+                                                        .changed()
+                                                    {
+                                                        birth_hour =
+                                                            if known { Some(12) } else { None };
+                                                    }
+                                                    if let Some(h) = birth_hour.as_mut() {
+                                                        let mut hv = i32::from(*h);
+                                                        if ui
+                                                            .add(
+                                                                egui::DragValue::new(&mut hv)
+                                                                    .clamp_range(0..=23)
+                                                                    .suffix(" 时")
+                                                                    .speed(0.2),
+                                                            )
+                                                            .changed()
+                                                        {
+                                                            *h = hv.clamp(0, 23) as u8;
+                                                        }
+                                                    } else {
+                                                        ui.label(
+                                                            RichText::new("未知")
+                                                                .size(12.5)
+                                                                .color(theme::text_muted()),
+                                                        );
+                                                    }
+                                                });
+                                                ui.data_mut(|d| {
+                                                    d.insert_temp(draft_id, birth_ymd.clone());
+                                                    d.insert_temp(hour_id, birth_hour);
+                                                    d.insert_temp(picker_open_id, picker_open);
+                                                });
+                                                if birth_ymd != cur_ymd || birth_hour != cur_hour {
+                                                    ui.add_space(4.0);
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new("保存生辰")
+                                                                    .size(12.5)
+                                                                    .color(Color32::WHITE),
+                                                            )
+                                                            .fill(theme::accent())
+                                                            .rounding(egui::Rounding::same(8.0)),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        match rt.svc.set_current_person_birth(
+                                                            &birth_ymd,
+                                                            birth_hour,
+                                                        ) {
+                                                            Ok(()) => {
+                                                                ui.data_mut(|d| {
+                                                                    d.insert_temp(
+                                                                        sync_id,
+                                                                        (
+                                                                            birth_ymd.clone(),
+                                                                            birth_hour,
+                                                                        ),
+                                                                    );
+                                                                });
+                                                                *status_line =
+                                                                    if birth_ymd.trim().is_empty()
+                                                                    {
+                                                                        "已清除生日，运势为娱乐模式"
+                                                                            .into()
+                                                                    } else {
+                                                                        "已保存生日".into()
+                                                                    };
+                                                                ctx.request_repaint();
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = self.tx.send(
+                                                                    BgMsg::Error(e.to_string()),
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }

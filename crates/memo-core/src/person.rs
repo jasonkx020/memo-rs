@@ -74,6 +74,12 @@ pub struct Person {
     pub node_id: String,
     #[serde(default)]
     pub gender: Gender,
+    /// 可选公历生日 `YYYY-MM-DD`；空 = 未填（运势走娱乐模式）
+    #[serde(default)]
+    pub birth_ymd: String,
+    /// 可选出生时（0–23）；`None` = 未知
+    #[serde(default)]
+    pub birth_hour: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +90,8 @@ pub struct PersonView {
     pub version: u64,
     pub node_id: String,
     pub gender: Gender,
+    pub birth_ymd: String,
+    pub birth_hour: Option<u8>,
 }
 
 pub struct PersonStore {
@@ -199,6 +207,10 @@ impl PersonStore {
             rand::thread_rng().fill_bytes(&mut salt);
             (hex::encode(salt), String::new())
         };
+        let (birth_ymd, birth_hour) = match &prev {
+            Some(p) => (p.birth_ymd.clone(), p.birth_hour),
+            None => (String::new(), None),
+        };
         let item = Person {
             id: id.to_string(),
             name: name.to_string(),
@@ -209,6 +221,8 @@ impl PersonStore {
             version: ver,
             node_id: self.node_id.clone(),
             gender,
+            birth_ymd,
+            birth_hour,
         };
         items.insert(id.to_string(), item.clone());
         drop(items);
@@ -341,6 +355,63 @@ impl PersonStore {
             version: p.version,
             node_id: p.node_id.clone(),
             gender: p.gender,
+            birth_ymd: p.birth_ymd.clone(),
+            birth_hour: p.birth_hour,
         }
+    }
+
+    /// 仅更新生辰字段，保留姓名/性别等。
+    pub fn set_birth(
+        &self,
+        id: &str,
+        birth_ymd: &str,
+        birth_hour: Option<u8>,
+        actor_person_id: &str,
+        actor_name: &str,
+    ) -> anyhow::Result<Person> {
+        let prev = self
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("人员不存在"))?;
+        let mut items = self.items.write();
+        let ver = self.tick(0);
+        let item = Person {
+            id: id.to_string(),
+            name: prev.name.clone(),
+            password_verifier: prev.password_verifier.clone(),
+            salt_hex: prev.salt_hex.clone(),
+            disabled: prev.disabled,
+            deleted: false,
+            version: ver,
+            node_id: self.node_id.clone(),
+            gender: prev.gender,
+            birth_ymd: birth_ymd.trim().to_string(),
+            birth_hour,
+        };
+        items.insert(id.to_string(), item.clone());
+        drop(items);
+        let aid = if actor_person_id.is_empty() {
+            None
+        } else {
+            Some(actor_person_id.to_string())
+        };
+        let aname = if actor_name.is_empty() {
+            None
+        } else {
+            Some(actor_name.to_string())
+        };
+        self.audit_write(
+            EventType::Modify,
+            id,
+            Some(&prev),
+            Some(&item),
+            "",
+            aid,
+            aname,
+        )?;
+        self.persist()?;
+        if let Some(bc) = self.broadcaster.read().clone() {
+            bc.broadcast_person(&item);
+        }
+        Ok(item)
     }
 }

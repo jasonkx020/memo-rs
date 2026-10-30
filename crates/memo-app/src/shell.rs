@@ -1565,6 +1565,10 @@ pub fn show(
         shell.gender.request_open_settings = false;
         *show_settings = true;
     }
+    if shell.cal.request_open_settings {
+        shell.cal.request_open_settings = false;
+        *show_settings = true;
+    }
 
     action
 }
