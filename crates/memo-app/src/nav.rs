@@ -33,7 +33,7 @@ impl NavItem {
         match self {
             Self::Calendar | Self::Trash => None,
             Self::Credentials => Some(MemoCategory::Credentials),
-            Self::GenderPrivate => Some(MemoCategory::GenderPrivate),
+            Self::GenderPrivate => None, // 私密是空间，不是分类
         }
     }
 

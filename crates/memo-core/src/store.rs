@@ -22,6 +22,46 @@ impl MemoVisibility {
     }
 }
 
+/// 记录所在空间：普通栏 vs 私密空间（与局域网共享正交）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoSpace {
+    #[default]
+    Normal,
+    Private,
+}
+
+impl MemoSpace {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "普通",
+            Self::Private => "私密空间",
+        }
+    }
+}
+
+/// 是否局域网明文同步（仅普通空间可选；私密空间强制 Off）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LanShare {
+    #[default]
+    Off,
+    On,
+}
+
+impl LanShare {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "不共享",
+            Self::On => "局域网共享",
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 /// 备忘生命周期：永久或到期时间（RFC3339）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -74,7 +114,7 @@ pub enum MemoCategory {
     Todo,
     Credentials,
     Work,
-    /// 旧「机关事务」分类（反序列化兼容，界面归入工作学习）。
+    /// 旧「机关事务」分类（反序列化兼容；写入时折为任务 +「工作」标签）。
     Office,
     Life,
     Finance,
@@ -89,33 +129,31 @@ pub enum MemoCategory {
 }
 
 impl MemoCategory {
-    pub const ALL: &'static [MemoCategory] = &[
-        Self::General,
-        Self::Todo,
-        Self::Credentials,
-        Self::Work,
-        Self::Life,
-        Self::Finance,
-        Self::GenderPrivate,
-        Self::Emergency,
-        Self::Inspiration,
-    ];
+    /// 界面可选分类（任务 / 备忘）；旧细类与 GenderPrivate 仅反序列化兼容。
+    pub const ALL: &'static [MemoCategory] = &[Self::Todo, Self::Credentials];
 
     pub fn label(self) -> &'static str {
-        match self {
-            Self::General => "全部",
-            Self::Todo => "待办提醒",
+        match self.bucket() {
             Self::Credentials => "备忘",
-            Self::Work | Self::Office => "工作学习",
-            Self::Life => "生活家庭",
-            Self::Finance => "财务订阅",
-            Self::GenderPrivate | Self::WomenPrivate | Self::MalePrivate => "性别私密",
-            Self::Emergency => "应急",
-            Self::Inspiration => "灵感",
+            _ => "任务",
         }
     }
 
-    /// 性别私密分类（强制 Private）；含旧版女/男私密变体。
+    /// 旧细分类对应的建议标签（界面两类之外的语义）。
+    pub fn legacy_tag(self) -> Option<&'static str> {
+        match self.canonical() {
+            Self::Work | Self::Office => Some("工作"),
+            Self::Life => Some("生活"),
+            Self::Finance => Some("财务"),
+            Self::Emergency => Some("应急"),
+            Self::Inspiration => Some("灵感"),
+            Self::General => Some("随手记"),
+            Self::Todo | Self::Credentials | Self::GenderPrivate | Self::WomenPrivate
+            | Self::MalePrivate => None,
+        }
+    }
+
+    /// 旧性别私密分类（写入时折入私密空间 + 任务/备忘）。
     pub fn is_gender_private(self) -> bool {
         matches!(
             self,
@@ -123,7 +161,7 @@ impl MemoCategory {
         )
     }
 
-    /// 已下线分类归并到仍展示的分类（机关事务 → 工作学习）。
+    /// 已下线分类归并（机关事务 → 工作；女/男私密 → 性别私密）。
     pub fn canonical(self) -> Self {
         match self {
             Self::Office => Self::Work,
@@ -131,6 +169,107 @@ impl MemoCategory {
             other => other,
         }
     }
+
+    /// 界面两类桶：任务 / 备忘（旧 GenderPrivate 按待办桶展示，路由看 space）。
+    pub fn bucket(self) -> Self {
+        match self.canonical() {
+            Self::Credentials => Self::Credentials,
+            _ => Self::Todo,
+        }
+    }
+
+    /// 写入前归入任务/备忘（无 due 上下文时 GenderPrivate → Todo）。
+    pub fn for_store(self) -> Self {
+        self.bucket()
+    }
+
+    /// 按到期日把旧 GenderPrivate 折成任务（有日期）或备忘（无日期）。
+    pub fn for_store_with_due(self, due: &str) -> Self {
+        if self.is_gender_private() {
+            if due.trim().is_empty() {
+                Self::Credentials
+            } else {
+                Self::Todo
+            }
+        } else {
+            self.bucket()
+        }
+    }
+
+    /// 旧细类语义写入标签（若尚无），并返回任务/备忘分类。
+    pub fn fold_into_tags(self, tags: &mut Vec<String>) -> Self {
+        if let Some(tag) = self.legacy_tag() {
+            if !tags.iter().any(|t| t == tag) {
+                tags.push(tag.to_string());
+            }
+        }
+        self.for_store()
+    }
+}
+
+/// 归一空间 / 共享 / 分类 / 兼容 visibility（写入与读迁移共用）。
+pub fn normalize_memo_fields(
+    category: MemoCategory,
+    space: MemoSpace,
+    lan_share: LanShare,
+    due: &str,
+    tags: &[String],
+) -> (MemoCategory, MemoSpace, LanShare, MemoVisibility, Vec<String>) {
+    let mut tags = tags.to_vec();
+    let mut space = space;
+    let mut lan = lan_share;
+
+    if category.is_gender_private() {
+        space = MemoSpace::Private;
+        lan = LanShare::Off;
+        if !tags.iter().any(|t| t == "私密") {
+            tags.push("私密".into());
+        }
+        let category = category.for_store_with_due(due);
+        return (category, space, lan, MemoVisibility::Private, tags);
+    }
+
+    let category = category.fold_into_tags(&mut tags);
+    if space == MemoSpace::Private {
+        lan = LanShare::Off;
+    }
+    let visibility = match lan {
+        LanShare::On => MemoVisibility::Public,
+        LanShare::Off => MemoVisibility::Private,
+    };
+    (category, space, lan, visibility, tags)
+}
+
+/// 旧数据：无 space/lan 字段或仍为 GenderPrivate 分类时，读路径补齐。
+pub fn migrate_legacy_item(item: &mut MemoItem) {
+    if item.category.is_gender_private() {
+        let (cat, space, lan, vis, tags) = normalize_memo_fields(
+            item.category,
+            MemoSpace::Private,
+            LanShare::Off,
+            &item.due_date,
+            &item.tags,
+        );
+        item.category = cat;
+        item.space = space;
+        item.lan_share = lan;
+        item.visibility = vis;
+        item.tags = tags;
+        return;
+    }
+    // 旧 Public → 普通空间 + 局域网共享
+    if item.visibility == MemoVisibility::Public {
+        item.space = MemoSpace::Normal;
+        item.lan_share = LanShare::On;
+    }
+    let mut tags = std::mem::take(&mut item.tags);
+    item.category = item.category.fold_into_tags(&mut tags);
+    item.tags = tags;
+    // 与 lan 对齐 visibility
+    item.visibility = match item.lan_share {
+        LanShare::On => MemoVisibility::Public,
+        LanShare::Off => MemoVisibility::Private,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -170,6 +309,12 @@ pub struct MemoItem {
     pub modified_by_name: String,
     #[serde(default)]
     pub visibility: MemoVisibility,
+    /// 普通栏 / 私密空间（与 visibility/局域网共享拆分）。
+    #[serde(default)]
+    pub space: MemoSpace,
+    /// 是否局域网明文同步；私密空间强制 Off。
+    #[serde(default)]
+    pub lan_share: LanShare,
     /// 所属身份公钥指纹
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub owner_fp: String,
@@ -293,7 +438,8 @@ impl MemoStore {
         content: &str,
         actor_person_id: &str,
         actor_name: &str,
-        visibility: MemoVisibility,
+        space: MemoSpace,
+        lan_share: LanShare,
         owner_fp: &str,
         lifecycle: MemoLifecycle,
         category: MemoCategory,
@@ -334,6 +480,8 @@ impl MemoStore {
             };
             (remind_before_days.min(365), seen)
         };
+        let (category, space, lan_share, visibility, tags) =
+            normalize_memo_fields(category, space, lan_share, &due, tags);
         let item = MemoItem {
             id: id.to_string(),
             title: title.to_string(),
@@ -344,6 +492,8 @@ impl MemoStore {
             modified_by_person_id: actor_person_id.to_string(),
             modified_by_name: actor_name.to_string(),
             visibility,
+            space,
+            lan_share,
             owner_fp: owner_fp.to_string(),
             modified_at: chrono::Local::now().to_rfc3339(),
             lifecycle,
@@ -354,7 +504,7 @@ impl MemoStore {
             remind_before_days,
             remind_seen_for,
             done,
-            tags: tags.to_vec(),
+            tags,
             priority,
         };
         items.insert(id.to_string(), item.clone());

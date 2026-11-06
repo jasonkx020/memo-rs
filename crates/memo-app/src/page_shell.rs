@@ -295,6 +295,24 @@ pub fn drawer_anim_reset(ctx: &egui::Context, id_salt: impl Hash) {
     ctx.data_mut(|d| d.insert_temp(mounted_id, false));
 }
 
+/// 锁定重进等场景：侧栏直接全开（本帧 `t=1`），避免再从 0 滑入弄脏嵌套布局。
+pub fn drawer_anim_open_immediate(ctx: &egui::Context, id_salt: impl Hash) {
+    let tween_id = Id::new(("drawer_tween", &id_salt));
+    let mounted_id = Id::new(("drawer_mounted", &id_salt));
+    let now = ctx.input(|i| i.time);
+    ctx.data_mut(|d| {
+        d.insert_temp(mounted_id, true);
+        d.insert_temp(
+            tween_id,
+            DrawerTween {
+                want_open: true,
+                from: 1.0,
+                start: now,
+            },
+        );
+    });
+}
+
 /// 开始本帧抽屉动画：挂载时从 0 滑入。
 pub fn drawer_anim_begin(ctx: &egui::Context, id_salt: impl Hash) -> DrawerAnim {
     let tween_id = Id::new(("drawer_tween", &id_salt));

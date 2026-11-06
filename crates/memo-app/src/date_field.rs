@@ -81,15 +81,16 @@ fn parse_month_input(s: &str) -> Option<u32> {
 const NAV_H: f32 = 28.0;
 const NAV_BTN_W: f32 = 28.0;
 const NAV_FONT: f32 = 13.0;
-/// 中文/数字与框线的光学中线微调（向下为正），顶栏共用同一值。
-const NAV_OPTICAL_Y: f32 = 0.5;
+const CELL: f32 = 30.0;
+const CELL_GAP: f32 = 2.0;
 
 fn nav_font() -> egui::FontId {
     egui::FontId::proportional(NAV_FONT)
 }
 
-fn nav_mid_y(rect: egui::Rect) -> f32 {
-    rect.center().y + NAV_OPTICAL_Y
+/// 所有顶栏文字锚在控件矩形几何中心（同一水平线）。
+fn mid(rect: egui::Rect) -> egui::Pos2 {
+    rect.center()
 }
 
 fn paint_nav_chip(ui: &mut egui::Ui, rect: egui::Rect, hovered: bool) {
@@ -107,10 +108,9 @@ fn paint_nav_chip(ui: &mut egui::Ui, rect: egui::Rect, hovered: bool) {
         .rect(rect, Rounding::same(7.0), fill, stroke);
 }
 
-/// 顶栏导航钮：固定方块；文字与年月共用中线锚点。
+/// 顶栏导航钮：固定方块；文字锚矩形中心。
 fn nav_btn(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let size = Vec2::new(NAV_BTN_W, NAV_H);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(NAV_BTN_W, NAV_H), Sense::click());
     let hovered = resp.hovered();
     paint_nav_chip(ui, rect, hovered);
     let fg = if hovered {
@@ -119,7 +119,7 @@ fn nav_btn(ui: &mut egui::Ui, label: &str) -> egui::Response {
         theme::text()
     };
     ui.painter().text(
-        egui::pos2(rect.center().x, nav_mid_y(rect)),
+        mid(rect),
         egui::Align2::CENTER_CENTER,
         label,
         nav_font(),
@@ -138,12 +138,11 @@ fn today_chip(ui: &mut egui::Ui) -> egui::Response {
             .size()
             .x
     }) + 20.0;
-    let size = Vec2::new(w.max(44.0), NAV_H);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w.max(44.0), NAV_H), Sense::click());
     let hovered = resp.hovered();
     paint_nav_chip(ui, rect, hovered);
     ui.painter().text(
-        egui::pos2(rect.center().x, nav_mid_y(rect)),
+        mid(rect),
         egui::Align2::CENTER_CENTER,
         label,
         nav_font(),
@@ -155,37 +154,68 @@ fn today_chip(ui: &mut egui::Ui) -> egui::Response {
     resp
 }
 
-fn ym_label(ui: &mut egui::Ui, text: &str, editable: bool) -> egui::Response {
-    let text_w = ui.fonts(|f| {
-        f.layout_no_wrap(text.to_string(), nav_font(), theme::text())
-            .size()
-            .x
-    });
-    let sense = if editable {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(text_w.max(8.0), NAV_H), sense);
+/// 整段「YYYY 年 MM 月」同一中线绘制；返回年/月命中区供双击。
+fn ym_title(
+    ui: &mut egui::Ui,
+    year: i32,
+    month: u32,
+) -> (egui::Response, egui::Response) {
+    let y_s = format!("{year:04}");
+    let m_s = format!("{month:02}");
+    let parts = [y_s.as_str(), " 年 ", m_s.as_str(), " 月"];
+    let widths: Vec<f32> = parts
+        .iter()
+        .map(|p| {
+            ui.fonts(|f| {
+                f.layout_no_wrap((*p).to_string(), nav_font(), theme::text())
+                    .size()
+                    .x
+            })
+        })
+        .collect();
+    let total_w: f32 = widths.iter().sum();
+    let (row, _) = ui.allocate_exact_size(Vec2::new(total_w.max(1.0), NAV_H), Sense::hover());
+    let cy = mid(row).y;
+    let mut x = row.min.x;
+    // 年数字区
+    let y_rect = egui::Rect::from_min_size(
+        egui::pos2(x, row.min.y),
+        Vec2::new(widths[0], NAV_H),
+    );
+    x += widths[0];
+    let y_unit_w = widths[1];
+    x += y_unit_w;
+    // 月数字区
+    let m_rect = egui::Rect::from_min_size(
+        egui::pos2(x, row.min.y),
+        Vec2::new(widths[2], NAV_H),
+    );
+
+    // 整段一次画，保证「年」「月」与数字共线
+    let full = format!("{y_s} 年 {m_s} 月");
     ui.painter().text(
-        egui::pos2(rect.min.x, nav_mid_y(rect)),
+        egui::pos2(row.min.x, cy),
         egui::Align2::LEFT_CENTER,
-        text,
+        full,
         nav_font(),
         theme::text(),
     );
-    if editable && resp.hovered() {
+
+    let y_resp = ui.interact(y_rect, ui.id().with("ym_year_hit"), Sense::click());
+    let m_resp = ui.interact(m_rect, ui.id().with("ym_month_hit"), Sense::click());
+    if y_resp.hovered() || m_resp.hovered() {
+        let hit = if y_resp.hovered() { y_rect } else { m_rect };
         ui.painter().rect_stroke(
-            egui::Rect::from_min_max(
-                egui::pos2(rect.min.x - 2.0, rect.center().y - 9.0),
-                egui::pos2(rect.max.x + 2.0, rect.center().y + 9.0),
-            ),
+            hit.expand2(Vec2::new(2.0, -5.0)),
             Rounding::same(4.0),
             Stroke::new(1.0, theme::border()),
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    resp
+    (
+        y_resp.on_hover_text("双击输入年份"),
+        m_resp.on_hover_text("双击输入月份"),
+    )
 }
 
 /// 日期字段：按钮打开日历弹层；`allow_clear` 为真时可清空。返回是否变更。
@@ -348,20 +378,33 @@ pub fn show_picker_body(
                 edit = YmEdit::None;
             }
 
-            ui.add_space(2.0);
+            ui.add_space(4.0);
             match &mut edit {
                 YmEdit::Year { draft, focus } => {
-                    let te = ui.add(
+                    let te = ui.add_sized(
+                        Vec2::new(48.0, NAV_H - 4.0),
                         egui::TextEdit::singleline(draft)
-                            .desired_width(48.0)
-                            .margin(Vec2::new(4.0, 4.0))
-                            .font(egui::FontId::proportional(13.5))
+                            .font(nav_font())
+                            .horizontal_align(egui::Align::Center)
                             .id(egui::Id::new(("date_ym_year", id_salt))),
                     );
-                    let _ = ym_label(ui, "年", false);
-                    ui.add_space(2.0);
-                    let _ = ym_label(ui, &format!("{:02}", view.1), false);
-                    let _ = ym_label(ui, "月", false);
+                    let rest = format!(" 年 {:02} 月", view.1);
+                    let (r, _) =
+                        ui.allocate_exact_size(Vec2::new(
+                            ui.fonts(|f| {
+                                f.layout_no_wrap(rest.clone(), nav_font(), theme::text())
+                                    .size()
+                                    .x
+                            }),
+                            NAV_H,
+                        ), Sense::hover());
+                    ui.painter().text(
+                        egui::pos2(r.min.x, mid(r).y),
+                        egui::Align2::LEFT_CENTER,
+                        rest,
+                        nav_font(),
+                        theme::text(),
+                    );
                     if *focus {
                         te.request_focus();
                         *focus = false;
@@ -379,17 +422,48 @@ pub fn show_picker_body(
                     }
                 }
                 YmEdit::Month { draft, focus } => {
-                    let _ = ym_label(ui, &format!("{:04}", view.0), false);
-                    let _ = ym_label(ui, "年", false);
-                    ui.add_space(2.0);
-                    let te = ui.add(
+                    let head = format!("{:04} 年 ", view.0);
+                    let (r, _) =
+                        ui.allocate_exact_size(Vec2::new(
+                            ui.fonts(|f| {
+                                f.layout_no_wrap(head.clone(), nav_font(), theme::text())
+                                    .size()
+                                    .x
+                            }),
+                            NAV_H,
+                        ), Sense::hover());
+                    ui.painter().text(
+                        egui::pos2(r.min.x, mid(r).y),
+                        egui::Align2::LEFT_CENTER,
+                        head,
+                        nav_font(),
+                        theme::text(),
+                    );
+                    let te = ui.add_sized(
+                        Vec2::new(32.0, NAV_H - 4.0),
                         egui::TextEdit::singleline(draft)
-                            .desired_width(28.0)
-                            .margin(Vec2::new(4.0, 4.0))
-                            .font(egui::FontId::proportional(13.5))
+                            .font(nav_font())
+                            .horizontal_align(egui::Align::Center)
                             .id(egui::Id::new(("date_ym_month", id_salt))),
                     );
-                    let _ = ym_label(ui, "月", false);
+                    let (r2, _) = ui.allocate_exact_size(
+                        Vec2::new(
+                            ui.fonts(|f| {
+                                f.layout_no_wrap(" 月".into(), nav_font(), theme::text())
+                                    .size()
+                                    .x
+                            }),
+                            NAV_H,
+                        ),
+                        Sense::hover(),
+                    );
+                    ui.painter().text(
+                        egui::pos2(r2.min.x, mid(r2).y),
+                        egui::Align2::LEFT_CENTER,
+                        " 月",
+                        nav_font(),
+                        theme::text(),
+                    );
                     if *focus {
                         te.request_focus();
                         *focus = false;
@@ -407,28 +481,22 @@ pub fn show_picker_body(
                     }
                 }
                 YmEdit::None => {
-                    let y_resp = ym_label(ui, &format!("{:04}", view.0), true);
+                    let (y_resp, m_resp) = ym_title(ui, view.0, view.1);
                     if y_resp.double_clicked() {
                         edit = YmEdit::Year {
                             draft: format!("{:04}", view.0),
                             focus: true,
                         };
                     }
-                    y_resp.on_hover_text("双击输入年份");
-                    let _ = ym_label(ui, "年", false);
-                    ui.add_space(2.0);
-                    let m_resp = ym_label(ui, &format!("{:02}", view.1), true);
                     if m_resp.double_clicked() {
                         edit = YmEdit::Month {
                             draft: format!("{:02}", view.1),
                             focus: true,
                         };
                     }
-                    m_resp.on_hover_text("双击输入月份");
-                    let _ = ym_label(ui, "月", false);
                 }
             }
-            ui.add_space(2.0);
+            ui.add_space(4.0);
 
             if nav_btn(ui, "›").clicked() {
                 if view.1 >= 12 {
@@ -467,14 +535,17 @@ pub fn show_picker_body(
 
     Frame::none()
         .fill(theme::panel())
-        .rounding(Rounding::same(8.0))
-        .inner_margin(Margin::same(6.0))
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::same(8.0))
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(CELL_GAP);
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = CELL_GAP;
                 for w in ["一", "二", "三", "四", "五", "六", "日"] {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(CELL), Sense::hover());
                     ui.painter().text(
-                        r.center(),
+                        mid(r),
                         egui::Align2::CENTER_CENTER,
                         w,
                         egui::FontId::proportional(11.0),
@@ -482,7 +553,7 @@ pub fn show_picker_body(
                     );
                 }
             });
-            ui.add_space(2.0);
+            ui.add_space(4.0);
 
             let Some(first) = NaiveDate::from_ymd_opt(view.0, view.1, 1) else {
                 return;
@@ -506,10 +577,11 @@ pub fn show_picker_body(
                     break;
                 }
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = CELL_GAP;
                     for col in 0..7 {
                         let cell = row * 7 + col;
                         if cell < offset || day_i >= days {
-                            ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                            ui.allocate_exact_size(Vec2::splat(CELL), Sense::hover());
                             continue;
                         }
                         day_i += 1;
@@ -520,7 +592,7 @@ pub fn show_picker_body(
                         let is_today = date == today_d;
                         let is_sel = sel == Some(date);
                         let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+                            ui.allocate_exact_size(Vec2::splat(CELL), Sense::click());
                         let fill = if is_sel {
                             theme::shell_accent()
                         } else if resp.hovered() {
@@ -530,8 +602,17 @@ pub fn show_picker_body(
                         } else {
                             Color32::TRANSPARENT
                         };
-                        ui.painter()
-                            .rect_filled(rect, Rounding::same(6.0), fill);
+                        if fill != Color32::TRANSPARENT {
+                            ui.painter()
+                                .rect_filled(rect, Rounding::same(7.0), fill);
+                        }
+                        if is_today && !is_sel {
+                            ui.painter().rect_stroke(
+                                rect,
+                                Rounding::same(7.0),
+                                Stroke::new(1.0, theme::shell_accent()),
+                            );
+                        }
                         let fg = if is_sel {
                             Color32::WHITE
                         } else if is_today {
@@ -540,10 +621,10 @@ pub fn show_picker_body(
                             theme::text()
                         };
                         ui.painter().text(
-                            rect.center(),
+                            mid(rect),
                             egui::Align2::CENTER_CENTER,
                             day.to_string(),
-                            egui::FontId::proportional(13.0),
+                            nav_font(),
                             fg,
                         );
                         if resp.hovered() {

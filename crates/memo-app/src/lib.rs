@@ -24,7 +24,9 @@ mod save_dialog;
 mod shell;
 mod single_instance;
 mod sticky_note;
+mod commercial;
 mod theme;
+mod tip_code;
 mod update_check;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText};
@@ -159,6 +161,8 @@ enum Screen {
         /// 新建备忘弹窗
         show_new_memo: bool,
         purge_confirm_id: Option<String>,
+        /// 清空回收站二次确认
+        empty_trash_confirm: bool,
         show_export: bool,
         export_pw: String,
         export_path: String,
@@ -189,6 +193,10 @@ pub struct MemoApp {
     last_peer_refresh: Instant,
     show_help: bool,
     show_about: bool,
+    /// 「打赏作者」二维码弹窗
+    show_tip: bool,
+    /// 隐私与使用说明弹窗
+    show_privacy: bool,
     pending_switch_person: bool,
     /// 私密页锁定：已切任务页，下一帧再真正锁定
     pending_lock_after_task: bool,
@@ -234,6 +242,7 @@ pub struct MemoApp {
 }
 
 const HELP_DOC: &str = include_str!("HELP.md");
+const PRIVACY_DOC: &str = include_str!("PRIVACY.md");
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 impl MemoApp {
@@ -250,6 +259,8 @@ impl MemoApp {
             last_peer_refresh: Instant::now() - Duration::from_secs(10),
             show_help: false,
             show_about: false,
+            show_tip: false,
+            show_privacy: false,
             pending_switch_person: false,
             pending_lock_after_task: false,
             shell: ShellUi::default(),
@@ -440,8 +451,9 @@ impl MemoApp {
                         Ok((t, b)) => {
                             let due = self.edit_form.due_date.clone();
                             let end = self.edit_form.end_date.clone();
-                            let vis = self.edit_form.visibility;
-                            let cat = self.edit_form.category.canonical();
+                            let space = self.edit_form.space;
+                            let lan = self.edit_form.lan_share;
+                            let cat = self.edit_form.category.for_store();
                             let done = self.edit_form.done;
                             let prio = self.edit_form.priority;
                             let remind = self.edit_form.remind_before_days;
@@ -463,7 +475,8 @@ impl MemoApp {
                                 id,
                                 &t,
                                 &b,
-                                vis,
+                                space,
+                                lan,
                                 MemoLifecycle::Permanent,
                                 cat,
                                 &due,
@@ -496,7 +509,11 @@ impl MemoApp {
                                         *priority_draft = prio;
                                         *tags_draft = tags_str;
                                         *done_draft = done;
-                                        *visibility_draft = vis;
+                                        *visibility_draft = if lan.is_on() {
+                                            MemoVisibility::Public
+                                        } else {
+                                            MemoVisibility::Private
+                                        };
                                     }
                                     self.memo_doc = doc;
                                 }
@@ -649,15 +666,88 @@ impl MemoApp {
         *done_draft = session.done_draft;
         *priority_draft = session.priority_draft;
 
+        // 预览态：与鼠标点开同一套 load 路径（正文 + 草稿 + 表单），避免空壳/样式漂移
+        if !*editing && !*show_new_memo {
+            if let Some(id) = selected.clone() {
+                if let Ok(m) = rt.svc.get_view(&id) {
+                    *title_draft = m.title.clone();
+                    *body_draft = m.content.clone();
+                    *visibility_draft = m.visibility;
+                    *category_draft = m.category.canonical();
+                    *due_date_draft = m.due_date.clone();
+                    *end_date_draft = m.end_date.clone();
+                    *tags_draft = m
+                        .tags
+                        .iter()
+                        .map(|t| {
+                            if t.starts_with('#') {
+                                t.clone()
+                            } else {
+                                format!("#{t}")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    *done_draft = m.done;
+                    *priority_draft = m.priority;
+                    self.memo_doc = doc_editor::Doc::from_store(&m.title, &m.content);
+                    self.edit_form = MemoFormState::load_from_drafts(
+                        m.category.canonical(),
+                        &m.title,
+                        &m.content,
+                        &m.due_date,
+                        &m.end_date,
+                        m.priority,
+                        tags_draft,
+                        m.done,
+                        m.visibility,
+                        m.space,
+                        m.lan_share,
+                        m.remind_before_days,
+                        &m.id,
+                    );
+                    self.edit_form.data_dir =
+                        Some(std::path::PathBuf::from(&rt.cfg.data_dir));
+                    self.edit_form.scope = match self.shell.nav {
+                        nav::NavItem::Credentials => memo_form::FormScope::Credentials,
+                        nav::NavItem::GenderPrivate => memo_form::FormScope::GenderPrivate,
+                        nav::NavItem::Calendar => memo_form::FormScope::Calendar,
+                        nav::NavItem::Trash => memo_form::FormScope::Open,
+                    };
+                } else if !body_draft.is_empty() {
+                    self.memo_doc = doc_editor::Doc::from_store(title_draft, body_draft);
+                }
+            }
+        }
+
+        // 对齐点击打开时的页面上下文（日议程 / 私密分支）
+        if selected.is_some() && !*show_new_memo {
+            if self.shell.nav.is_calendar() {
+                calendar_view::focus_cal_on_due(&mut self.shell.cal, due_date_draft);
+            }
+            if self.shell.nav.is_gender_private() {
+                self.shell.private_branch = if category_draft.bucket()
+                    == MemoCategory::Credentials
+                {
+                    shell::PrivateBranch::Credentials
+                } else {
+                    shell::PrivateBranch::Todo
+                };
+            }
+            self.shell.pending_side_drawer_anim = true;
+        } else if *show_new_memo {
+            self.shell.pending_side_drawer_anim = true;
+        }
+
         // 恢复后仍保留磁盘会话，直到用户保存/取消
         self.editor_resume = Some(session);
     }
 
     fn refresh_stickies_from_list(&mut self, rt: &AppRuntime) {
-        let list = rt.svc.list();
         for (id, h) in &self.stickies {
-            if let Some(m) = list.iter().find(|m| m.id == *id) {
-                h.lock().apply_memo_if_clean(m);
+            // 勿用 list() 空正文覆盖便签
+            if let Ok(m) = rt.svc.get_view(id) {
+                h.lock().apply_memo_if_clean(&m);
             }
         }
     }
@@ -675,7 +765,7 @@ impl MemoApp {
             title_draft: String::new(),
             body_draft: String::new(),
             visibility_draft: MemoVisibility::Private,
-            category_draft: MemoCategory::General,
+            category_draft: MemoCategory::Todo,
             due_date_draft: String::new(),
             end_date_draft: String::new(),
             tags_draft: String::new(),
@@ -688,6 +778,7 @@ impl MemoApp {
             show_change_pw: false,
             show_new_memo: false,
             purge_confirm_id: None,
+            empty_trash_confirm: false,
             show_export: false,
             export_pw: String::new(),
             export_path: String::new(),
@@ -737,11 +828,17 @@ impl MemoApp {
             let mut open = self.show_about;
             let mut want_check = false;
             let mut want_download = false;
+            let mut want_tip = false;
+            let mut want_privacy = false;
+            let mut want_buy = false;
+            let mut import_msg: Option<String> = None;
             let busy = self.update_check_busy;
             let newer = self.update_newer;
             let msg = self.update_check_msg.clone();
             let latest = self.update_latest.clone();
-            theme::modal_fixed(ctx, "关于", [480.0, 480.0])
+            let edition = commercial::edition_label();
+            let licensed = commercial::is_licensed();
+            theme::modal_fixed(ctx, "关于", [500.0, 560.0])
                 .id(modal.window_id)
                 .open(&mut open)
                 .show(ctx, |ui| {
@@ -753,9 +850,21 @@ impl MemoApp {
                             RichText::new(format!("版本 {APP_VERSION}"))
                                 .color(theme::text_muted()),
                         );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(&edition)
+                                .size(13.0)
+                                .color(if licensed {
+                                    theme::shell_accent()
+                                } else {
+                                    theme::text_muted()
+                                }),
+                        );
                     });
                     ui.add_space(10.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         ui.add_enabled_ui(!busy, |ui| {
                             if theme::page_outline_button(ui, "检查更新").clicked() {
                                 want_check = true;
@@ -766,7 +875,42 @@ impl MemoApp {
                                 want_download = true;
                             }
                         }
+                        if theme::page_outline_button(ui, "导入授权").clicked() {
+                            match commercial::import_license_via_dialog() {
+                                Ok(label) => {
+                                    import_msg = Some(format!(
+                                        "授权已生效：{label}。若已登录，请锁定后重新进入以完整启用发现。"
+                                    ));
+                                }
+                                Err(e) => {
+                                    let s = e.to_string();
+                                    if s != "已取消" {
+                                        import_msg = Some(format!("导入失败：{s}"));
+                                    }
+                                }
+                            }
+                        }
+                        if theme::page_outline_button(ui, "购买授权").clicked() {
+                            want_buy = true;
+                        }
+                        if theme::page_outline_button(ui, "支持反馈").clicked() {
+                            commercial::open_support_page();
+                        }
+                        if theme::page_outline_button(ui, "打赏作者").clicked() {
+                            want_tip = true;
+                        }
+                        if theme::page_outline_button(ui, "隐私说明").clicked() {
+                            want_privacy = true;
+                        }
                     });
+                    if let Some(m) = import_msg.as_ref() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(m)
+                                .size(12.5)
+                                .color(theme::shell_accent()),
+                        );
+                    }
                     if !msg.is_empty() {
                         ui.add_space(6.0);
                         let fg = if newer {
@@ -791,10 +935,18 @@ impl MemoApp {
                                 .small(),
                         );
                     }
+                    ui.add_space(10.0);
+                    ui.label(
+                        theme::muted_label(
+                            "当前版本全部功能免费可用。购买/导入授权为可选（后续版本或将启用限制）。",
+                        )
+                        .small(),
+                    );
                     ui.add_space(12.0);
                     about_kv(ui, "产品", theme::APP_NAME);
                     about_kv(ui, "说明", theme::APP_DESCRIPTION);
                     about_kv(ui, "版权", theme::APP_COPYRIGHT);
+                    about_kv(ui, "授权", &edition);
                     ui.add_space(8.0);
                     ui.label(RichText::new("主要能力").strong().color(theme::text()));
                     ui.add_space(4.0);
@@ -809,7 +961,7 @@ impl MemoApp {
                         )
                         .small(),
                     );
-                    if let Ok(p) = config::settings_path() {
+                    if let Ok(p) = commercial::config_dir() {
                         ui.add_space(8.0);
                         ui.label(
                             RichText::new(format!("配置目录: {}", p.display()))
@@ -822,6 +974,15 @@ impl MemoApp {
             if modal.end(ctx, self.show_about) {
                 self.show_about = false;
             }
+            if want_tip {
+                self.show_tip = true;
+            }
+            if want_privacy {
+                self.show_privacy = true;
+            }
+            if want_buy {
+                commercial::open_buy_page();
+            }
             if want_check {
                 self.spawn_update_check(false);
             }
@@ -831,6 +992,70 @@ impl MemoApp {
                     .as_deref()
                     .unwrap_or(update_check::DOWNLOAD_PAGE_URL);
                 update_check::open_download_page(url);
+            }
+        }
+        if self.show_privacy {
+            let modal = theme::begin_modal(ctx, "privacy_modal");
+            let mut open = self.show_privacy;
+            theme::modal_fixed(ctx, "隐私说明", [560.0, 480.0])
+                .id(modal.window_id)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    ui.label(theme::muted_label("以下内容已嵌入本程序，可离线阅读。").small());
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height((ui.available_height() - 8.0).max(120.0))
+                        .show(ui, |ui| {
+                            help_view::show(ui, PRIVACY_DOC);
+                        });
+                });
+            self.show_privacy = open;
+            if modal.end(ctx, self.show_privacy) {
+                self.show_privacy = false;
+            }
+        }
+        if self.show_tip {
+            let modal = theme::begin_modal(ctx, "tip_modal");
+            let mut open = self.show_tip;
+            theme::modal_fixed(ctx, "打赏作者", [340.0, 420.0])
+                .id(modal.window_id)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("如果本工具帮到了你")
+                                .size(14.0)
+                                .color(theme::text()),
+                        );
+                        ui.label(
+                            RichText::new("欢迎扫码请作者喝杯咖啡")
+                                .size(13.0)
+                                .color(theme::text_muted()),
+                        );
+                        ui.add_space(14.0);
+                        // 白底留白，便于手机识别二维码
+                        Frame::none()
+                            .fill(Color32::WHITE)
+                            .stroke(egui::Stroke::new(1.0, theme::border()))
+                            .rounding(egui::Rounding::same(10.0))
+                            .inner_margin(Margin::same(14.0))
+                            .show(ui, |ui| {
+                                tip_code::show(ui, 200.0);
+                            });
+                        ui.add_space(12.0);
+                        ui.label(
+                            theme::muted_label("纯属自愿，感谢支持。").small(),
+                        );
+                    });
+                });
+            self.show_tip = open;
+            if modal.end(ctx, self.show_tip) {
+                self.show_tip = false;
             }
         }
     }
@@ -965,6 +1190,8 @@ impl MemoApp {
                             tags_draft,
                             false,
                             MemoVisibility::Private,
+                            memo_core::store::MemoSpace::Normal,
+                            memo_core::store::LanShare::Off,
                             0,
                             &id,
                         );
@@ -1051,7 +1278,7 @@ impl MemoApp {
                         }
                         if !*editing {
                             if let Some(id) = selected.clone() {
-                                if let Some(m) = rt.svc.list().into_iter().find(|m| m.id == id) {
+                                if let Ok(m) = rt.svc.get_view(&id) {
                                     *title_draft = m.title;
                                     *body_draft = m.content;
                                     *visibility_draft = m.visibility;
@@ -1244,7 +1471,7 @@ impl eframe::App for MemoApp {
             }
             if let Some(after) = auto_lock_after(&self.cfg) {
                 if self.last_input_at.elapsed() >= after {
-                    if shell::leave_private_for_lock(&mut self.shell, selected, editing) {
+                    if shell::leave_private_for_lock(&self.shell, selected, editing) {
                         self.pending_lock_after_task = true;
                         ctx.request_repaint();
                     } else {
@@ -1265,6 +1492,7 @@ impl eframe::App for MemoApp {
                 }
                 match identity_gate::show(ctx, &mut self.cfg, st) {
                     GateAction::ShowHelp => show_help = true,
+                    GateAction::ShowTip => self.show_tip = true,
                     GateAction::Unlock {
                         cfg,
                         identity,
@@ -1344,6 +1572,7 @@ impl eframe::App for MemoApp {
                 show_change_pw,
                 show_new_memo,
                 purge_confirm_id,
+                empty_trash_confirm,
                 show_export,
                 export_pw,
                 export_path,
@@ -1507,8 +1736,9 @@ impl eframe::App for MemoApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    let foot = "数据本地加密 · 当前版本功能全开";
                                     ui.label(
-                                        RichText::new("数据本地加密 · 仅同步已授权节点")
+                                        RichText::new(foot)
                                             .small()
                                             .color(theme::text_muted()),
                                     );
@@ -1554,6 +1784,7 @@ impl eframe::App for MemoApp {
                     history_sel_b,
                     show_delete,
                     purge_confirm_id,
+                    empty_trash_confirm,
                     &mut show_help,
                     &mut show_about,
                     &rt.cfg.data_dir,
@@ -1593,19 +1824,19 @@ impl eframe::App for MemoApp {
                         self.shell.nav,
                         Some(ymd.as_str()),
                         &rt.cfg.data_dir,
+                        self.shell.private_branch,
                     );
                     // 清脏 tween（含重复点新建），本帧后续 begin 从 0 滑入
                     page_shell::drawer_anim_reset(ctx, shell::NEW_MEMO_DRAWER_SALT);
                     *status_line = "在右侧抽屉填写新建，保存后写入本机".into();
                 }
                 if let Some(id) = shell_action.open_sticky {
-                    let list = rt.svc.list();
                     if let Some(existing) = self.stickies.get(&id) {
                         existing.lock().request_focus = true;
                         *status_line = "已聚焦桌面便签".into();
-                    } else if let Some(m) = list.iter().find(|m| m.id == id) {
+                    } else if let Ok(m) = rt.svc.get_view(&id) {
                         self.stickies
-                            .insert(id, sticky_note::StickyNote::from_memo(m));
+                            .insert(id, sticky_note::StickyNote::from_memo(&m));
                         self.sticky_session_dirty = true;
                         *status_line = "已生成桌面便签".into();
                     }
@@ -1617,20 +1848,57 @@ impl eframe::App for MemoApp {
                 if shell_action.switch {
                     self.pending_switch_person = true;
                 }
+                // Esc：立即锁定（Windows / macOS 均为 Key::Escape）；阻塞 modal 打开时不抢键
+                let modal_blocks_esc = *show_delete
+                    || *show_export
+                    || *show_change_pw
+                    || *show_settings
+                    || *show_backup
+                    || *show_history
+                    || *empty_trash_confirm
+                    || purge_confirm_id.is_some()
+                    || self.show_help
+                    || self.show_about
+                    || self.show_tip
+                    || self.show_privacy;
+                if !modal_blocks_esc
+                    && !self.pending_switch_person
+                    && !self.pending_lock_after_task
+                    && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    let mut lock_action = ShellAction::default();
+                    shell::request_lock(
+                        &mut self.shell,
+                        selected,
+                        editing,
+                        &mut lock_action,
+                    );
+                    if lock_action.defer_lock_after_task {
+                        self.pending_lock_after_task = true;
+                        ctx.request_repaint();
+                    }
+                    if lock_action.switch {
+                        self.pending_switch_person = true;
+                    }
+                }
                 if shell_action.sync {
-                    *peers = rt.engine.connected_peers();
-                    *discovered = rt.engine.discovered_peers();
-                    match rt.svc.republish_private_backups() {
-                        Ok(n) => {
-                            self.pending_sync_hint = 0;
-                            *status_line = if n > 0 {
-                                format!("已同步：重新推送 {n} 条私人备份")
-                            } else {
-                                "已同步：节点列表已刷新".into()
-                            };
-                        }
-                        Err(e) => {
-                            *status_line = format!("同步失败: {e}");
+                    if !commercial::commercial_features_ok() {
+                        *status_line = commercial::SYNC_BLOCKED_MSG.into();
+                    } else {
+                        *peers = rt.engine.connected_peers();
+                        *discovered = rt.engine.discovered_peers();
+                        match rt.svc.republish_private_backups() {
+                            Ok(n) => {
+                                self.pending_sync_hint = 0;
+                                *status_line = if n > 0 {
+                                    format!("已同步：重新推送 {n} 条私人备份")
+                                } else {
+                                    "已同步：节点列表已刷新".into()
+                                };
+                            }
+                            Err(e) => {
+                                *status_line = format!("同步失败: {e}");
+                            }
                         }
                     }
                 }
@@ -1756,6 +2024,7 @@ impl eframe::App for MemoApp {
                                 }
                                 MemoDrawerAction::Dismiss => {
                                     shell::cancel_memo_edit(
+                                        &rt.svc,
                                         selected,
                                         &all,
                                         title_draft,
@@ -1912,6 +2181,57 @@ impl eframe::App for MemoApp {
                         });
                     if modal.end(ctx, true) {
                         *purge_confirm_id = None;
+                    }
+                }
+
+                if *empty_trash_confirm {
+                    let n = rt.svc.list_trash().len();
+                    let modal = theme::begin_modal(ctx, "empty_trash_confirm_modal");
+                    theme::modal_confirm(ctx, "清空回收站")
+                        .id(modal.window_id)
+                        .show(ctx, |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "清空回收站全部 {n} 条？此操作不可恢复，并将从主机删除备份。"
+                                ))
+                                .strong()
+                                .color(theme::danger()),
+                            );
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add({
+                                        egui::Button::new(
+                                            RichText::new("确认清空")
+                                                .color(Color32::WHITE)
+                                                .strong(),
+                                        )
+                                        .fill(theme::danger())
+                                    })
+                                    .clicked()
+                                {
+                                    let svc = rt.svc.clone();
+                                    let tx = self.tx.clone();
+                                    *empty_trash_confirm = false;
+                                    std::thread::spawn(move || match svc.empty_trash() {
+                                        Ok(cleared) => {
+                                            let _ = tx.send(BgMsg::Info(format!(
+                                                "已清空回收站 {cleared} 条"
+                                            )));
+                                            let _ = tx.send(BgMsg::Refresh);
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(BgMsg::Error(e.to_string()));
+                                        }
+                                    });
+                                }
+                                if ui.button("取消").clicked() {
+                                    *empty_trash_confirm = false;
+                                }
+                            });
+                        });
+                    if modal.end(ctx, true) {
+                        *empty_trash_confirm = false;
                     }
                 }
 
@@ -2452,6 +2772,74 @@ impl eframe::App for MemoApp {
                                                 status_line,
                                             );
 
+                                            settings_item_gap(ui);
+                                            // —— 授权 ——
+                                            settings_section(ui, "授权");
+                                            {
+                                                let edition = commercial::edition_label();
+                                                let licensed = commercial::is_licensed();
+                                                settings_item_header(
+                                                    ui,
+                                                    "当前授权",
+                                                    "当前版本不强制授权，全部功能可用；导入授权为可选。",
+                                                );
+                                                ui.label(
+                                                    RichText::new(&edition)
+                                                        .size(13.5)
+                                                        .color(if licensed {
+                                                            theme::shell_accent()
+                                                        } else {
+                                                            theme::text_muted()
+                                                        }),
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    theme::muted_label(
+                                                        "功能不因授权状态关闭；后续版本若收费将另行说明。",
+                                                    )
+                                                    .small(),
+                                                );
+                                                ui.add_space(8.0);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                                    if theme::page_outline_button(ui, "导入授权")
+                                                        .clicked()
+                                                    {
+                                                        match commercial::import_license_via_dialog()
+                                                        {
+                                                            Ok(label) => {
+                                                                *status_line = format!(
+                                                                    "授权已生效：{label}。请锁定后重新进入以完整启用发现。"
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                let s = e.to_string();
+                                                                if s != "已取消" {
+                                                                    *status_line = format!(
+                                                                        "导入授权失败：{s}"
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                        ctx.request_repaint();
+                                                    }
+                                                    if theme::page_outline_button(ui, "购买授权")
+                                                        .clicked()
+                                                    {
+                                                        commercial::open_buy_page();
+                                                    }
+                                                    if theme::page_outline_button(ui, "隐私说明")
+                                                        .clicked()
+                                                    {
+                                                        self.show_privacy = true;
+                                                    }
+                                                    if theme::page_outline_button(ui, "打开配置目录")
+                                                        .clicked()
+                                                    {
+                                                        commercial::open_config_dir();
+                                                    }
+                                                });
+                                            }
                                             settings_item_gap(ui);
                                             // —— 本机 ——
                                             settings_section(ui, "本机");
@@ -3251,6 +3639,10 @@ fn unlock_runtime_identity(
         let _ = svc.restore_from_hosted();
         let _ = svc.purge_expired_trash();
         svc.ensure_session_person()?;
+        // LICENSE_ENFORCED 时未授权会关闭发现/可见/托管；当前版本全开
+        let ok = commercial::commercial_features_ok();
+        let lan_discovery = cfg.lan_discovery && ok;
+        let node_visible = cfg.node_visible && ok;
         let engine = SyncEngine::new_with_identity(
             cfg.node_id.clone(),
             cfg.listen_port,
@@ -3258,10 +3650,10 @@ fn unlock_runtime_identity(
             svc.store(),
             svc.person_store(),
             cfg.cluster_salt_hex.clone(),
-            cfg.lan_discovery,
+            lan_discovery,
             cfg.node_role,
-            cfg.node_visible,
-            cfg.accept_foreign_backup,
+            node_visible,
+            cfg.accept_foreign_backup && ok,
             identity.fingerprint.clone(),
             identity.alias.clone(),
             PathBuf::from(&cfg.data_dir),

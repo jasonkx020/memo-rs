@@ -5,7 +5,6 @@
 use clap::Parser;
 use memo_core::config::{self, Config};
 use memo_core::identity_keys::{self, IdentityKeys};
-use memo_core::store::MemoVisibility;
 use memo_sync::{EngineBroadcaster, SyncEngine};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -189,7 +188,12 @@ fn run_headless(cfg: Config, args: Args) -> anyhow::Result<()> {
                     continue;
                 }
                 let title = parts[1..].join(" ");
-                match svc.add(&title, "", MemoVisibility::Private) {
+                match svc.add(
+                    &title,
+                    "",
+                    memo_core::store::MemoSpace::Normal,
+                    memo_core::store::LanShare::Off,
+                ) {
                     Ok(id) => println!("ok {id}"),
                     Err(e) => eprintln!("{e}"),
                 }

@@ -208,22 +208,13 @@ pub fn show_viewer_body_ex(
 /// 备忘新建模板（第一行标题）。
 #[allow(dead_code)]
 pub fn memo_template(stamp: &str) -> String {
-    memo_template_for(MemoCategory::Work, stamp)
+    memo_template_for(MemoCategory::Todo, stamp)
 }
 
 pub fn memo_template_for(category: MemoCategory, stamp: &str) -> String {
-    match category {
-        MemoCategory::Todo => format!("待办 {stamp}"),
+    match category.bucket() {
         MemoCategory::Credentials => format!("备忘 {stamp}"),
-        MemoCategory::Work | MemoCategory::Office => format!("工作学习 {stamp}"),
-        MemoCategory::Life => format!("生活家庭 {stamp}"),
-        MemoCategory::Finance => format!("财务订阅 {stamp}"),
-        MemoCategory::GenderPrivate | MemoCategory::WomenPrivate | MemoCategory::MalePrivate => {
-            format!("性别私密备注 {stamp}")
-        }
-        MemoCategory::Emergency => format!("应急 {stamp}"),
-        MemoCategory::Inspiration => format!("灵感 {stamp}"),
-        MemoCategory::General => format!("备忘 {stamp}"),
+        _ => format!("待办 {stamp}"),
     }
 }
 
@@ -248,14 +239,14 @@ mod tests {
         let note = memo_template("2026-09-30");
         let (title, body) = split_note(&note, "未命名备忘");
         let doc = Doc::from_store(&title, &body);
-        assert_eq!(doc.title, "工作学习 2026-09-30");
+        assert_eq!(doc.title, "待办 2026-09-30");
         assert!(doc.body.is_empty());
     }
 
     #[test]
     fn each_category_template_parses() {
-        for cat in MemoCategory::ALL {
-            let note = memo_template_for(*cat, "2026-10-02");
+        for cat in [MemoCategory::Todo, MemoCategory::Credentials] {
+            let note = memo_template_for(cat, "2026-10-02");
             let (title, body) = split_note(&note, "未命名");
             assert!(!title.is_empty(), "{cat:?} 标题为空");
             let doc = Doc::from_store(&title, &body);

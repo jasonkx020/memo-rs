@@ -6,9 +6,10 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
-/// 演示用验签公钥（32 字节 hex）。正式售卖时替换为发行方公钥。
-const LICENSE_PUBKEY_HEX: &str =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// 发行方验签公钥（与 commerce-hub `data/keys/memo.ed25519.pub.hex` 对齐）。
+/// 换机房密钥后需同步替换本常量。
+pub const LICENSE_PUBKEY_HEX: &str =
+    "25ae8914de4f73a449c266b1b0253e03c69ed099f587e1d96b226df8850c0d48";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicenseInfo {

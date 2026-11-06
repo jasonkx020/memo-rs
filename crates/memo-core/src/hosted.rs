@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use crate::attachments::PackedAttachment;
 use crate::crypto;
-use crate::store::{MemoCategory, MemoItem, MemoLifecycle, MemoPriority};
+use crate::store::{
+    LanShare, MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoSpace,
+};
 
 const HOSTED_FILE: &str = "hosted_index.json";
 const HOSTED_MEMO_FORMAT_V1: &str = "memo-hosted-v1";
@@ -20,6 +22,10 @@ const HOSTED_MEMO_FORMAT_V3: &str = "memo-hosted-v3";
 pub struct HostedNavMeta {
     #[serde(default)]
     pub category: MemoCategory,
+    #[serde(default)]
+    pub space: MemoSpace,
+    #[serde(default)]
+    pub lan_share: LanShare,
     #[serde(default)]
     pub due_date: String,
     #[serde(default)]
@@ -39,7 +45,9 @@ pub struct HostedNavMeta {
 impl Default for HostedNavMeta {
     fn default() -> Self {
         Self {
-            category: MemoCategory::General,
+            category: MemoCategory::Todo,
+            space: MemoSpace::Normal,
+            lan_share: LanShare::Off,
             due_date: String::new(),
             end_date: String::new(),
             done: false,
@@ -54,7 +62,9 @@ impl Default for HostedNavMeta {
 impl HostedNavMeta {
     pub fn from_item(item: &MemoItem) -> Self {
         Self {
-            category: item.category.canonical(),
+            category: item.category.for_store_with_due(&item.due_date),
+            space: item.space,
+            lan_share: item.lan_share,
             due_date: item.due_date.clone(),
             end_date: item.end_date.clone(),
             done: item.done,
@@ -92,6 +102,10 @@ pub struct HostedMemoPayload {
     #[serde(default)]
     pub category: MemoCategory,
     #[serde(default)]
+    pub space: MemoSpace,
+    #[serde(default)]
+    pub lan_share: LanShare,
+    #[serde(default)]
     pub due_date: String,
     #[serde(default)]
     pub end_date: String,
@@ -120,6 +134,8 @@ impl HostedMemoPayload {
             content: plain_content.into(),
             attachments,
             category: nav.category,
+            space: nav.space,
+            lan_share: nav.lan_share,
             due_date: nav.due_date,
             end_date: nav.end_date,
             done: nav.done,
@@ -132,7 +148,13 @@ impl HostedMemoPayload {
 
     fn nav_meta(&self) -> HostedNavMeta {
         HostedNavMeta {
-            category: self.category.canonical(),
+            category: self.category.for_store_with_due(&self.due_date),
+            space: if self.category.is_gender_private() {
+                MemoSpace::Private
+            } else {
+                self.space
+            },
+            lan_share: self.lan_share,
             due_date: self.due_date.clone(),
             end_date: self.end_date.clone(),
             done: self.done,
@@ -488,7 +510,9 @@ impl HostedStore {
 mod tests {
     use super::*;
     use crate::crypto;
-    use crate::store::{MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoVisibility};
+    use crate::store::{
+        LanShare, MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoSpace, MemoVisibility,
+    };
 
     fn test_key() -> Vec<u8> {
         vec![0u8; 32]
@@ -498,6 +522,7 @@ mod tests {
         title: &str,
         category: MemoCategory,
         due_date: &str,
+        space: MemoSpace,
     ) -> MemoItem {
         MemoItem {
             id: "m1".into(),
@@ -509,6 +534,8 @@ mod tests {
             modified_by_person_id: String::new(),
             modified_by_name: String::new(),
             visibility: MemoVisibility::Private,
+            space,
+            lan_share: LanShare::Off,
             owner_fp: "fp".into(),
             modified_at: String::new(),
             lifecycle: MemoLifecycle::Permanent,
@@ -524,13 +551,14 @@ mod tests {
         }
     }
 
-    fn assert_nav_roundtrip(category: MemoCategory, due: &str) {
+    fn assert_nav_roundtrip(category: MemoCategory, due: &str, space: MemoSpace, expect_cat: MemoCategory) {
         let key = test_key();
-        let item = sample_item("标题", category, due);
+        let item = sample_item("标题", category, due, space);
         let ct = HostedMemoPayload::encode_ciphertext(&key, &item, "正文内容", vec![]).unwrap();
         let restored = HostedMemoPayload::decode_for_restore(&key, &ct, "").unwrap();
         let nav = restored.nav.expect("v3 should carry nav");
-        assert_eq!(nav.category, category.canonical());
+        assert_eq!(nav.category, expect_cat);
+        assert_eq!(nav.space, space);
         assert_eq!(nav.due_date, due);
         assert_eq!(nav.priority, MemoPriority::High);
         assert_eq!(nav.tags, vec!["t".to_string()]);
@@ -542,17 +570,33 @@ mod tests {
 
     #[test]
     fn v3_roundtrip_gender_private() {
-        assert_nav_roundtrip(MemoCategory::GenderPrivate, "");
+        // 旧 GenderPrivate 无日期 → 备忘 + 私密空间
+        assert_nav_roundtrip(
+            MemoCategory::GenderPrivate,
+            "",
+            MemoSpace::Private,
+            MemoCategory::Credentials,
+        );
     }
 
     #[test]
     fn v3_roundtrip_todo_with_due() {
-        assert_nav_roundtrip(MemoCategory::Todo, "2026-10-21 09:00");
+        assert_nav_roundtrip(
+            MemoCategory::Todo,
+            "2026-10-21 09:00",
+            MemoSpace::Normal,
+            MemoCategory::Todo,
+        );
     }
 
     #[test]
     fn v3_roundtrip_credentials() {
-        assert_nav_roundtrip(MemoCategory::Credentials, "");
+        assert_nav_roundtrip(
+            MemoCategory::Credentials,
+            "",
+            MemoSpace::Normal,
+            MemoCategory::Credentials,
+        );
     }
 
     #[test]

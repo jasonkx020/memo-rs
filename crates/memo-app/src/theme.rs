@@ -560,18 +560,10 @@ fn dark_icons() -> bool {
     (r as u16) + (g as u16) + (b as u16) < 380
 }
 
-/// 分类图标语义色（待办强调色、应急红等；待办不用成功绿，以免像「已完成」）。
+/// 分类图标语义色（三类桶；待办不用成功绿，以免像「已完成」）。
 pub fn category_icon_color(cat: MemoCategory) -> Color32 {
     let dark = dark_icons();
-    match cat {
-        MemoCategory::Todo => shell_accent(),
-        MemoCategory::Work | MemoCategory::Office => {
-            if dark {
-                Color32::from_rgb(0x6B, 0x9B, 0xD4)
-            } else {
-                Color32::from_rgb(0x2F, 0x6F, 0xAD)
-            }
-        }
+    match cat.bucket() {
         MemoCategory::Credentials => {
             if dark {
                 Color32::from_rgb(0x7E, 0xB6, 0xD9)
@@ -579,31 +571,8 @@ pub fn category_icon_color(cat: MemoCategory) -> Color32 {
                 Color32::from_rgb(0x3D, 0x7A, 0xA8)
             }
         }
-        MemoCategory::Life => {
-            if dark {
-                Color32::from_rgb(0x4E, 0xC9, 0xB0)
-            } else {
-                Color32::from_rgb(0x1F, 0xA0, 0x7A)
-            }
-        }
-        MemoCategory::Finance => {
-            if dark {
-                Color32::from_rgb(0xE8, 0xC3, 0x4A)
-            } else {
-                Color32::from_rgb(0xC4, 0x8E, 0x14)
-            }
-        }
-        MemoCategory::Emergency => danger(),
-        MemoCategory::Inspiration => {
-            if dark {
-                Color32::from_rgb(0xC4, 0xA0, 0xF8)
-            } else {
-                Color32::from_rgb(0x7C, 0x4D, 0xDE)
-            }
-        }
-        MemoCategory::GenderPrivate | MemoCategory::WomenPrivate => shell_women_pill_fg(),
-        MemoCategory::MalePrivate => shell_men_pill_fg(),
-        MemoCategory::General => text(),
+        MemoCategory::GenderPrivate => shell_women_pill_fg(),
+        _ => shell_accent(),
     }
 }
 

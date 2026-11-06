@@ -6,7 +6,7 @@ use crate::huangli;
 use crate::memo_form;
 use crate::page_shell;
 use crate::theme;
-use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
+use chrono::{Datelike, Duration, Local, NaiveDate, Timelike, Weekday};
 use eframe::egui::{self, Color32, Frame, Id, Margin, Order, RichText, Rounding, Sense, Stroke, Vec2};
 use memo_core::service::MemoView;
 use memo_core::store::{MemoCategory, MemoPriority};
@@ -154,6 +154,13 @@ fn jump_cal_to(cal: &mut CalendarUi, day: NaiveDate) {
     cal.mark_prefs_dirty();
 }
 
+/// 恢复选中任务时：把月历/日议程对齐到备忘到期日（与点击条目时的上下文一致）。
+pub(crate) fn focus_cal_on_due(cal: &mut CalendarUi, due: &str) {
+    if let Some(day) = due_date_part(due) {
+        jump_cal_to(cal, day);
+    }
+}
+
 fn today() -> NaiveDate {
     Local::now().date_naive()
 }
@@ -163,10 +170,10 @@ fn ymd(d: NaiveDate) -> String {
 }
 
 fn on_calendar(m: &MemoView) -> bool {
-    if m.category.canonical() == MemoCategory::Credentials {
+    if m.space != memo_core::store::MemoSpace::Normal {
         return false;
     }
-    if m.category.is_gender_private() {
+    if m.category.bucket() == MemoCategory::Credentials {
         return false;
     }
     due_date_part(&m.due_date).is_some()
@@ -179,8 +186,8 @@ fn calendar_open<'a>(list: &'a [MemoView]) -> impl Iterator<Item = &'a MemoView>
 fn unscheduled<'a>(list: &'a [MemoView], q: &str) -> Vec<&'a MemoView> {
     list.iter()
         .filter(|m| {
-            m.category.canonical() != MemoCategory::Credentials
-                && !m.category.is_gender_private()
+            m.space == memo_core::store::MemoSpace::Normal
+                && m.category.bucket() != MemoCategory::Credentials
                 && due_date_part(&m.due_date).is_none()
                 && search_hit(m, q)
         })
@@ -2302,156 +2309,6 @@ fn status_badge(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32, border:
         });
 }
 
-#[derive(Clone, Copy)]
-enum DetailToolIcon {
-    Edit,
-    Copy,
-    Trash,
-}
-
-/// 详情顶栏工具按钮：自绘效果图风格（黄铅笔 / 棕剪贴板 / 灰网垃圾桶）。
-fn detail_tool_button(ui: &mut egui::Ui, kind: DetailToolIcon, tip: &str) -> egui::Response {
-    let size = Vec2::new(32.0, 30.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        ui.painter().rect_filled(rect, Rounding::same(6.0), theme::panel());
-    }
-    let icon_rect = egui::Rect::from_center_size(rect.center(), Vec2::splat(18.0));
-    match kind {
-        DetailToolIcon::Edit => paint_tool_edit(ui.painter(), icon_rect),
-        DetailToolIcon::Copy => paint_tool_copy(ui.painter(), icon_rect),
-        DetailToolIcon::Trash => paint_tool_trash(ui.painter(), icon_rect),
-    }
-    resp.on_hover_text(tip)
-}
-
-/// 斜向黄铅笔：粉橡皮 + 金属箍 + 黄杆 + 深色笔尖。
-fn paint_tool_edit(painter: &egui::Painter, rect: egui::Rect) {
-    let ink = theme::text();
-    let yellow = Color32::from_rgb(0xF5, 0xC5, 0x42);
-    let eraser = Color32::from_rgb(0xE8, 0x8A, 0x8A);
-    let metal = Color32::from_rgb(0xA8, 0xA8, 0xB0);
-    let tip = Color32::from_rgb(0x3A, 0x3A, 0x3E);
-    let c = rect.center();
-    // 沿右上→左下对角线摆放
-    let dir = Vec2::new(-0.72, 0.72);
-    let len = rect.width() * 0.92;
-    let half = dir * (len * 0.5);
-    let a = c + half; // 笔尖端
-    let b = c - half; // 橡皮端
-    let n = Vec2::new(-dir.y, dir.x);
-    let w = rect.width() * 0.16;
-
-    let body_a = a + dir * (len * 0.18);
-    let body_b = b + dir * (len * 0.22);
-    let quad = |p0: egui::Pos2, p1: egui::Pos2, hw: f32, fill: Color32| {
-        let pts = [
-            p0 + n * hw,
-            p0 - n * hw,
-            p1 - n * hw,
-            p1 + n * hw,
-        ];
-        painter.add(egui::Shape::convex_polygon(pts.to_vec(), fill, Stroke::new(1.0, ink)));
-    };
-    // 笔杆
-    quad(body_a, body_b, w, yellow);
-    // 金属箍
-    let m0 = b + dir * (len * 0.22);
-    let m1 = b + dir * (len * 0.12);
-    quad(m0, m1, w * 0.95, metal);
-    // 橡皮
-    let e0 = b + dir * (len * 0.12);
-    quad(e0, b, w * 0.9, eraser);
-    // 笔尖三角
-    let tip_base = a + dir * (len * 0.18);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            a,
-            tip_base + n * w,
-            tip_base - n * w,
-        ],
-        tip,
-        Stroke::new(1.0, ink),
-    ));
-}
-
-/// 棕底剪贴板 + 白纸横线 + 灰夹。
-fn paint_tool_copy(painter: &egui::Painter, rect: egui::Rect) {
-    let ink = theme::text();
-    let board = Color32::from_rgb(0xC4, 0xA2, 0x7A);
-    let paper = Color32::from_rgb(0xFF, 0xFF, 0xFF);
-    let clip = Color32::from_rgb(0x9A, 0x9A, 0xA0);
-    let r = rect.shrink2(Vec2::new(3.0, 1.5));
-    painter.rect_filled(r, Rounding::same(2.5), board);
-    painter.rect_stroke(r, Rounding::same(2.5), Stroke::new(1.1, ink));
-    let paper_r = egui::Rect::from_min_max(
-        egui::pos2(r.left() + 2.2, r.top() + 4.5),
-        egui::pos2(r.right() - 2.2, r.bottom() - 2.0),
-    );
-    painter.rect_filled(paper_r, Rounding::same(1.5), paper);
-    painter.rect_stroke(paper_r, Rounding::same(1.5), Stroke::new(0.9, ink));
-    let lx0 = paper_r.left() + 2.0;
-    let lx1 = paper_r.right() - 2.0;
-    for i in 0..3 {
-        let y = paper_r.top() + 3.2 + i as f32 * 3.2;
-        painter.line_segment(
-            [egui::pos2(lx0, y), egui::pos2(lx1, y)],
-            Stroke::new(1.0, ink.linear_multiply(0.55)),
-        );
-    }
-    // 顶部夹子
-    let clip_r = egui::Rect::from_center_size(
-        egui::pos2(r.center().x, r.top() + 2.2),
-        Vec2::new(r.width() * 0.55, 4.2),
-    );
-    painter.rect_filled(clip_r, Rounding::same(1.2), clip);
-    painter.rect_stroke(clip_r, Rounding::same(1.2), Stroke::new(1.0, ink));
-}
-
-/// 灰蓝网眼垃圾桶：外轮廓 + 点阵。
-fn paint_tool_trash(painter: &egui::Painter, rect: egui::Rect) {
-    let ink = theme::text();
-    let bin = Color32::from_rgb(0x8E, 0x95, 0xA0);
-    let r = rect.shrink2(Vec2::new(3.5, 1.5));
-    let top_w = r.width();
-    let bot_w = r.width() * 0.72;
-    let top_y = r.top() + 3.0;
-    let bot_y = r.bottom();
-    let cx = r.center().x;
-    let pts = [
-        egui::pos2(cx - top_w * 0.5, top_y),
-        egui::pos2(cx + top_w * 0.5, top_y),
-        egui::pos2(cx + bot_w * 0.5, bot_y),
-        egui::pos2(cx - bot_w * 0.5, bot_y),
-    ];
-    painter.add(egui::Shape::convex_polygon(
-        pts.to_vec(),
-        bin,
-        Stroke::new(1.15, ink),
-    ));
-    // 沿口
-    let rim = egui::Rect::from_center_size(
-        egui::pos2(cx, r.top() + 1.6),
-        Vec2::new(top_w + 1.5, 3.0),
-    );
-    painter.rect_filled(rim, Rounding::same(1.0), bin);
-    painter.rect_stroke(rim, Rounding::same(1.0), Stroke::new(1.1, ink));
-    // 网眼点
-    let rows = 3;
-    let cols = 3;
-    for row in 0..rows {
-        for col in 0..cols {
-            let t = (row as f32 + 1.0) / (rows as f32 + 1.0);
-            let y = top_y + (bot_y - top_y) * t;
-            let half = top_w * 0.5 * (1.0 - t) + bot_w * 0.5 * t;
-            let u = (col as f32 + 1.0) / (cols as f32 + 1.0);
-            let x = cx - half + 2.0 * half * u;
-            painter.circle_filled(egui::pos2(x, y), 0.85, ink.linear_multiply(0.65));
-        }
-    }
-}
-
 /// 侧栏任务卡左侧分类图标（可点击切换完成）；用 layout_galley 避免 ☐ 等符号在 Windows 上落成空方框。
 /// 任务列表卡已改用圆形勾选，本函数暂留作他用。
 #[allow(dead_code)]
@@ -2580,7 +2437,8 @@ fn show_week_side(
 }
 
 /// 右侧统一抽屉（预览 / 编辑共用壳）：遮罩 + 面板滑入滑出。
-/// `dismissible`：仅预览态允许点遮罩关闭；编辑态为 false，仅「×」/「取消」可关（无 Esc）。
+/// `dismissible`：仅预览态允许点遮罩关闭；编辑态为 false，仅「×」/「取消」可关。
+/// Esc 由主界面用于锁定，本抽屉不响应 Esc。
 /// `has_footer` 为真时预留下方操作条高度（编辑保存/取消）。
 /// 返回是否已关闭完成。
 pub fn show_cal_drawer(
@@ -2596,10 +2454,8 @@ pub fn show_cal_drawer(
     add_footer: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let anim = page_shell::drawer_anim_begin(ctx, id_salt);
-    // Esc 仅预览；编辑态由壳层去掉 Esc，只留 ×/取消
-    let mut request_close = !anim.closing
-        && dismissible
-        && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    // Esc 留给主界面「锁定」；预览关抽屉用 × / 点遮罩（dismissible 控制遮罩可点关）
+    let mut request_close = false;
     page_shell::scale_drawer_w_with_host(ctx, id_salt, drawer_w, host.width());
     let (panel, dim, alpha) =
         page_shell::drawer_layout(host, *drawer_w, anim.t.max(0.001));
@@ -2801,7 +2657,45 @@ fn show_unscheduled_block(
         });
 }
 
-/// 日历选中备忘后的只读详情卡。
+fn detail_updated_label(modified_at: &str) -> String {
+    let t = modified_at.trim();
+    if t.is_empty() {
+        return "—".into();
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
+        let local = dt.with_timezone(&Local);
+        let today = Local::now().date_naive();
+        let d = local.date_naive();
+        let days = (today - d).num_days();
+        if days == 0 {
+            return format!("今天 {:02}:{:02}", local.hour(), local.minute());
+        }
+        if days == 1 {
+            return format!("昨天 {:02}:{:02}", local.hour(), local.minute());
+        }
+        return format!("{}月{}日", d.month(), d.day());
+    }
+    t.chars().take(16).collect()
+}
+
+fn detail_due_summary(m: &MemoView) -> String {
+    let Some(start) = due_date_part(&m.due_date) else {
+        return "未设置日期".into();
+    };
+    if is_span(m) {
+        if let Some(end) = event_end_date(&m.due_date, &m.end_date) {
+            return format!("{} ~ {}", format_md(start), format_md(end));
+        }
+        return format_md(start);
+    }
+    if let Some(hm) = due_time_hm(&m.due_date) {
+        format!("{} {} · {}", format_md(start), weekday_zh(start), hm)
+    } else {
+        format!("{} {} · 全天", format_md(start), weekday_zh(start))
+    }
+}
+
+/// 日历任务只读详情（与备忘预览同壳：文字按钮顶栏 + 标题/标签 + 正文 + 底栏元信息）。
 /// 返回 `true` 表示用户点了「编辑」（由壳层在同一抽屉内切到编辑态）。
 pub fn show_event_detail(
     ui: &mut egui::Ui,
@@ -2810,306 +2704,220 @@ pub fn show_event_detail(
     selected: &mut Option<String>,
     editing: &mut bool,
     show_delete: &mut bool,
+    open_sticky: &mut Option<String>,
     status_line: &mut String,
     tx: &Sender<BgMsg>,
 ) -> bool {
     let mut want_edit = false;
+    let title_show = if m.title.is_empty() {
+        "(无标题)"
+    } else {
+        m.title.as_str()
+    };
+    let updated = detail_updated_label(&m.modified_at);
+    let cat = m.category.canonical();
+    let is_private = m.visibility == memo_core::store::MemoVisibility::Private;
+    let (badge_bg, badge_fg, badge_text) = if m.done {
+        (theme::success_soft(), theme::success(), "已完成")
+    } else if memo_overdue(m) {
+        (
+            theme::warn_overdue_bg(),
+            theme::warn_overdue_fg(),
+            "已过期",
+        )
+    } else if memo_due_today(m) {
+        (
+            theme::warn_due_today_bg(),
+            theme::warn_due_today_fg(),
+            "今天到期",
+        )
+    } else {
+        (
+            theme::shell_accent_soft(),
+            theme::shell_accent(),
+            "日历任务",
+        )
+    };
+
+    // 顶栏：状态标签 + 文字操作（对齐备忘预览）
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        Frame::none()
+            .fill(badge_bg)
+            .rounding(Rounding::same(99.0))
+            .inner_margin(Margin::symmetric(10.0, 4.0))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(badge_text)
+                        .size(12.0)
+                        .strong()
+                        .color(badge_fg),
+                );
+            });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // 效果图顺序：编辑 · 复制 · 删除（右对齐时反向添加）
-            if detail_tool_button(ui, DetailToolIcon::Trash, "删除").clicked() {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if theme::page_danger_outline_button(ui, "删除").clicked() {
                 *show_delete = true;
             }
-            if detail_tool_button(ui, DetailToolIcon::Copy, "复制全文").clicked() {
+            if theme::page_outline_button(ui, "便签").clicked() {
+                *open_sticky = Some(m.id.clone());
+            }
+            if theme::page_outline_button(ui, "复制").clicked() {
                 ui.output_mut(|o| {
                     o.copied_text = format!("{}\n\n{}", m.title, m.content);
                 });
                 *status_line = "已复制到剪贴板".into();
             }
-            if detail_tool_button(ui, DetailToolIcon::Edit, "编辑").clicked() {
-                want_edit = true;
-            }
+            ui.add_enabled_ui(!*editing, |ui| {
+                if theme::page_primary_button(ui, "编辑").clicked() {
+                    want_edit = true;
+                }
+            });
         });
     });
-    ui.add_space(8.0);
+    ui.add_space(14.0);
 
-    let scroll_h = ui.available_height().max(80.0);
-    egui::ScrollArea::vertical()
-        .id_source("cal_event_detail_scroll")
-        .auto_shrink([false, false])
-        .max_height(scroll_h)
-        .show(ui, |ui| {
-            let content_w = ui.available_width();
-            ui.set_min_width(content_w);
-            ui.set_max_width(content_w);
-
-            ui.horizontal_top(|ui| {
-                let dot = if memo_overdue(m) {
-                    theme::warn_overdue_fg()
-                } else if m.priority == MemoPriority::High {
-                    theme::warn_overdue_fg()
-                } else {
-                    theme::category_icon_color(m.category.canonical())
-                };
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 5.0, dot);
-                let mut heading = RichText::new(if m.title.is_empty() {
-                    "(无标题)"
-                } else {
-                    m.title.as_str()
-                })
-                .size(20.0)
-                .strong()
-                .color(if m.done {
-                    theme::text_muted()
-                } else {
-                    theme::text()
-                });
-                if m.done {
-                    heading = heading.strikethrough();
-                }
-                let title_w = ui.available_width();
-                ui.allocate_ui(Vec2::new(title_w, 0.0), |ui| {
-                    ui.set_max_width(title_w);
-                    ui.add(egui::Label::new(heading).wrap(true));
-                });
-            });
-            ui.add_space(14.0);
-
-            // —— 时间（效果图：红顶日历 + 红针时钟，日期深色 / 跨度蓝字）——
-            detail_section_label(ui, "时间");
-            if let Some(start) = due_date_part(&m.due_date) {
-                detail_time_row(
-                    ui,
-                    DetailTimeIcon::Calendar,
-                    &format!(
-                        "{}年{}月{}日 ({})",
-                        start.year(),
-                        start.month(),
-                        start.day(),
-                        weekday_zh(start)
-                    ),
-                    theme::text(),
-                );
-                ui.add_space(6.0);
-                let time_line = if is_span(m) {
-                    if let Some(end) = event_end_date(&m.due_date, &m.end_date) {
-                        format!("{} ~ {}", format_md(start), format_md(end))
-                    } else {
-                        format_md(start)
-                    }
-                } else if let Some(hm) = due_time_hm(&m.due_date) {
-                    format!("{hm} 开始")
-                } else {
-                    "全天".into()
-                };
-                detail_time_row(ui, DetailTimeIcon::Clock, &time_line, theme::accent());
-            } else {
-                detail_time_row(ui, DetailTimeIcon::Calendar, "未设置日期", theme::text_muted());
-            }
-            ui.add_space(16.0);
-
-            // —— 属性（横排 soft pill：键：值）——
-            detail_section_label(ui, "属性");
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.spacing_mut().item_spacing.y = 6.0;
-                let id_short: String = m.id.chars().take(8).collect();
-                detail_attr_pill(
-                    ui,
-                    &format!("编号：{id_short}"),
-                    theme::panel(),
-                    theme::text_muted(),
-                );
-                let pri = match m.priority {
-                    MemoPriority::High => "高",
-                    MemoPriority::Normal => "普通",
-                    MemoPriority::Low => "低",
-                };
-                detail_attr_pill(
-                    ui,
-                    &format!("优先级：{pri}"),
-                    theme::priority_pill_bg(m.priority),
-                    theme::priority_pill_fg(m.priority),
-                );
-                detail_attr_pill(
-                    ui,
-                    &format!("分类：{}", m.category.label()),
-                    theme::chip_soft_bg(m.category),
-                    theme::chip_soft_fg(m.category),
-                );
-                for (i, tag) in m.tags.iter().enumerate() {
-                    let (bg, fg) = theme::tag_soft_pair(i as u64 + tag.len() as u64);
-                    let label = if tag.starts_with('#') {
-                        tag.clone()
-                    } else {
-                        format!("#{tag}")
-                    };
-                    detail_attr_pill(ui, &label, bg, fg);
-                }
-            });
-            ui.add_space(16.0);
-
-            // —— 描述 ——
-            detail_section_label(ui, "描述");
-            Frame::none()
-                .fill(theme::card())
-                .stroke(Stroke::new(1.0, theme::border()))
-                .rounding(Rounding::same(10.0))
-                .inner_margin(Margin::same(12.0))
-                .show(ui, |ui| {
-                    let w = ui.available_width();
-                    ui.set_min_width(w);
-                    ui.set_max_width(w);
-                    ui.set_min_height(72.0);
-                    if m.content.trim().is_empty() {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new("情况说明，自由书写即可...")
-                                    .size(13.0)
-                                    .italics()
-                                    .color(theme::text_muted()),
-                            )
-                            .wrap(true),
-                        );
-                    } else {
-                        doc_editor::show_viewer_body_ex(
-                            ui,
-                            &m.content,
-                            Some(Path::new(svc.config().data_dir.as_str())),
-                            &m.id,
-                        );
-                    }
-                });
-
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                show_reschedule_button(ui, svc, m, status_line, tx);
-                if m.done {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("撤销完成").size(13.0))
-                                .min_size(Vec2::new(100.0, 32.0)),
-                        )
-                        .clicked()
-                    {
-                        toggle_done(svc, m, tx, selected, editing);
-                    }
-                } else if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new("标记完成")
-                                .size(13.5)
-                                .color(Color32::WHITE)
-                                .strong(),
-                        )
-                        .fill(theme::shell_accent())
-                        .rounding(Rounding::same(8.0))
-                        .min_size(Vec2::new(120.0, 32.0)),
-                    )
-                    .clicked()
-                {
-                    toggle_done(svc, m, tx, selected, editing);
-                }
-            });
-            ui.add_space(16.0);
-        });
-    want_edit
-}
-
-fn detail_section_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
-        RichText::new(text)
+        RichText::new(format!("{} · 更新于 {updated}", cat.label()))
             .size(12.0)
-            .strong()
             .color(theme::text_muted()),
     );
-    ui.add_space(8.0);
-}
-
-#[derive(Clone, Copy)]
-enum DetailTimeIcon {
-    Calendar,
-    Clock,
-}
-
-fn detail_time_row(ui: &mut egui::Ui, kind: DetailTimeIcon, text: &str, text_color: Color32) {
-    ui.horizontal_top(|ui| {
-        let (irect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-        match kind {
-            DetailTimeIcon::Calendar => paint_detail_calendar_icon(ui.painter(), irect),
-            DetailTimeIcon::Clock => paint_detail_clock_icon(ui.painter(), irect),
-        }
-        ui.add_space(6.0);
-        let w = ui.available_width();
-        ui.allocate_ui(Vec2::new(w, 0.0), |ui| {
-            ui.set_max_width(w);
-            ui.add(
-                egui::Label::new(RichText::new(text).size(13.5).color(text_color)).wrap(true),
-            );
-        });
-    });
-}
-
-/// 效果图日历：红顶条 + 浅底 + 深描边。
-fn paint_detail_calendar_icon(painter: &egui::Painter, rect: egui::Rect) {
-    let r = rect.shrink(1.0);
-    let red = theme::mac_red();
-    let ink = theme::text();
-    let body = Color32::from_rgb(0xF7, 0xF7, 0xF8);
-    painter.rect_filled(r, Rounding::same(3.0), body);
-    let header_h = r.height() * 0.32;
-    let header = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + header_h));
-    painter.rect_filled(
-        header,
-        Rounding {
-            nw: 3.0,
-            ne: 3.0,
-            sw: 0.0,
-            se: 0.0,
-        },
-        red,
-    );
-    painter.rect_stroke(r, Rounding::same(3.0), Stroke::new(1.15, ink));
-    // 装订小点
-    let cy = r.top() + header_h * 0.55;
-    for x in [r.left() + r.width() * 0.32, r.left() + r.width() * 0.68] {
-        painter.circle_filled(egui::pos2(x, cy), 1.1, Color32::WHITE);
+    ui.add_space(6.0);
+    let mut heading = RichText::new(title_show)
+        .size(22.0)
+        .strong()
+        .color(theme::text());
+    if m.done {
+        heading = heading.strikethrough().color(theme::text_muted());
     }
-    // 底格两点示意日期
-    let gy = r.top() + header_h + (r.height() - header_h) * 0.55;
-    painter.circle_filled(egui::pos2(r.left() + r.width() * 0.35, gy), 1.0, ink.linear_multiply(0.45));
-    painter.circle_filled(egui::pos2(r.left() + r.width() * 0.62, gy), 1.0, ink.linear_multiply(0.45));
-}
+    ui.label(heading);
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        Frame::none()
+            .fill(theme::shell_accent_soft())
+            .rounding(Rounding::same(6.0))
+            .inner_margin(Margin::symmetric(7.0, 2.0))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(cat.label())
+                        .size(11.5)
+                        .strong()
+                        .color(theme::shell_accent()),
+                );
+            });
+        Frame::none()
+            .fill(theme::priority_pill_bg(m.priority))
+            .rounding(Rounding::same(6.0))
+            .inner_margin(Margin::symmetric(7.0, 2.0))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(m.priority.label())
+                        .size(11.5)
+                        .strong()
+                        .color(theme::priority_pill_fg(m.priority)),
+                );
+            });
+        if is_private {
+            Frame::none()
+                .fill(theme::shell_accent_soft())
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::symmetric(6.0, 1.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("私")
+                            .size(11.0)
+                            .strong()
+                            .color(theme::shell_accent()),
+                    );
+                });
+        }
+        for (i, tag) in m.tags.iter().enumerate() {
+            let (bg, fg) = theme::tag_soft_pair(i as u64 + tag.len() as u64);
+            let label = if tag.starts_with('#') {
+                tag.clone()
+            } else {
+                format!("#{tag}")
+            };
+            Frame::none()
+                .fill(bg)
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::symmetric(7.0, 2.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(label).size(11.5).color(fg));
+                });
+        }
+    });
 
-/// 效果图时钟：深色圆框 + 红色指针。
-fn paint_detail_clock_icon(painter: &egui::Painter, rect: egui::Rect) {
-    let c = rect.center();
-    let rad = rect.width().min(rect.height()) * 0.42;
-    let ink = theme::text();
-    let red = theme::mac_red();
-    painter.circle_stroke(c, rad, Stroke::new(1.35, ink));
-    // 时针（较短）
-    painter.line_segment(
-        [c, egui::pos2(c.x + rad * 0.15, c.y - rad * 0.45)],
-        Stroke::new(1.6, red),
-    );
-    // 分针（较长）
-    painter.line_segment(
-        [c, egui::pos2(c.x + rad * 0.55, c.y + rad * 0.12)],
-        Stroke::new(1.45, red),
-    );
-    painter.circle_filled(c, 1.35, red);
-}
+    ui.add_space(14.0);
+    ui.separator();
+    ui.add_space(12.0);
+    if m.content.trim().is_empty() {
+        ui.label(
+            RichText::new("（尚无正文）")
+                .size(14.0)
+                .italics()
+                .color(theme::text_muted()),
+        );
+    } else {
+        doc_editor::show_viewer_body_ex(
+            ui,
+            &m.content,
+            Some(Path::new(svc.config().data_dir.as_str())),
+            &m.id,
+        );
+    }
 
-fn detail_attr_pill(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32) {
-    Frame::none()
-        .fill(bg)
-        .rounding(Rounding::same(8.0))
-        .inner_margin(Margin::symmetric(10.0, 5.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).size(12.5).color(fg));
-        });
+    ui.add_space(20.0);
+    ui.separator();
+    ui.add_space(10.0);
+    let due_l = detail_due_summary(m);
+    let vis_l = if is_private {
+        "私密 · 本地加密"
+    } else {
+        "节点可见"
+    };
+    let cell_w = page_shell::split_col_width(ui.available_width(), 3, 8.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (k, v) in [
+            ("到期", due_l),
+            ("可见性", vis_l.to_string()),
+            ("版本", format!("v{} · {}", m.version, m.priority.label())),
+        ] {
+            Frame::none()
+                .fill(Color32::from_rgb(250, 251, 252))
+                .stroke(Stroke::new(1.0, theme::border()))
+                .rounding(Rounding::same(8.0))
+                .inner_margin(Margin::symmetric(10.0, 8.0))
+                .show(ui, |ui| {
+                    let cw = page_shell::fit_avail_width(ui, (cell_w - 8.0).max(1.0));
+                    ui.set_max_width(cw);
+                    ui.set_min_width(cw.min(ui.available_width().max(1.0)));
+                    ui.label(RichText::new(k).size(11.0).color(theme::text_muted()));
+                    ui.label(
+                        RichText::new(v)
+                            .size(13.0)
+                            .strong()
+                            .color(theme::text()),
+                    );
+                });
+        }
+    });
+
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        show_reschedule_button(ui, svc, m, status_line, tx);
+        if m.done {
+            if theme::page_outline_button(ui, "撤销完成").clicked() {
+                toggle_done(svc, m, tx, selected, editing);
+            }
+        } else if theme::page_primary_button(ui, "标记完成").clicked() {
+            toggle_done(svc, m, tx, selected, editing);
+        }
+    });
+    ui.add_space(16.0);
+    want_edit
 }
 
 fn toggle_done(
@@ -3335,7 +3143,7 @@ fn reschedule_memo(svc: &Arc<MemoService>, m: &MemoView, new_due: &str, tx: &Sen
     let id = m.id.clone();
     let tx = tx.clone();
     std::thread::spawn(move || {
-        let Some(prev) = svc.list().into_iter().find(|x| x.id == id) else {
+        let Ok(prev) = svc.get_view(&id) else {
             let _ = tx.send(BgMsg::Error("备忘不存在或已删除".into()));
             return;
         };
@@ -3343,7 +3151,8 @@ fn reschedule_memo(svc: &Arc<MemoService>, m: &MemoView, new_due: &str, tx: &Sen
             &prev.id,
             &prev.title,
             &prev.content,
-            prev.visibility,
+            prev.space,
+            prev.lan_share,
             MemoLifecycle::Permanent,
             prev.category,
             &new_due,
@@ -3391,7 +3200,7 @@ fn place_today(svc: &Arc<MemoService>, m: &MemoView, tx: &Sender<BgMsg>) {
     let id = m.id.clone();
     let tx = tx.clone();
     std::thread::spawn(move || {
-        let Some(prev) = svc.list().into_iter().find(|x| x.id == id) else {
+        let Ok(prev) = svc.get_view(&id) else {
             let _ = tx.send(BgMsg::Error("备忘不存在或已删除".into()));
             return;
         };
@@ -3399,7 +3208,8 @@ fn place_today(svc: &Arc<MemoService>, m: &MemoView, tx: &Sender<BgMsg>) {
             &prev.id,
             &prev.title,
             &prev.content,
-            prev.visibility,
+            prev.space,
+            prev.lan_share,
             MemoLifecycle::Permanent,
             prev.category,
             &due,

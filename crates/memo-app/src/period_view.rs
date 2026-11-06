@@ -7,7 +7,7 @@ use memo_core::cycle::{
     apply_mark_stats, analyze_period_marks, CycleConfig, PeriodMarkStats,
 };
 use memo_core::service::{MemoService, MemoView};
-use memo_core::store::{MemoCategory, MemoLifecycle, MemoVisibility};
+use memo_core::store::{MemoCategory, MemoLifecycle};
 use std::sync::Arc;
 
 const REF_DISCLAIMER: &str =
@@ -183,7 +183,7 @@ pub(crate) fn period_marked_days(memos: &[MemoView]) -> Vec<String> {
     let mut days: Vec<String> = memos
         .iter()
         .filter(|m| {
-            m.category.is_gender_private()
+            (m.space == memo_core::store::MemoSpace::Private || m.category.is_gender_private())
                 && !m.due_date.is_empty()
                 && (m.title == "经期"
                     || m.title == "经期日"
@@ -210,7 +210,7 @@ pub(crate) fn notes_on_day<'a>(memos: &'a [MemoView], ymd: &str) -> Vec<&'a Memo
     memos
         .iter()
         .filter(|m| {
-            m.category.is_gender_private()
+            (m.space == memo_core::store::MemoSpace::Private || m.category.is_gender_private())
                 && due_matches_ymd(&m.due_date, ymd)
                 && m.title != "经期"
                 && m.title != "经期日"
@@ -221,7 +221,7 @@ pub(crate) fn notes_on_day<'a>(memos: &'a [MemoView], ymd: &str) -> Vec<&'a Memo
 
 fn find_period_day_memo<'a>(memos: &'a [MemoView], ymd: &str) -> Option<&'a MemoView> {
     memos.iter().find(|m| {
-        m.category.is_gender_private()
+        (m.space == memo_core::store::MemoSpace::Private || m.category.is_gender_private())
             && due_matches_ymd(&m.due_date, ymd)
             && (m.title == "经期"
                 || m.title == "经期日"
@@ -1223,9 +1223,10 @@ pub(crate) fn save_day_note(
             &m.id,
             &title,
             body,
-            MemoVisibility::Private,
+            memo_core::store::MemoSpace::Private,
+            memo_core::store::LanShare::Off,
             MemoLifecycle::Permanent,
-            MemoCategory::GenderPrivate,
+            MemoCategory::Todo,
             ymd,
             &m.end_date,
             m.done,
@@ -1242,9 +1243,10 @@ pub(crate) fn save_day_note(
     match svc.add_full(
         &title,
         body,
-        MemoVisibility::Private,
+        memo_core::store::MemoSpace::Private,
+        memo_core::store::LanShare::Off,
         MemoLifecycle::Permanent,
-        MemoCategory::GenderPrivate,
+        MemoCategory::Todo,
         ymd,
         "",
         &[],
@@ -1267,9 +1269,10 @@ fn add_period_day_memo(svc: &MemoService, ymd: &str) -> Result<(), String> {
     match svc.add_full(
         "经期日",
         "",
-        MemoVisibility::Private,
+        memo_core::store::MemoSpace::Private,
+        memo_core::store::LanShare::Off,
         MemoLifecycle::Permanent,
-        MemoCategory::GenderPrivate,
+        MemoCategory::Todo,
         ymd,
         "",
         &[],

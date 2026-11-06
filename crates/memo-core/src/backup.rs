@@ -191,15 +191,22 @@ pub fn import_encrypted(path: &Path, password: &str) -> anyhow::Result<BackupBun
                 id: m.id,
                 title: m.title,
                 content: m.content,
+                content_loaded: true,
                 deleted: false,
                 version: m.version,
                 node_id: m.node_id,
                 visibility: crate::store::MemoVisibility::Private,
+                space: if m.category.is_gender_private() {
+                    crate::store::MemoSpace::Private
+                } else {
+                    crate::store::MemoSpace::Normal
+                },
+                lan_share: crate::store::LanShare::Off,
                 owner_fp: String::new(),
                 modified_at: String::new(),
                 lifecycle: crate::store::MemoLifecycle::Permanent,
                 deleted_at: String::new(),
-                category: m.category.canonical(),
+                category: m.category.for_store_with_due(&m.due_date),
                 due_date: m.due_date,
                 end_date: m.end_date,
                 remind_before_days: m.remind_before_days,

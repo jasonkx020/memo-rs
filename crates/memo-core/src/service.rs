@@ -16,8 +16,8 @@ use crate::cycle::{CycleConfig, CycleStore};
 use crate::male_health::{MaleHealthConfig, MaleHealthStore};
 use crate::person::{Gender, Person, PersonStore, PersonView};
 use crate::store::{
-    Broadcaster, ConflictNotice, MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoStore,
-    MemoVisibility,
+    migrate_legacy_item, normalize_memo_fields, Broadcaster, ConflictNotice, LanShare,
+    MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoSpace, MemoStore, MemoVisibility,
 };
 
 #[derive(Debug, Clone)]
@@ -25,10 +25,14 @@ pub struct MemoView {
     pub id: String,
     pub title: String,
     pub content: String,
+    /// 列表默认 false；`load_content` 后为 true。
+    pub content_loaded: bool,
     pub deleted: bool,
     pub version: u64,
     pub node_id: String,
     pub visibility: MemoVisibility,
+    pub space: MemoSpace,
+    pub lan_share: LanShare,
     pub owner_fp: String,
     pub modified_at: String,
     pub lifecycle: MemoLifecycle,
@@ -46,21 +50,12 @@ pub struct MemoView {
 /// 回收站宽限期（天）
 pub const TRASH_RETENTION_DAYS: i64 = 30;
 
-fn vis_dates_for_save(
-    category: MemoCategory,
-    visibility: MemoVisibility,
-    due: &str,
-    end: &str,
-) -> (MemoVisibility, String, String) {
-    if category.canonical() == MemoCategory::Credentials {
-        return (MemoVisibility::Private, String::new(), String::new());
+/// 备忘分类不上日历；空间/共享由 normalize 处理。
+fn dates_for_save(category: MemoCategory, due: &str, end: &str) -> (String, String) {
+    if category.bucket() == MemoCategory::Credentials {
+        return (String::new(), String::new());
     }
-    let vis = if category.is_gender_private() {
-        MemoVisibility::Private
-    } else {
-        visibility
-    };
-    (vis, due.to_string(), end.to_string())
+    (due.to_string(), end.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -251,14 +246,16 @@ impl MemoService {
         &self,
         title: &str,
         content: &str,
-        visibility: MemoVisibility,
+        space: MemoSpace,
+        lan_share: LanShare,
     ) -> anyhow::Result<String> {
         self.add_full(
             title,
             content,
-            visibility,
+            space,
+            lan_share,
             MemoLifecycle::Permanent,
-            MemoCategory::General,
+            MemoCategory::Todo,
             "",
             "",
             &[],
@@ -271,7 +268,8 @@ impl MemoService {
         &self,
         title: &str,
         content: &str,
-        visibility: MemoVisibility,
+        space: MemoSpace,
+        lan_share: LanShare,
         lifecycle: MemoLifecycle,
         category: MemoCategory,
         due_date: &str,
@@ -285,7 +283,8 @@ impl MemoService {
             &id,
             title,
             content,
-            visibility,
+            space,
+            lan_share,
             lifecycle,
             category,
             due_date,
@@ -302,7 +301,8 @@ impl MemoService {
         id: &str,
         title: &str,
         content: &str,
-        visibility: MemoVisibility,
+        space: MemoSpace,
+        lan_share: LanShare,
         lifecycle: MemoLifecycle,
         category: MemoCategory,
         due_date: &str,
@@ -311,8 +311,7 @@ impl MemoService {
         priority: MemoPriority,
         remind_before_days: u32,
     ) -> anyhow::Result<String> {
-        let (visibility, due_date, end_date) =
-            vis_dates_for_save(category, visibility, due_date, end_date);
+        let (due_date, end_date) = dates_for_save(category, due_date, end_date);
         let _ = lifecycle;
         let lifecycle = MemoLifecycle::Permanent;
         let ct = crypto::encrypt_string(&self.key, content)?;
@@ -329,7 +328,8 @@ impl MemoService {
             &ct,
             &aid,
             &aname,
-            visibility,
+            space,
+            lan_share,
             &self.session_fp,
             lifecycle,
             category,
@@ -341,7 +341,7 @@ impl MemoService {
             remind_before_days,
             "",
         )?;
-        if visibility == MemoVisibility::Private {
+        if item.lan_share == LanShare::Off {
             self.push_private_backup(&item)?;
         }
         self.fire();
@@ -353,11 +353,12 @@ impl MemoService {
             .get_visible()
             .into_iter()
             .filter(|it| {
-                it.visibility == MemoVisibility::Public
+                it.lan_share == LanShare::On
+                    || it.visibility == MemoVisibility::Public
                     || it.owner_fp.is_empty()
                     || it.owner_fp == self.session_fp
             })
-            .map(|it| self.to_view(it))
+            .map(|it| self.to_view_meta(it))
             .collect()
     }
 
@@ -366,30 +367,29 @@ impl MemoService {
             .get_deleted()
             .into_iter()
             .filter(|it| {
-                it.visibility == MemoVisibility::Public
+                it.lan_share == LanShare::On
+                    || it.visibility == MemoVisibility::Public
                     || it.owner_fp.is_empty()
                     || it.owner_fp == self.session_fp
             })
-            .map(|it| self.to_view(it))
+            .map(|it| self.to_view_meta(it))
             .collect()
     }
 
-    fn to_view(&self, it: MemoItem) -> MemoView {
-        let plain = crypto::decrypt_string(&self.key, &it.content).unwrap_or_else(|_| {
-            if it.visibility == MemoVisibility::Public {
-                it.content.clone()
-            } else {
-                "[解密失败]".into()
-            }
-        });
+    /// 列表用：迁移元数据，不解正文。
+    fn to_view_meta(&self, mut it: MemoItem) -> MemoView {
+        migrate_legacy_item(&mut it);
         MemoView {
             id: it.id,
             title: it.title,
-            content: plain,
+            content: String::new(),
+            content_loaded: false,
             deleted: it.deleted,
             version: it.version,
             node_id: it.node_id,
             visibility: it.visibility,
+            space: it.space,
+            lan_share: it.lan_share,
             owner_fp: it.owner_fp,
             modified_at: it.modified_at,
             lifecycle: it.lifecycle.normalize(),
@@ -405,6 +405,40 @@ impl MemoService {
         }
     }
 
+    /// 按需解密单条正文。
+    pub fn load_content(&self, id: &str) -> anyhow::Result<String> {
+        let it = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        if it.visibility == MemoVisibility::Private
+            && it.lan_share == LanShare::Off
+            && !it.owner_fp.is_empty()
+            && it.owner_fp != self.session_fp
+        {
+            anyhow::bail!("无权读取他人私密备忘");
+        }
+        crypto::decrypt_string(&self.key, &it.content).or_else(|_| {
+            if it.visibility == MemoVisibility::Public || it.lan_share == LanShare::On {
+                Ok(it.content.clone())
+            } else {
+                Err(anyhow::anyhow!("解密失败"))
+            }
+        })
+    }
+
+    /// 元数据 + 正文（编辑/导出等）。
+    pub fn get_view(&self, id: &str) -> anyhow::Result<MemoView> {
+        let it = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
+        let mut v = self.to_view_meta(it);
+        v.content = self.load_content(id)?;
+        v.content_loaded = true;
+        Ok(v)
+    }
+
     pub fn edit(&self, id: &str, title: &str, content: &str) -> anyhow::Result<()> {
         let prev = self
             .store
@@ -414,7 +448,8 @@ impl MemoService {
             id,
             title,
             content,
-            prev.visibility,
+            prev.space,
+            prev.lan_share,
             MemoLifecycle::Permanent,
             prev.category,
             &prev.due_date,
@@ -432,7 +467,8 @@ impl MemoService {
         id: &str,
         title: &str,
         content: &str,
-        visibility: MemoVisibility,
+        space: MemoSpace,
+        lan_share: LanShare,
         lifecycle: MemoLifecycle,
         category: MemoCategory,
         due_date: &str,
@@ -447,14 +483,18 @@ impl MemoService {
             .store
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
-        if prev.visibility == MemoVisibility::Private && prev.owner_fp != self.session_fp {
+        if prev.visibility == MemoVisibility::Private
+            && prev.lan_share == LanShare::Off
+            && prev.owner_fp != self.session_fp
+        {
             anyhow::bail!("无权编辑他人私密备忘");
         }
-        let (visibility, due_date, end_date) =
-            vis_dates_for_save(category, visibility, due_date, end_date);
+        let (due_date, end_date) = dates_for_save(category, due_date, end_date);
         let _ = lifecycle;
         let lifecycle = MemoLifecycle::Permanent;
-        let owner_fp = if visibility == MemoVisibility::Private {
+        let (_, _, lan_norm, visibility, _) =
+            normalize_memo_fields(category, space, lan_share, &due_date, tags);
+        let owner_fp = if visibility == MemoVisibility::Private || lan_norm == LanShare::Off {
             if prev.owner_fp.is_empty() {
                 self.session_fp.as_str()
             } else {
@@ -471,7 +511,8 @@ impl MemoService {
             &ct,
             &aid,
             &aname,
-            visibility,
+            space,
+            lan_share,
             owner_fp,
             lifecycle,
             category,
@@ -483,7 +524,7 @@ impl MemoService {
             remind_before_days,
             remind_seen_for,
         )?;
-        if item.visibility == MemoVisibility::Private {
+        if item.lan_share == LanShare::Off {
             self.push_private_backup(&item)?;
         }
         self.fire();
@@ -502,18 +543,13 @@ impl MemoService {
         if prev.remind_seen_for == prev.due_date {
             return Ok(());
         }
-        let plain = crypto::decrypt_string(&self.key, &prev.content).unwrap_or_else(|_| {
-            if prev.visibility == MemoVisibility::Public {
-                prev.content.clone()
-            } else {
-                String::new()
-            }
-        });
+        let plain = self.load_content(id).unwrap_or_default();
         self.edit_full(
             id,
             &prev.title,
             &plain,
-            prev.visibility,
+            prev.space,
+            prev.lan_share,
             MemoLifecycle::Permanent,
             prev.category,
             &prev.due_date,
@@ -531,18 +567,13 @@ impl MemoService {
             .store
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("备忘不存在"))?;
-        let plain = crypto::decrypt_string(&self.key, &prev.content).unwrap_or_else(|_| {
-            if prev.visibility == MemoVisibility::Public {
-                prev.content.clone()
-            } else {
-                String::new()
-            }
-        });
+        let plain = self.load_content(id).unwrap_or_default();
         self.edit_full(
             id,
             &prev.title,
             &plain,
-            prev.visibility,
+            prev.space,
+            prev.lan_share,
             MemoLifecycle::Permanent,
             prev.category,
             &prev.due_date,
@@ -569,7 +600,8 @@ impl MemoService {
             &ct,
             &aid,
             &aname,
-            view.visibility,
+            view.space,
+            view.lan_share,
             owner,
             MemoLifecycle::Permanent,
             view.category,
@@ -581,7 +613,7 @@ impl MemoService {
             view.remind_before_days,
             &view.remind_seen_for,
         )?;
-        if item.visibility == MemoVisibility::Private {
+        if item.lan_share == LanShare::Off {
             self.push_private_backup(&item)?;
         }
         self.fire();
@@ -589,7 +621,7 @@ impl MemoService {
     }
 
     fn push_private_backup(&self, item: &MemoItem) -> anyhow::Result<()> {
-        if !self.cfg.backup_enabled || item.visibility != MemoVisibility::Private {
+        if !self.cfg.backup_enabled || item.lan_share != LanShare::Off {
             return Ok(());
         }
         // 已彻底清除（无正文）不推托管密文
@@ -674,6 +706,13 @@ impl MemoService {
                 crate::hosted::HostedNavMeta::default()
             };
             let (aid, aname) = self.current_actor();
+            let (category, space, lan_share, visibility, tags) = normalize_memo_fields(
+                nav.category,
+                nav.space,
+                nav.lan_share,
+                &nav.due_date,
+                &nav.tags,
+            );
             let item = MemoItem {
                 id: blob.memo_id.clone(),
                 title: restored.title,
@@ -683,7 +722,9 @@ impl MemoService {
                 node_id: self.cfg.node_id.clone(),
                 modified_by_person_id: aid,
                 modified_by_name: aname,
-                visibility: MemoVisibility::Private,
+                visibility,
+                space,
+                lan_share,
                 owner_fp: self.session_fp.clone(),
                 modified_at: if blob.content_modified_at.is_empty() {
                     blob.updated_at.clone()
@@ -700,13 +741,13 @@ impl MemoService {
                 } else {
                     String::new()
                 },
-                category: nav.category,
+                category,
                 due_date: nav.due_date,
                 end_date: nav.end_date,
                 remind_before_days: nav.remind_before_days,
                 remind_seen_for: nav.remind_seen_for,
                 done: nav.done,
-                tags: nav.tags,
+                tags,
                 priority: nav.priority,
             };
             self.store.force_put_restored(item)?;
@@ -734,7 +775,10 @@ impl MemoService {
         let mut items = self.store.get_visible();
         items.extend(self.store.get_deleted());
         for item in items {
-            if item.visibility != MemoVisibility::Private {
+            if item.lan_share != LanShare::Off && item.visibility != MemoVisibility::Private {
+                continue;
+            }
+            if item.lan_share == LanShare::On {
                 continue;
             }
             if !item.owner_fp.is_empty() && item.owner_fp != self.session_fp {
@@ -840,6 +884,17 @@ impl MemoService {
         }
         self.fire();
         Ok(())
+    }
+
+    /// 一键清空回收站：彻底清除当前可见的全部已删条目。
+    pub fn empty_trash(&self) -> anyhow::Result<usize> {
+        let ids: Vec<_> = self.list_trash().into_iter().map(|m| m.id).collect();
+        let mut n = 0usize;
+        for id in ids {
+            self.purge_deleted(&id)?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// 扫描超期回收站项并彻底清除
@@ -1379,30 +1434,17 @@ mod restore_tests {
         (svc, dir, id)
     }
 
-    /// 与 shell::filter_memos 页签归属一致。
-    fn page_bucket(category: MemoCategory, due_date: &str) -> &'static str {
-        let c = category.canonical();
-        if c.is_gender_private() {
+    /// 与 shell 页签归属一致：私密看 space；普通栏看 category。
+    fn page_bucket(space: MemoSpace, category: MemoCategory, due_date: &str) -> &'static str {
+        if space == MemoSpace::Private {
             "private"
-        } else if c == MemoCategory::Credentials
-            || (is_archive_cat(c) && due_date.trim().is_empty())
+        } else if category.bucket() == MemoCategory::Credentials
+            || (category.legacy_tag().is_some() && due_date.trim().is_empty())
         {
             "memo"
         } else {
             "calendar"
         }
-    }
-
-    fn is_archive_cat(c: MemoCategory) -> bool {
-        matches!(
-            c,
-            MemoCategory::General
-                | MemoCategory::Work
-                | MemoCategory::Life
-                | MemoCategory::Finance
-                | MemoCategory::Emergency
-                | MemoCategory::Inspiration
-        )
     }
 
     #[test]
@@ -1411,20 +1453,39 @@ mod restore_tests {
         let key = svc.key.clone();
         let fp = svc.session_fp().to_string();
 
+        // (id, title, cat, space, due, expect_page, expect_cat_after)
         let cases = [
-            ("id-priv", "私密条", MemoCategory::GenderPrivate, "", "private"),
+            (
+                "id-priv",
+                "私密条",
+                MemoCategory::GenderPrivate,
+                MemoSpace::Private,
+                "",
+                "private",
+                MemoCategory::Credentials,
+            ),
             (
                 "id-todo",
                 "任务条",
                 MemoCategory::Todo,
+                MemoSpace::Normal,
                 "2026-10-21 10:00",
                 "calendar",
+                MemoCategory::Todo,
             ),
-            ("id-cred", "备忘条", MemoCategory::Credentials, "", "memo"),
+            (
+                "id-cred",
+                "备忘条",
+                MemoCategory::Credentials,
+                MemoSpace::Normal,
+                "",
+                "memo",
+                MemoCategory::Credentials,
+            ),
         ];
 
-        for (id, title, cat, due, expect) in cases {
-            assert_eq!(page_bucket(cat, due), expect);
+        for (id, title, cat, space, due, expect, _) in cases {
+            assert_eq!(page_bucket(space, cat, due), expect);
             let item = MemoItem {
                 id: id.into(),
                 title: title.into(),
@@ -1435,6 +1496,8 @@ mod restore_tests {
                 modified_by_person_id: String::new(),
                 modified_by_name: String::new(),
                 visibility: MemoVisibility::Private,
+                space,
+                lan_share: LanShare::Off,
                 owner_fp: fp.clone(),
                 modified_at: chrono::Local::now().to_rfc3339(),
                 lifecycle: MemoLifecycle::Permanent,
@@ -1472,11 +1535,12 @@ mod restore_tests {
         let n = svc.restore_from_hosted().unwrap();
         assert!(n >= 3);
 
-        for (id, _, cat, due, expect) in cases {
+        for (id, _, _, space, due, expect, expect_cat) in cases {
             let got = svc.store.get(id).expect("restored");
-            assert_eq!(got.category, cat);
+            assert_eq!(got.category, expect_cat);
+            assert_eq!(got.space, space);
             assert_eq!(got.due_date, due);
-            assert_eq!(page_bucket(got.category, &got.due_date), expect);
+            assert_eq!(page_bucket(got.space, got.category, &got.due_date), expect);
         }
 
         let _ = fs::remove_dir_all(&dir);
@@ -1489,9 +1553,10 @@ mod restore_tests {
             .add_full(
                 "本地私密",
                 "正文",
-                MemoVisibility::Private,
+                MemoSpace::Private,
+                LanShare::Off,
                 MemoLifecycle::Permanent,
-                MemoCategory::GenderPrivate,
+                MemoCategory::Todo,
                 "",
                 "",
                 &[],
@@ -1500,7 +1565,8 @@ mod restore_tests {
             )
             .unwrap();
         let local = svc.store.get(&id).unwrap();
-        assert_eq!(local.category, MemoCategory::GenderPrivate);
+        assert_eq!(local.category, MemoCategory::Todo);
+        assert_eq!(local.space, MemoSpace::Private);
 
         // 用更高版本的 v2 blob 覆盖（无导航元数据）
         let v2_json = serde_json::json!({
@@ -1532,7 +1598,9 @@ mod restore_tests {
         let n = svc.restore_from_hosted().unwrap();
         assert_eq!(n, 1);
         let got = svc.store.get(&id).unwrap();
-        assert_eq!(got.category, MemoCategory::GenderPrivate);
+        // v2 无导航元数据：保留本地 Todo + 私密空间
+        assert_eq!(got.category, MemoCategory::Todo);
+        assert_eq!(got.space, MemoSpace::Private);
         assert_eq!(got.title, "主机正文标题");
         let plain = crypto::decrypt_string(&svc.key, &got.content).unwrap();
         assert_eq!(plain, "主机新正文");

@@ -6,7 +6,7 @@ use chrono::{Datelike, NaiveDate};
 use eframe::egui::{self, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
 use memo_core::male_health::MaleHealthConfig;
 use memo_core::service::{MemoService, MemoView};
-use memo_core::store::{MemoCategory, MemoLifecycle, MemoPriority, MemoVisibility};
+use memo_core::store::{MemoCategory, MemoLifecycle, MemoPriority};
 use std::sync::Arc;
 
 const REF_DISCLAIMER: &str =
@@ -73,7 +73,7 @@ fn diary_memos(memos: &[MemoView]) -> Vec<&MemoView> {
     memos
         .iter()
         .filter(|m| {
-            m.category.is_gender_private()
+            (m.space == memo_core::store::MemoSpace::Private || m.category.is_gender_private())
                 && !m.due_date.is_empty()
                 && m.title != "经期日"
                 && m.title != "经期"
@@ -208,9 +208,10 @@ fn save_day_note(
             &m.id,
             &title,
             body,
-            MemoVisibility::Private,
+            memo_core::store::MemoSpace::Private,
+            memo_core::store::LanShare::Off,
             MemoLifecycle::Permanent,
-            MemoCategory::GenderPrivate,
+            MemoCategory::Todo,
             ymd,
             &m.end_date,
             m.done,
@@ -227,9 +228,10 @@ fn save_day_note(
     match svc.add_full(
         &title,
         body,
-        MemoVisibility::Private,
+        memo_core::store::MemoSpace::Private,
+        memo_core::store::LanShare::Off,
         MemoLifecycle::Permanent,
-        MemoCategory::GenderPrivate,
+        MemoCategory::Todo,
         ymd,
         "",
         &[],

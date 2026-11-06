@@ -4,7 +4,9 @@ use crate::date_field;
 use crate::doc_editor::{self, Doc};
 use crate::theme;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
-use memo_core::store::{MemoCategory, MemoPriority, MemoVisibility};
+use memo_core::store::{
+    LanShare, MemoCategory, MemoPriority, MemoSpace, MemoVisibility,
+};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -21,34 +23,11 @@ pub enum FormScope {
 
 pub fn categories_for(scope: FormScope) -> &'static [MemoCategory] {
     match scope {
-        FormScope::Open => &[
-            MemoCategory::Todo,
-            MemoCategory::Work,
-            MemoCategory::Credentials,
-            MemoCategory::Life,
-            MemoCategory::Finance,
-            MemoCategory::Emergency,
-            MemoCategory::Inspiration,
-            MemoCategory::GenderPrivate,
-        ],
-        FormScope::Calendar => &[
-            MemoCategory::Todo,
-            MemoCategory::Work,
-            MemoCategory::Life,
-            MemoCategory::Finance,
-            MemoCategory::Emergency,
-            MemoCategory::Inspiration,
-        ],
-        // 备忘页：永久档案类型（无待办 / 无性别私密）；不上日历
-        FormScope::Credentials => &[
-            MemoCategory::Credentials,
-            MemoCategory::Work,
-            MemoCategory::Life,
-            MemoCategory::Finance,
-            MemoCategory::Inspiration,
-            MemoCategory::Emergency,
-        ],
-        FormScope::GenderPrivate => &[MemoCategory::GenderPrivate],
+        FormScope::Open | FormScope::GenderPrivate => {
+            &[MemoCategory::Todo, MemoCategory::Credentials]
+        }
+        FormScope::Calendar => &[MemoCategory::Todo],
+        FormScope::Credentials => &[MemoCategory::Credentials],
     }
 }
 
@@ -69,18 +48,8 @@ pub fn kinds_for(scope: FormScope) -> &'static [DateKind] {
 }
 
 fn category_allowed(scope: FormScope, cat: MemoCategory) -> bool {
-    let c = if cat.is_gender_private() {
-        MemoCategory::GenderPrivate
-    } else {
-        cat.canonical()
-    };
-    categories_for(scope).iter().any(|&x| {
-        if x.is_gender_private() {
-            c.is_gender_private()
-        } else {
-            x.canonical() == c
-        }
-    })
+    let c = cat.bucket();
+    categories_for(scope).iter().any(|&x| x.bucket() == c)
 }
 
 fn kind_allowed(scope: FormScope, kind: DateKind) -> bool {
@@ -90,22 +59,22 @@ fn kind_allowed(scope: FormScope, kind: DateKind) -> bool {
 /// 通用跨分类快捷标签。
 const COMMON_TAGS: &[&str] = &["重要", "稍后", "已办", "跟进"];
 
-/// 当前分类下的预设标签。
-fn preset_tags_for(cat: MemoCategory) -> &'static [&'static str] {
-    match cat {
-        MemoCategory::Todo => &["待办", "提醒", "截止", "复盘", "清单"],
-        MemoCategory::Work | MemoCategory::Office => {
-            &["工作", "学习", "会议", "项目", "汇报", "培训", "周报"]
-        }
-        MemoCategory::Credentials => &["账号", "密码", "证件", "卡证", "证书", "到期", "双因素"],
-        MemoCategory::Life => &["家庭", "生活", "购物", "出行", "社交", "家务", "孩子"],
-        MemoCategory::Finance => &["财务", "订阅", "账单", "报销", "理财", "税费", "工资"],
-        MemoCategory::Emergency => &["应急", "紧急", "联系人", "备用", "急救", "疏散"],
-        MemoCategory::Inspiration => &["灵感", "想法", "收藏", "草稿", "摘录", "读书"],
-        MemoCategory::GenderPrivate | MemoCategory::WomenPrivate | MemoCategory::MalePrivate => {
-            &["健康", "经期", "体检", "用药", "日记", "私密", "伴侣"]
-        }
-        MemoCategory::General => &["备忘", "随手记", "杂项"],
+/// 当前分类桶下的预设标签（旧细类语义并入标签）。
+fn preset_tags_for(cat: MemoCategory, space: MemoSpace) -> &'static [&'static str] {
+    if space == MemoSpace::Private {
+        return &[
+            "私密", "健康", "经期", "体检", "用药", "日记", "伴侣", "工作", "生活", "财务",
+        ];
+    }
+    match cat.bucket() {
+        MemoCategory::Credentials => &[
+            "账号", "密码", "证件", "卡证", "证书", "到期", "双因素", "工作", "学习", "生活",
+            "财务", "订阅", "灵感", "应急", "随手记",
+        ],
+        _ => &[
+            "待办", "提醒", "截止", "复盘", "清单", "工作", "学习", "会议", "项目", "生活",
+            "财务", "应急", "灵感",
+        ],
     }
 }
 
@@ -146,7 +115,10 @@ pub struct MemoFormState {
     pub tags: String,
     pub doc: Doc,
     pub done: bool,
+    /// 兼容旧草稿；UI 以 space / lan_share 为准。
     pub visibility: MemoVisibility,
+    pub space: MemoSpace,
+    pub lan_share: LanShare,
     /// 附件目录用的备忘 id（新建时预生成，保存时沿用）
     pub attach_id: String,
     /// 数据目录（插图读写）；打开表单时填入
@@ -177,6 +149,8 @@ impl Default for MemoFormState {
             doc: Doc::empty(),
             done: false,
             visibility: MemoVisibility::Private,
+            space: MemoSpace::Normal,
+            lan_share: LanShare::Off,
             attach_id: String::new(),
             data_dir: None,
             scope: FormScope::Open,
@@ -210,10 +184,17 @@ impl MemoFormState {
                 .copied()
                 .unwrap_or(MemoCategory::Todo)
         };
+        let space = match scope {
+            FormScope::GenderPrivate => MemoSpace::Private,
+            _ => MemoSpace::Normal,
+        };
         let mut s = Self {
             category,
             due_date: prefill_due.unwrap_or("").to_string(),
             scope,
+            space,
+            lan_share: LanShare::Off,
+            visibility: MemoVisibility::Private,
             attach_id: Uuid::new_v4().to_string().replace('-', ""),
             ..Self::default()
         };
@@ -239,6 +220,8 @@ impl MemoFormState {
         tags: &str,
         done: bool,
         visibility: MemoVisibility,
+        space: MemoSpace,
+        lan_share: LanShare,
         remind_before_days: u32,
         memo_id: &str,
     ) -> Self {
@@ -253,6 +236,8 @@ impl MemoFormState {
             doc: Doc::from_store(title, body),
             done,
             visibility,
+            space,
+            lan_share,
             attach_id: if memo_id.trim().is_empty() {
                 Uuid::new_v4().to_string().replace('-', "")
             } else {
@@ -263,8 +248,29 @@ impl MemoFormState {
             focus_title: false,
             force_scroll_top: 0,
             flash_title_frames: 0,
-            auto_title: title.to_string(),
-            auto_body: body.to_string(),
+            // 勿把已加载正文当作模板基线，否则改分类会误判 pristine 并整段覆盖
+            auto_title: String::new(),
+            auto_body: String::new(),
+        };
+        let raw_cat = category;
+        if raw_cat.is_gender_private() {
+            s.space = MemoSpace::Private;
+            s.lan_share = LanShare::Off;
+            s.category = raw_cat.for_store_with_due(due);
+            append_tag(&mut s.tags, "私密");
+        } else {
+            s.category = category.bucket();
+            if let Some(tag) = raw_cat.legacy_tag() {
+                append_tag(&mut s.tags, tag);
+            }
+        }
+        if s.space == MemoSpace::Private {
+            s.lan_share = LanShare::Off;
+        }
+        s.visibility = if s.lan_share.is_on() {
+            MemoVisibility::Public
+        } else {
+            MemoVisibility::Private
         };
         s.sync_kind_fields();
         s
@@ -273,13 +279,12 @@ impl MemoFormState {
     fn sync_kind_fields(&mut self) {
         match self.kind {
             DateKind::Credentials => {
-                // 备忘页作用域：保留用户选的类型，仅清日期；账号证件仍强制私密
-                if self.scope != FormScope::Credentials {
+                // 备忘：清日期；不上局域网明文
+                if self.scope != FormScope::Credentials && self.scope != FormScope::GenderPrivate {
                     self.category = MemoCategory::Credentials;
-                    self.visibility = MemoVisibility::Private;
-                } else if self.category.canonical() == MemoCategory::Credentials {
-                    self.visibility = MemoVisibility::Private;
                 }
+                self.lan_share = LanShare::Off;
+                self.visibility = MemoVisibility::Private;
                 self.due_date.clear();
                 self.end_date.clear();
                 self.remind_before_days = 0;
@@ -415,15 +420,17 @@ impl MemoFormState {
         if self.category == cat {
             return;
         }
+        let cat = cat.bucket();
         if !category_allowed(self.scope, cat) {
             return;
         }
         self.category = cat;
         self.apply_template(stamp, false);
-        if cat.is_gender_private() || cat.canonical() == MemoCategory::Credentials {
+        if cat == MemoCategory::Credentials {
+            self.lan_share = LanShare::Off;
             self.visibility = MemoVisibility::Private;
         }
-        if cat.canonical() == MemoCategory::Credentials {
+        if cat == MemoCategory::Credentials {
             if kind_allowed(self.scope, DateKind::Credentials) {
                 self.kind = DateKind::Credentials;
             }
@@ -445,7 +452,7 @@ impl MemoFormState {
 }
 
 fn infer_kind(category: MemoCategory, due: &str, end: &str) -> DateKind {
-    if category.canonical() == MemoCategory::Credentials {
+    if category.bucket() == MemoCategory::Credentials {
         return DateKind::Credentials;
     }
     if due.trim().is_empty() {
@@ -468,48 +475,24 @@ fn today_ymd() -> String {
 }
 
 pub fn category_icon(cat: MemoCategory) -> &'static str {
-    match cat {
-        MemoCategory::Todo => "📌",
-        MemoCategory::Work | MemoCategory::Office => "💼",
+    match cat.bucket() {
         MemoCategory::Credentials => "🔑",
-        MemoCategory::Life => "🏠",
-        MemoCategory::Finance => "💰",
-        MemoCategory::Emergency => "🚨",
-        MemoCategory::Inspiration => "💡",
-        MemoCategory::GenderPrivate | MemoCategory::WomenPrivate | MemoCategory::MalePrivate => "🔒",
-        MemoCategory::General => "📋",
+        MemoCategory::GenderPrivate => "🔒",
+        _ => "📌",
     }
 }
 
 fn category_desc(cat: MemoCategory) -> &'static str {
-    match cat {
-        MemoCategory::Todo => "待办、提醒与截止日期",
-        MemoCategory::Work | MemoCategory::Office => "工作、学习与项目记录",
-        MemoCategory::Credentials => "账号、密码、证件与卡证",
-        MemoCategory::Life => "家庭、出行与日常记事",
-        MemoCategory::Finance => "账单、订阅与收支",
-        MemoCategory::Emergency => "应急联系人与预案",
-        MemoCategory::Inspiration => "想法、摘录与草稿",
-        MemoCategory::GenderPrivate | MemoCategory::WomenPrivate | MemoCategory::MalePrivate => {
-            "加密私密：健康与日记"
-        }
-        MemoCategory::General => "未归类随手记",
+    match cat.bucket() {
+        MemoCategory::Credentials => "账号、密码、证件与随手备忘",
+        _ => "待办、提醒与截止日期",
     }
 }
 
 fn title_hint(cat: MemoCategory) -> &'static str {
-    match cat {
-        MemoCategory::Todo => "一句话说清要做什么",
+    match cat.bucket() {
         MemoCategory::Credentials => "例如：某网站账号 / 身份证",
-        MemoCategory::Work | MemoCategory::Office => "工作或学习主题",
-        MemoCategory::Life => "生活记事标题",
-        MemoCategory::Finance => "账单 / 订阅名称",
-        MemoCategory::GenderPrivate | MemoCategory::WomenPrivate | MemoCategory::MalePrivate => {
-            "私密备注标题"
-        }
-        MemoCategory::Emergency => "紧急情况一句话",
-        MemoCategory::Inspiration => "灵感一句话",
-        MemoCategory::General => "备忘标题",
+        _ => "一句话说清要做什么",
     }
 }
 
@@ -545,13 +528,12 @@ fn append_tag(tags_str: &mut String, tag: &str) {
     *tags_str = format_tags(&tags);
 }
 
-/// 导航 → 新建默认分类。
+/// 导航 → 新建默认分类（三类桶）。
 #[allow(dead_code)]
 pub fn default_category_for_nav(nav_category: Option<MemoCategory>) -> MemoCategory {
     match nav_category {
-        Some(MemoCategory::General) | None => MemoCategory::Todo,
-        Some(c) if c.is_gender_private() => MemoCategory::GenderPrivate,
-        Some(c) => c.canonical(),
+        Some(c) => c.bucket(),
+        None => MemoCategory::Todo,
     }
 }
 
@@ -955,12 +937,26 @@ pub fn show_fields(
         state.scope
     };
     let cats = categories_for(scope);
-    let gender_locked = state.category.is_gender_private();
-    let cred_locked = state.kind == DateKind::Credentials
-        || state.category.canonical() == MemoCategory::Credentials;
-    if gender_locked || cred_locked {
-        state.visibility = MemoVisibility::Private;
+    if state.space == MemoSpace::Private || state.scope == FormScope::GenderPrivate {
+        state.space = MemoSpace::Private;
+        state.lan_share = LanShare::Off;
     }
+    if state.kind == DateKind::Credentials
+        || state.category.bucket() == MemoCategory::Credentials
+    {
+        state.lan_share = LanShare::Off;
+    }
+    state.visibility = if state.lan_share.is_on() {
+        MemoVisibility::Public
+    } else {
+        MemoVisibility::Private
+    };
+    let space_locked = state.scope == FormScope::GenderPrivate
+        || state.scope == FormScope::Calendar
+        || state.scope == FormScope::Credentials;
+    let lan_locked = state.space == MemoSpace::Private
+        || state.kind == DateKind::Credentials
+        || state.category.bucket() == MemoCategory::Credentials;
     let w = form_w(ui).max(1.0);
     // 抽屉动画极窄时勿强行 set_width 超过 available；双列至少约 100 才画完整表单
     let w = w.min(ui.available_width().max(1.0));
@@ -1071,27 +1067,30 @@ pub fn show_fields(
         );
     });
 
-    // —— 分类 | 这是 ——（两列同结构：标签 + 固定间隙 + 等高控件，中线对齐）
-    let selected_cat = if state.category.is_gender_private() {
-        MemoCategory::GenderPrivate
-    } else {
-        state.category.canonical()
-    };
+    // —— 分类 | 这是 ——（仅 Open 编辑显示分类下拉；新建按页签锁定时隐藏）
+    let selected_cat = state.category.bucket();
     let col_gap = 8.0;
     let row_w = fit_col_width(ui, w);
-    let half = split_cols(row_w, 2, col_gap);
+    let show_cat_combo = cats.len() > 1;
+    let half = if show_cat_combo {
+        split_cols(row_w, 2, col_gap)
+    } else {
+        row_w
+    };
     ui.horizontal(|ui| {
         ui.set_max_width(row_w);
         ui.spacing_mut().item_spacing.x = col_gap;
-        ui.vertical(|ui| {
-            let half = fit_col_width(ui, half);
-            ui.set_max_width(half);
-            ui.set_width(half);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            field_label(ui, "分类", false);
-            ui.add_space(2.0);
-            show_category_combo(ui, id_salt, cats, selected_cat, &stamp, state);
-        });
+        if show_cat_combo {
+            ui.vertical(|ui| {
+                let half = fit_col_width(ui, half);
+                ui.set_max_width(half);
+                ui.set_width(half);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                field_label(ui, "分类", false);
+                ui.add_space(2.0);
+                show_category_combo(ui, id_salt, cats, selected_cat, &stamp, state);
+            });
+        }
         ui.vertical(|ui| {
             let half = fit_col_width(ui, half);
             ui.set_max_width(half);
@@ -1161,11 +1160,11 @@ pub fn show_fields(
         });
     }
 
-    // —— 可见性（说明另起一行，避免右缘裁切）——
+    // —— 空间 | 局域网共享 ——
     ui.vertical(|ui| {
         ui.set_max_width(row_w);
         ui.spacing_mut().item_spacing.y = 2.0;
-        field_label(ui, "可见性", false);
+        field_label(ui, "空间与共享", false);
         Frame::none()
             .fill(theme::panel())
             .stroke(Stroke::new(1.0, theme::border()))
@@ -1175,15 +1174,25 @@ pub fn show_fields(
                 ui.set_max_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    ui.add_enabled_ui(!(gender_locked || cred_locked), |ui| {
-                        ui.radio_value(&mut state.visibility, MemoVisibility::Private, "私密");
-                        ui.radio_value(&mut state.visibility, MemoVisibility::Public, "公开");
+                    ui.add_enabled_ui(!space_locked, |ui| {
+                        ui.radio_value(&mut state.space, MemoSpace::Normal, "普通");
+                        ui.radio_value(&mut state.space, MemoSpace::Private, "私密空间");
                     });
                 });
-                let note = if gender_locked {
-                    Some("性别私密固定私密")
-                } else if cred_locked {
-                    Some("备忘固定私密")
+                if state.space == MemoSpace::Private {
+                    state.lan_share = LanShare::Off;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.add_enabled_ui(!lan_locked, |ui| {
+                        ui.radio_value(&mut state.lan_share, LanShare::Off, "不共享");
+                        ui.radio_value(&mut state.lan_share, LanShare::On, "局域网共享");
+                    });
+                });
+                let note = if state.space == MemoSpace::Private {
+                    Some("私密空间条目不上普通栏，且不可局域网共享")
+                } else if lan_locked {
+                    Some("备忘默认不局域网共享")
                 } else {
                     None
                 };
@@ -1221,7 +1230,7 @@ pub fn show_fields(
                 state.tags = format_tags(&tags);
             }
             ui.spacing_mut().button_padding = egui::vec2(7.0, 1.5);
-            let cat_tags = preset_tags_for(state.category);
+            let cat_tags = preset_tags_for(state.category, state.space);
             for t in cat_tags.iter().chain(COMMON_TAGS.iter()).take(6) {
                 let chip = ui.add(
                     egui::Button::new(
@@ -1281,7 +1290,6 @@ mod tests {
         ] {
             let cat = match scope {
                 FormScope::Credentials => MemoCategory::Credentials,
-                FormScope::GenderPrivate => MemoCategory::GenderPrivate,
                 _ => MemoCategory::Todo,
             };
             let mut create = MemoFormState::begin_create(cat, stamp, None, scope);
@@ -1295,6 +1303,8 @@ mod tests {
                 "标签",
                 false,
                 MemoVisibility::Private,
+                MemoSpace::Normal,
+                LanShare::Off,
                 0,
                 "deadbeefcafe",
             );

@@ -44,7 +44,11 @@ pub struct FormSnapshot {
 
 impl EditorSession {
     pub fn worth_keeping(&self) -> bool {
-        self.show_new_memo || self.editing || self.selected.is_some()
+        // 非默认「任务」页签也要保留，否则锁定重进顶栏会掉回任务
+        self.show_new_memo
+            || self.editing
+            || self.selected.is_some()
+            || self.nav != "calendar"
     }
 }
 
@@ -156,6 +160,16 @@ pub fn form_snapshot(form: &MemoFormState) -> FormSnapshot {
 }
 
 pub fn form_from_snapshot(snap: &FormSnapshot, data_dir: &Path) -> MemoFormState {
+    let space = if snap.scope == "gender_private" {
+        memo_core::store::MemoSpace::Private
+    } else {
+        memo_core::store::MemoSpace::Normal
+    };
+    let lan = if snap.visibility == MemoVisibility::Public {
+        memo_core::store::LanShare::On
+    } else {
+        memo_core::store::LanShare::Off
+    };
     let mut form = MemoFormState::load_from_drafts(
         snap.category,
         &snap.title,
@@ -166,6 +180,8 @@ pub fn form_from_snapshot(snap: &FormSnapshot, data_dir: &Path) -> MemoFormState
         &snap.tags,
         snap.done,
         snap.visibility,
+        space,
+        lan,
         snap.remind_before_days,
         &snap.attach_id,
     );

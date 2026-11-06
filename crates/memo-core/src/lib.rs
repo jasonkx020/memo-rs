@@ -41,6 +41,7 @@ pub use male_health::{MaleHealthConfig, MaleHealthStore};
 pub use person::{Gender, Person, PersonView};
 pub use service::{HistoryEvent, HistorySnapshot, MemoService, MemoView, TRASH_RETENTION_DAYS};
 pub use store::{
-    ConflictNotice, MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoVisibility,
+    ConflictNotice, LanShare, MemoCategory, MemoItem, MemoLifecycle, MemoPriority, MemoSpace,
+    MemoVisibility,
 };
 pub use hosted::BackupMetaItem;
