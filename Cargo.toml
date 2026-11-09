@@ -12,7 +12,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
-# 全部钉死 2024 年初版本，避免 Cargo 拉到 edition2024 依赖（1.77 无法解析）
+# 依赖钉死：同一 Cargo.lock 需同时满足
+# - Windows Win7 绿色包：rustc 1.77.2（pack-green.bat）
+# - Linux/macOS：较新 stable（可编译这些钉死版本）
+# 勿随意 cargo update 拉高会用到 edition2024 的传递依赖。
 [workspace.dependencies]
 memo-core = { path = "crates/memo-core" }
 memo-sync = { path = "crates/memo-sync" }
