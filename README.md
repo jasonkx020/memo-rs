@@ -8,20 +8,34 @@ AES-256-GCM、Argon2id、Ed25519 审计链、LWW-Map、Tokio TCP、egui。
 用 **Rust 1.77.2 + crt-static** 打出的绿色包可在 **Windows 7 SP1 / 8 / 10 / 11（64 位）** 运行。  
 若出现 **`ProcessPrng` / `bcryptprimitives.dll`**，说明拿到的是用更新版 Rust 编的 exe，请改用本仓库 `pack-green.bat` / `dist\memo.exe`。
 
-## 绿色包构建（Windows）
+## 绿色包构建
+
+**Windows**（Rust 1.77.2 + 静态 CRT，见 `.cargo/config.toml`）：
 
 ```bat
 pack-green.bat
 ```
 
-或：
+产物：`dist\memo.exe`。目标机一般不必再装 VC++ Redistributable。
+
+**Linux**：
 
 ```bash
-cargo build -p memo-cli --release
-# 复制 target/release/memo.exe 即可分发
+chmod +x pack-green.sh   # 首次
+./pack-green.sh
 ```
 
-已配置 **静态链接 CRT**（`.cargo/config.toml`），一般不必再装 VC++ Redistributable。  
+**macOS**：
+
+```bash
+chmod +x pack-green-macos.sh   # 首次
+./pack-green-macos.sh
+```
+
+产物均为 `dist/memo`。GUI 需本机 OpenGL；无窗口主节点见 [docs/server-node.md](docs/server-node.md)。  
+Apple Silicon 与 Intel 需分别在对应机器构建（或自行交叉编译）。
+
+或手动：`cargo build -p memo-cli --release`。  
 渲染使用 **OpenGL(glow)**，降低对新显卡驱动的依赖。
 
 ## 设置路径
