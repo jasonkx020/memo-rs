@@ -1,17 +1,20 @@
 //! 系统托盘：关主窗隐藏到托盘；菜单「显示主窗口 / 退出」。
 //!
+//! 平台：Windows / macOS / Linux（Ubuntu 等桌面，依赖 GTK + AppIndicator）。
+//! 无桌面服务器可用 `--no-default-features` 关掉 `tray` 特性以免链 GTK。
+//!
 //! 重要：Windows 上 **不要** 用 `ViewportCommand::Visible(false)`——eframe/winit
 //! 隐藏后不再派发重绘（见 egui#5229）。改为 Win32 `ShowWindow(SW_HIDE/SW_RESTORE)`。
-//!
-//! - 最小化：系统默认（本模块不拦截）
-//! - 关窗 ×：`hide_main_window` 进托盘
-//! - 托盘退出：**不重显主窗**，置位后无闪唤醒，由 `update` dispose + `process::exit`
 
-use crate::app_icon;
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::OnceLock;
+
+#[cfg(feature = "tray")]
+use crate::app_icon;
+#[cfg(feature = "tray")]
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+#[cfg(feature = "tray")]
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 static SHOW_MAIN: AtomicBool = AtomicBool::new(false);
@@ -19,41 +22,55 @@ static QUIT_APP: AtomicBool = AtomicBool::new(false);
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(feature = "tray")]
 static MENU_SHOW_ID: OnceLock<String> = OnceLock::new();
+#[cfg(feature = "tray")]
 static MENU_QUIT_ID: OnceLock<String> = OnceLock::new();
 static EGUI_CTX: OnceLock<egui::Context> = OnceLock::new();
+#[cfg(feature = "tray")]
 static HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 pub struct TrayHandle {
+    #[cfg(feature = "tray")]
     tray: TrayIcon,
 }
 
 impl TrayHandle {
     /// 卸载托盘图标（须在 UI 线程、且不在 TrackPopupMenu 嵌套泵内调用）。
     pub fn dispose(self) {
-        let _ = self.tray.set_visible(false);
-        drop(self.tray);
+        #[cfg(feature = "tray")]
+        {
+            let _ = self.tray.set_visible(false);
+            drop(self.tray);
+        }
     }
 }
 
 pub fn create() -> Option<TrayHandle> {
-    install_event_handlers();
-    let icon = load_tray_icon()?;
-    let menu = Menu::new();
-    let show = MenuItem::new("显示主窗口", true, None);
-    let quit = MenuItem::new("退出", true, None);
-    let _ = MENU_SHOW_ID.set(show.id().0.clone());
-    let _ = MENU_QUIT_ID.set(quit.id().0.clone());
-    let _ = menu.append(&show);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&quit);
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_tooltip("分布式备忘录")
-        .with_icon(icon)
-        .build()
-        .ok()?;
-    Some(TrayHandle { tray })
+    #[cfg(feature = "tray")]
+    {
+        install_event_handlers();
+        let icon = load_tray_icon()?;
+        let menu = Menu::new();
+        let show = MenuItem::new("显示主窗口", true, None);
+        let quit = MenuItem::new("退出", true, None);
+        let _ = MENU_SHOW_ID.set(show.id().0.clone());
+        let _ = MENU_QUIT_ID.set(quit.id().0.clone());
+        let _ = menu.append(&show);
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&quit);
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("分布式备忘录")
+            .with_icon(icon)
+            .build()
+            .ok()?;
+        Some(TrayHandle { tray })
+    }
+    #[cfg(not(feature = "tray"))]
+    {
+        None
+    }
 }
 
 pub fn bind_context(ctx: &egui::Context) {
@@ -146,8 +163,6 @@ fn wake_ui() {
     }
 }
 
-/// 退出唤醒：不 SW_SHOW/RESTORE（仿微信，不重显主窗）。
-/// iconic 时用 SetWindowPlacement(SW_HIDE) 清挂起，便于 eframe 跑到 update。
 fn wake_for_quit() {
     #[cfg(windows)]
     {
@@ -185,6 +200,7 @@ fn wake_for_quit() {
     }
 }
 
+#[cfg(feature = "tray")]
 fn request_show_main() {
     if QUIT_APP.load(Ordering::SeqCst) {
         wake_for_quit();
@@ -194,16 +210,13 @@ fn request_show_main() {
     show_main_window();
 }
 
-/// tray-icon Windows：隐藏托盘图标的自定义消息（platform_impl WM_USER_HIDE_TRAYICON）。
 #[cfg(windows)]
 const WM_USER_HIDE_TRAYICON: u32 = 6006;
 
-/// 不依赖 eframe `update` 的强制退出（仿微信：不重显主窗）。
-/// 先尽力唤醒主循环落盘；超时后 SendMessage 让托盘窗 NIM_DELETE，再 exit。
+#[cfg(feature = "tray")]
 fn force_quit_process() {
     QUIT_APP.store(true, Ordering::SeqCst);
     wake_for_quit();
-    // 给 update 快路径约 300ms 落盘；若已 exit，本线程随之消失
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     #[cfg(windows)]
@@ -212,7 +225,6 @@ fn force_quit_process() {
         let cls = to_wide("tray_icon_app");
         let hwnd = FindWindowW(cls.as_ptr(), std::ptr::null());
         if hwnd != 0 {
-            // 同步切到 UI 线程执行 NIM_DELETE，不依赖 RedrawRequested
             SendMessageW(hwnd, WM_USER_HIDE_TRAYICON, 0, 0);
         }
     }
@@ -220,6 +232,7 @@ fn force_quit_process() {
     std::process::exit(0);
 }
 
+#[cfg(feature = "tray")]
 fn install_event_handlers() {
     if HANDLERS_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
@@ -241,7 +254,6 @@ fn install_event_handlers() {
         if MENU_SHOW_ID.get().map(|s| s.as_str()) == Some(id) {
             request_show_main();
         } else if MENU_QUIT_ID.get().map(|s| s.as_str()) == Some(id) {
-            // 避开 TrackPopupMenu 嵌套泵；延迟后强制退出（不 SW_SHOW）
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 force_quit_process();
@@ -333,6 +345,7 @@ unsafe fn animate_window_from_tray(hwnd: windows_sys::Win32::Foundation::HWND) {
     DrawAnimatedRects(hwnd, 3, &from, &to);
 }
 
+#[cfg(feature = "tray")]
 fn load_tray_icon() -> Option<Icon> {
     let img = image::load_from_memory(app_icon::APP_ICON_PNG)
         .ok()?

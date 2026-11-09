@@ -30,7 +30,17 @@ chmod +x pack-green.sh pack-green-macos.sh   # 首次
 ./pack-green-macos.sh      # macOS
 ```
 
-产物：`dist/memo`。GUI 需本机 OpenGL；无窗口主节点见 [docs/server-node.md](docs/server-node.md)。  
+托盘默认开启，兼容 **Windows / macOS / Ubuntu** 桌面。Linux（Ubuntu）需系统开发包：
+
+```bash
+sudo apt install build-essential pkg-config libgl1-mesa-dev \
+  libgtk-3-dev libgdk-pixbuf2.0-dev libayatana-appindicator3-dev \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+```
+
+无桌面服务器（不装 GTK）可关托盘再编：`MEMO_NO_TRAY=1 ./pack-green.sh`。
+
+产物：`dist/memo`。GUI 需本机 OpenGL；无窗口主节点：`memo --no-ui --identity <指纹>`。  
 Apple Silicon 与 Intel 需分别在对应机器构建（或自行交叉编译）。
 
 依赖版本为兼容 Win7 构建做了钉死（同一 `Cargo.lock`）；Linux/macOS 仍用新 rustc 编译这些依赖即可。  

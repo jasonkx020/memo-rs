@@ -3,6 +3,12 @@ name = "memo-app"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["tray"]
+# Windows / macOS / Ubuntu 桌面托盘；无 GTK 的纯服务器可关：
+#   cargo build -p memo-cli --no-default-features
+tray = ["dep:tray-icon"]
+
 [dependencies]
 memo-core = { workspace = true }
 memo-sync = { workspace = true }
@@ -17,9 +23,9 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 lunar_rust = { workspace = true }
 chrono-tz = { workspace = true }
-tray-icon = { workspace = true }
 raw-window-handle = "0.6"
-# 钉住传递依赖，阻止 Cargo 拉 edition2024 / 高 MSRV 包（rustc 1.77.2）
+tray-icon = { workspace = true, optional = true }
+# 钉住传递依赖，阻止 Cargo 拉 edition2024 / 高 MSRV 包（1.77 Win7 绿色包）
 url = { workspace = true }
 idna = { workspace = true }
 home = { workspace = true }

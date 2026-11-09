@@ -7,10 +7,15 @@ edition.workspace = true
 name = "memo"
 path = "src/main.rs"
 
+[features]
+default = ["tray"]
+# 透传桌面托盘（Win / macOS / Ubuntu）；无 GTK 的服务器：--no-default-features
+tray = ["memo-app/tray"]
+
 [dependencies]
 memo-core = { workspace = true }
 memo-sync = { workspace = true }
-memo-app = { workspace = true }
+memo-app = { workspace = true, default-features = false }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rpassword = { workspace = true }
