@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Linux 对应 pack-green.bat：发布构建并复制到 dist/
+# 需使用仓库 rust-toolchain.toml（1.77.2）；勿随意 cargo update（会拉到 edition2024 依赖）
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "[1/2] 发布构建（memo-cli --release）..."
-cargo build -p memo-cli --release
+echo "[1/2] 发布构建（memo-cli --release，toolchain=$(rustc -V)）..."
+cargo build -p memo-cli --release --locked
 
 mkdir -p dist
 cp -f target/release/memo dist/memo

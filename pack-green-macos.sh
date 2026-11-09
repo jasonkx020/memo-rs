@@ -9,8 +9,9 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 ARCH="$(uname -m)"
-echo "[1/2] 发布构建（memo-cli --release，宿主机架构: ${ARCH}）..."
-cargo build -p memo-cli --release
+echo "[1/2] 发布构建（memo-cli --release，宿主机架构: ${ARCH}，toolchain=$(rustc -V)）..."
+# 勿随意 cargo update：会拉到 edition2024 依赖，与 rust-toolchain 1.77.2 不兼容
+cargo build -p memo-cli --release --locked
 
 mkdir -p dist
 cp -f target/release/memo dist/memo
