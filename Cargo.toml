@@ -32,7 +32,7 @@ ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 zeroize = { version = "=1.7.0", features = ["derive"] }
 zeroize_derive = "=1.4.2"
 directories = "=5.0.1"
-tokio = { version = "=1.37.0", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio = { version = "=1.37.0", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 parking_lot = "=0.12.1"
 uuid = { version = "=1.8.0", features = ["v4"] }
 chrono = { version = "=0.4.35", default-features = false, features = ["clock", "std"] }

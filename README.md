@@ -36,8 +36,10 @@ cargo build -p memo-cli --release
 
 ```bash
 memo.exe              # GUI（无黑框）
-memo.exe --headless   # 控制台守护
+memo --no-ui --identity <指纹>   # 无窗口主节点（服务器）
 ```
+
+Linux 无 `DISPLAY`/`WAYLAND_DISPLAY` 时自动走无 UI，并默认主机角色。详见 [docs/server-node.md](docs/server-node.md)。
 
 ### 双机联调（局域网自动发现）
 

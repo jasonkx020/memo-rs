@@ -1,0 +1,19 @@
+[Unit]
+Description=Distributed Memo master node (no-ui)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=memo
+Group=memo
+WorkingDirectory=/var/lib/memo
+# 将 identity 换成实际指纹；密码用 EnvironmentFile，勿写入本单元明文仓库副本
+EnvironmentFile=-/etc/memo/memo.env
+ExecStart=/usr/local/bin/memo --no-ui --identity ${MEMO_IDENTITY}
+Restart=on-failure
+RestartSec=5
+# 可选：LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

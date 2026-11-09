@@ -1,0 +1,28 @@
+#[test]
+fn smoke_show_fields_create_drawer_widths() {
+    use crate::memo_form::{self, FormMode, FormScope, MemoFormState};
+    let ctx = eframe::egui::Context::default();
+    let stamp = "2026-10-21";
+    for scope in [FormScope::Credentials, FormScope::Calendar, FormScope::GenderPrivate, FormScope::Open] {
+        let cat = match scope {
+            FormScope::Credentials => memo_core::store::MemoCategory::Credentials,
+            FormScope::GenderPrivate => memo_core::store::MemoCategory::GenderPrivate,
+            _ => memo_core::store::MemoCategory::Todo,
+        };
+        let mut form = MemoFormState::begin_create(cat, stamp, None, scope);
+        for &w in &[16.0f32, 48.0, 120.0, 280.0, 420.0] {
+            let mut input = eframe::egui::RawInput::default();
+            input.screen_rect = Some(eframe::egui::Rect::from_min_size(
+                eframe::egui::Pos2::ZERO,
+                eframe::egui::vec2(900.0, 700.0),
+            ));
+            let _ = ctx.begin_frame(input);
+            eframe::egui::CentralPanel::default().show(&ctx, |ui| {
+                ui.set_max_width(w);
+                ui.set_width(w);
+                memo_form::show_fields(ui, &mut form, FormMode::Create, "smoke_new");
+            });
+            let _ = ctx.end_frame();
+        }
+    }
+}

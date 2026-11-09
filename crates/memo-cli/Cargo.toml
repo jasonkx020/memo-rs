@@ -14,7 +14,7 @@ memo-app = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rpassword = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 zeroize = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

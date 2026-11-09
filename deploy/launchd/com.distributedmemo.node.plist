@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.distributedmemo.node</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/memo</string>
+    <string>--no-ui</string>
+    <string>--identity</string>
+    <string>REPLACE_WITH_FINGERPRINT</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MEMO_LOGIN_PASSWORD</key>
+    <string>REPLACE_WITH_PASSWORD</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/memo-node.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/memo-node.err</string>
+</dict>
+</plist>
