@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Memo · UI 效果稿</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@600&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="rail" aria-label="主导航">
+      <div class="brand">
+        <span class="brand-name">Memo</span>
+        <span class="brand-tag">效果稿</span>
+      </div>
+
+      <nav class="nav">
+        <div class="nav-group">
+          <button class="nav-btn active" data-view="today" type="button">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 11.5 12 4l8 7.5V20a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1z"/></svg>
+            </span>
+            <span class="nav-label">今日</span>
+            <span class="nav-badge" id="badge-today">3</span>
+          </button>
+          <button class="nav-btn" data-view="calendar" type="button">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+            </span>
+            <span class="nav-label">日历</span>
+          </button>
+          <button class="nav-btn" data-view="memos" type="button">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M7 4h7l5 5v11a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M14 4v5h5"/></svg>
+            </span>
+            <span class="nav-label">备忘</span>
+          </button>
+          <button class="nav-btn" data-view="private" type="button">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+            </span>
+            <span class="nav-label">私密</span>
+          </button>
+        </div>
+
+        <div class="nav-sep"></div>
+
+        <div class="nav-group">
+          <button class="nav-btn" data-view="nodes" type="button">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.2 11.2 15.5 7.2M8.2 12.8l7.3 4"/></svg>
+            </span>
+            <span class="nav-label">节点</span>
+            <span class="nav-dot" title="有节点在线" aria-label="在线"></span>
+          </button>
+          <button class="nav-btn" data-view="settings" type="button">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M3 12h2.2M18.8 12H21M4.9 19.1l1.6-1.6M17.5 6.5l1.6-1.6"/></svg>
+            </span>
+            <span class="nav-label">设置</span>
+          </button>
+        </div>
+
+        <div class="rail-foot">
+          <div class="nav-sep"></div>
+          <button class="nav-btn quiet" data-view="trash" type="button">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M8 7l1 13h6l1-13"/></svg>
+            </span>
+            <span class="nav-label">回收站</span>
+          </button>
+          <button class="nav-btn quiet" id="btn-lock" type="button" title="锁定">
+            <span class="nav-ico" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/><circle cx="12" cy="16" r="1.2"/></svg>
+            </span>
+            <span class="nav-label">锁定</span>
+          </button>
+        </div>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <div class="page-title" id="page-title">今日</div>
+        </div>
+        <label class="search" aria-label="搜索">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="search" type="search" placeholder="搜索标题、标签…" autocomplete="off" />
+        </label>
+        <div class="top-actions">
+          <div class="identity" title="当前身份">
+            <span class="avatar">本</span>
+            <span class="identity-meta">
+              <span class="identity-name">本顿</span>
+              <span class="identity-lock" id="lock-timer">02:47 后锁定</span>
+            </span>
+          </div>
+          <button class="btn btn-primary" id="btn-new" type="button">新建</button>
+        </div>
+      </header>
+
+      <div class="content" id="content">
+        <!-- 今日 -->
+        <section class="view active" id="view-today" data-title="今日">
+          <div class="today-hero">
+            <div>
+              <div class="today-date" id="today-date">11 月 23 日 · 周一</div>
+              <div class="today-desc">先处理过期与今日到期，其它可以稍后再说。</div>
+            </div>
+            <button class="btn btn-soft" type="button" data-open-create>快速记下</button>
+          </div>
+          <div class="hint-row">
+            <span class="dot-live"></span>
+            <span>上次同步 刚刚 · 2 节点在线 · 本地加密</span>
+          </div>
+
+          <div class="section" id="sec-overdue">
+            <div class="section-head">
+              <span class="section-title">已过期</span>
+              <span class="section-count" data-count-overdue>2</span>
+            </div>
+            <div class="task-list" id="list-overdue"></div>
+          </div>
+
+          <div class="section" id="sec-due">
+            <div class="section-head">
+              <span class="section-title">今日到期</span>
+              <span class="section-count" data-count-due>1</span>
+            </div>
+            <div class="task-list" id="list-due"></div>
+          </div>
+
+          <div class="section" id="sec-inbox">
+            <div class="section-head">
+              <span class="section-title">未安排</span>
+              <span class="section-count" data-count-inbox>2</span>
+            </div>
+            <div class="task-list" id="list-inbox"></div>
+          </div>
+
+          <details class="fold" open>
+            <summary>今日参考 · 黄历与运势</summary>
+            <div class="fold-body fold-body-stack" id="today-ref">
+              <!-- 由 app.js 填入黄历 + 运势（与日历页同源） -->
+            </div>
+          </details>
+        </section>
+
+        <!-- 日历 -->
+        <section class="view" id="view-calendar" data-title="日历">
+          <div class="hint-row">按月查看排期。点日期看当天列表与黄历运势；点任务打开右侧详情。</div>
+          <div class="cal-layout">
+            <div class="cal-panel">
+              <div class="cal-head">
+                <div class="cal-head-left">
+                  <button class="icon-btn" id="cal-prev" type="button" aria-label="上一月">
+                    <svg viewBox="0 0 24 24"><path d="M15 6 9 12l6 6"/></svg>
+                  </button>
+                  <div class="cal-month" id="cal-month">2026 年 11 月</div>
+                  <button class="icon-btn" id="cal-next" type="button" aria-label="下一月">
+                    <svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+                  </button>
+                </div>
+                <button class="btn btn-ghost btn-today" type="button" id="cal-today">今天</button>
+              </div>
+
+              <div class="huangli" id="huangli">
+                <div class="huangli-lunar" id="huangli-lunar">农历十月初四 · 甲午</div>
+                <div class="huangli-row">
+                  <span class="yi-lab">宜</span>
+                  <span class="yi-txt" id="huangli-yi">推进重点、整理文档、短会确认</span>
+                </div>
+                <div class="huangli-row">
+                  <span class="ji-lab">忌</span>
+                  <span class="ji-txt" id="huangli-ji">临时加会、口头承诺、深夜决策</span>
+                </div>
+              </div>
+
+              <div class="fortune">
+                <div class="fortune-head">
+                  <div class="fortune-title">今日运势</div>
+                  <div class="fortune-tabs" id="fortune-tabs" role="tablist">
+                    <button type="button" class="ftab" data-ftab="ming">命</button>
+                    <button type="button" class="ftab on" data-ftab="yun">运</button>
+                    <button type="button" class="ftab" data-ftab="cai">财</button>
+                    <button type="button" class="ftab" data-ftab="yi">衣</button>
+                  </div>
+                </div>
+                <div class="fortune-card" id="fortune-body"></div>
+              </div>
+
+              <div class="cal-grid" id="cal-grid"></div>
+            </div>
+            <div class="day-panel">
+              <div class="day-head">
+                <div>
+                  <h3 id="day-title">11 月 23 日</h3>
+                  <div class="sub" id="day-sub">选中日的任务</div>
+                </div>
+                <button class="btn btn-soft" type="button" id="day-add">+ 当天</button>
+              </div>
+              <div class="task-list" id="list-day"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 备忘 -->
+        <section class="view" id="view-memos" data-title="备忘">
+          <div class="hint-row">账号、证件等不上日历。列表扫一眼，详情里完成复制与核对。</div>
+          <div class="list-tools">
+            <div class="chips" id="memo-chips">
+              <button type="button" class="chip on" data-filter="all">全部</button>
+              <button type="button" class="chip" data-filter="账号">账号</button>
+              <button type="button" class="chip" data-filter="证件">证件</button>
+              <button type="button" class="chip" data-filter="网络">网络</button>
+            </div>
+          </div>
+          <div class="list-cards" id="list-memos"></div>
+        </section>
+
+        <!-- 私密 -->
+        <section class="view" id="view-private" data-title="私密">
+          <div class="seg" role="tablist" aria-label="私密分段">
+            <button type="button" class="active" data-private-tab="care">关怀</button>
+            <button type="button" data-private-tab="tasks">私密任务</button>
+            <button type="button" data-private-tab="memos">私密备忘</button>
+          </div>
+          <div id="private-care">
+            <div class="care-grid">
+              <button class="care-card" type="button" data-detail='{"kind":"care","title":"经期","body":"深粉=已标经期；浅粉=下一轮预测。右键/底栏可标开始与结束。"}'>
+                <h4>经期</h4>
+                <p>记录与预测周期，仅本机私密空间。</p>
+                <span class="tag">预计 5 天后</span>
+              </button>
+              <button class="care-card" type="button" data-detail='{"kind":"care","title":"体检","body":"可标体检日，支持按月周期重复。角标颜色表示临近程度。"}'>
+                <h4>体检</h4>
+                <p>下次体检提醒与当日备注。</p>
+                <span class="tag">还有 42 天</span>
+              </button>
+            </div>
+          </div>
+          <div id="private-tasks" hidden>
+            <div class="task-list" id="list-private-tasks"></div>
+          </div>
+          <div id="private-memos" hidden>
+            <div class="list-cards" id="list-private-memos"></div>
+          </div>
+        </section>
+
+        <!-- 节点 -->
+        <section class="view" id="view-nodes" data-title="节点">
+          <div class="nodes-head">
+            <div>
+              <h2>发现与托管</h2>
+              <p>同步与节点状态集中在此，不再挤占业务顶栏。</p>
+            </div>
+            <div style="display:flex;align-items:center">
+              <span class="status-toast" id="sync-toast">已刷新节点列表</span>
+              <button class="btn btn-primary" id="btn-sync" type="button">同步</button>
+            </div>
+          </div>
+          <div class="local-card">
+            <div class="row">
+              <div>
+                <div class="id">node-e73ad980</div>
+                <div class="meta">从机 · 局域网发现已开 · 磁盘 128G 可用</div>
+              </div>
+              <span class="pill pill-ok">2 在线</span>
+            </div>
+          </div>
+          <div class="section-head">
+            <span class="section-title">对端</span>
+            <span class="section-count">空勾选 = 推送到所有可托管节点</span>
+          </div>
+          <div id="peer-list"></div>
+        </section>
+
+        <!-- 设置 -->
+        <section class="view" id="view-settings" data-title="设置">
+          <div class="settings-layout">
+            <div class="settings-nav" role="tablist">
+              <button type="button" class="active" data-settings="look">外观</button>
+              <button type="button" data-settings="local">本机</button>
+              <button type="button" data-settings="net">网络</button>
+              <button type="button" data-settings="backup">备份</button>
+            </div>
+            <div>
+              <div class="settings-pane active" id="set-look">
+                <h3>外观</h3>
+                <div class="field">
+                  <label for="theme">主题</label>
+                  <select id="theme">
+                    <option>跟随系统</option>
+                    <option>浅色</option>
+                    <option>深色</option>
+                    <option>柔美</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="autolock">自动锁定</label>
+                  <select id="autolock">
+                    <option>3 分钟</option>
+                    <option>5 分钟</option>
+                    <option>10 分钟</option>
+                    <option>不自动锁定</option>
+                  </select>
+                </div>
+                <div class="switch-row">
+                  <div>
+                    <div class="lbl">开机自启动</div>
+                    <div class="desc">登录后以托盘方式启动</div>
+                  </div>
+                  <input type="checkbox" />
+                </div>
+              </div>
+              <div class="settings-pane" id="set-local">
+                <h3>本机</h3>
+                <div class="field">
+                  <label>当前身份</label>
+                  <input value="本顿" readonly />
+                </div>
+                <div class="field">
+                  <label>数据目录</label>
+                  <input value="/var/lib/memo" />
+                  <div class="help">改路径后需重启。settings.json 仍在用户配置目录。</div>
+                </div>
+                <div class="field">
+                  <label>修改登录密码</label>
+                  <input type="password" placeholder="当前密码" />
+                </div>
+              </div>
+              <div class="settings-pane" id="set-net">
+                <h3>网络</h3>
+                <div class="switch-row">
+                  <div>
+                    <div class="lbl">局域网自动发现</div>
+                    <div class="desc">UDP 17000 寻找同集群主机</div>
+                  </div>
+                  <input type="checkbox" checked />
+                </div>
+                <div class="switch-row">
+                  <div>
+                    <div class="lbl">显示本节点</div>
+                    <div class="desc">仅主机广播时生效</div>
+                  </div>
+                  <input type="checkbox" checked />
+                </div>
+                <div class="field">
+                  <label>监听端口</label>
+                  <input value="7000" />
+                </div>
+                <div class="field">
+                  <label>集群盐 cluster_salt_hex</label>
+                  <input value="a1b2c3d4e5f60718293a4b5c6d7e8f90" />
+                  <div class="help">同集群各机必须相同。与登录密码无关。</div>
+                </div>
+                <div class="field">
+                  <label>手填对端</label>
+                  <textarea placeholder="每行一个 IP:端口">192.168.1.10:7000</textarea>
+                </div>
+              </div>
+              <div class="settings-pane" id="set-backup">
+                <h3>备份</h3>
+                <div class="switch-row">
+                  <div>
+                    <div class="lbl">推送私人密文备份</div>
+                    <div class="desc">保存私密条目时推到可托管节点</div>
+                  </div>
+                  <input type="checkbox" checked />
+                </div>
+                <div class="switch-row">
+                  <div>
+                    <div class="lbl">受理他节点托管</div>
+                    <div class="desc">本机作为主机时收密文</div>
+                  </div>
+                  <input type="checkbox" checked />
+                </div>
+                <button class="btn btn-ghost" type="button" style="margin-top:12px">导出加密备份 .memobak</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 回收站 -->
+        <section class="view" id="view-trash" data-title="回收站">
+          <div class="trash-actions">
+            <button class="btn btn-ghost" type="button" id="btn-empty-trash">清空回收站</button>
+          </div>
+          <div class="list-cards" id="list-trash"></div>
+        </section>
+      </div>
+
+      <div class="overlay" id="overlay" hidden></div>
+
+      <!-- 详情抽屉（任务/备忘字段对齐应用内只读详情） -->
+      <aside class="drawer drawer-wide" id="drawer-detail" aria-hidden="true">
+        <div class="drawer-head">
+          <div class="drawer-kicker" id="detail-kicker">详情</div>
+          <button class="icon-btn" type="button" data-close-drawer aria-label="关闭">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div class="drawer-body" id="detail-rich-body"></div>
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" type="button" data-close-drawer>关闭</button>
+          <button class="btn btn-soft" type="button" id="btn-copy-from-detail" hidden>复制</button>
+          <button class="btn btn-primary" type="button" id="btn-edit-from-detail">编辑</button>
+        </div>
+      </aside>
+
+      <!-- 新建抽屉 -->
+      <aside class="drawer" id="drawer-create" aria-hidden="true">
+        <div class="drawer-head">
+          <h3>新建</h3>
+          <button class="icon-btn" type="button" data-close-drawer aria-label="关闭">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div class="drawer-body">
+          <div class="steps" aria-hidden="true">
+            <div class="step on" data-step-bar="1"></div>
+            <div class="step" data-step-bar="2"></div>
+            <div class="step" data-step-bar="3"></div>
+          </div>
+
+          <div class="create-step" data-step="1">
+            <div class="section-title" style="margin-bottom:10px">① 这是什么</div>
+            <div class="choice-grid">
+              <button class="choice on" type="button" data-kind="task">
+                <div class="t">任务</div>
+                <div class="d">可上日历、设到期</div>
+              </button>
+              <button class="choice" type="button" data-kind="memo">
+                <div class="t">备忘</div>
+                <div class="d">账号证件等资料</div>
+              </button>
+            </div>
+          </div>
+
+          <div class="create-step" data-step="2" style="margin-top:18px">
+            <div class="section-title" style="margin-bottom:10px">② 何时</div>
+            <div class="choice-grid">
+              <button class="choice on" type="button" data-when="today">
+                <div class="t">今天</div>
+                <div class="d">放进今日到期</div>
+              </button>
+              <button class="choice" type="button" data-when="span">
+                <div class="t">好几天</div>
+                <div class="d">起止日期</div>
+              </button>
+              <button class="choice" type="button" data-when="later">
+                <div class="t">先记着</div>
+                <div class="d">未安排</div>
+              </button>
+              <button class="choice" type="button" data-when="none">
+                <div class="t">不上日历</div>
+                <div class="d">备忘默认</div>
+              </button>
+            </div>
+          </div>
+
+          <div class="create-step" data-step="3" style="margin-top:18px">
+            <div class="section-title" style="margin-bottom:10px">③ 写什么</div>
+            <div class="field">
+              <label for="create-title">标题</label>
+              <input id="create-title" placeholder="一句话标题" />
+            </div>
+            <div class="field">
+              <label for="create-body">正文</label>
+              <textarea id="create-body" placeholder="可选"></textarea>
+            </div>
+            <details class="more-block">
+              <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ink-soft)">更多选项</summary>
+              <div style="margin-top:12px">
+                <div class="switch-row">
+                  <div>
+                    <div class="lbl">私密空间</div>
+                    <div class="desc">不出现在普通任务/备忘</div>
+                  </div>
+                  <input type="checkbox" id="create-private" />
+                </div>
+                <div class="switch-row">
+                  <div>
+                    <div class="lbl">局域网共享</div>
+                    <div class="desc">私密时不可开</div>
+                  </div>
+                  <input type="checkbox" id="create-share" />
+                </div>
+                <div class="field" style="margin-top:12px">
+                  <label>优先级</label>
+                  <select>
+                    <option>普通</option>
+                    <option>高</option>
+                    <option>紧急</option>
+                  </select>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" type="button" data-close-drawer>取消</button>
+          <button class="btn btn-primary" type="button" id="btn-create-save">保存</button>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

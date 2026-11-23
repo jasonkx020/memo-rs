@@ -89,19 +89,27 @@ pub fn clear_session_file(data_dir: &Path, person_fp: &str) {
 
 pub fn nav_to_str(nav: NavItem) -> &'static str {
     match nav {
+        NavItem::Today => "today",
         NavItem::Calendar => "calendar",
         NavItem::Credentials => "credentials",
         NavItem::GenderPrivate => "gender_private",
+        NavItem::Nodes => "nodes",
+        NavItem::Settings => "settings",
         NavItem::Trash => "trash",
     }
 }
 
 pub fn nav_from_str(s: &str) -> NavItem {
     match s {
+        "today" => NavItem::Today,
         "credentials" => NavItem::Credentials,
         "gender_private" => NavItem::GenderPrivate,
+        "nodes" => NavItem::Nodes,
+        "settings" => NavItem::Settings,
         "trash" => NavItem::Trash,
-        _ => NavItem::Calendar,
+        // 旧会话「任务」页签落到今日主路径
+        "calendar" => NavItem::Today,
+        _ => NavItem::Today,
     }
 }
 

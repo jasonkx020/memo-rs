@@ -673,8 +673,12 @@ impl MemoApp {
                     self.edit_form.scope = match self.shell.nav {
                         nav::NavItem::Credentials => memo_form::FormScope::Credentials,
                         nav::NavItem::GenderPrivate => memo_form::FormScope::GenderPrivate,
-                        nav::NavItem::Calendar => memo_form::FormScope::Calendar,
-                        nav::NavItem::Trash => memo_form::FormScope::Open,
+                        nav::NavItem::Today | nav::NavItem::Calendar => {
+                            memo_form::FormScope::Calendar
+                        }
+                        nav::NavItem::Trash
+                        | nav::NavItem::Nodes
+                        | nav::NavItem::Settings => memo_form::FormScope::Open,
                     };
                 } else if !body_draft.is_empty() {
                     self.memo_doc = doc_editor::Doc::from_store(title_draft, body_draft);
@@ -1734,6 +1738,8 @@ impl eframe::App for MemoApp {
                     status_line,
                     *show_new_memo,
                     show_settings,
+                    settings_draft,
+                    &mut self.cfg,
                     show_change_pw,
                     show_export,
                     export_pw,
@@ -1757,7 +1763,6 @@ impl eframe::App for MemoApp {
                     rt.cfg.node_visible,
                     rt.cfg.lan_discovery,
                     rt.svc.disk_space(),
-                    &mut settings_draft.backup_targets,
                     &self.tx,
                     if self.update_newer {
                         self.update_latest.as_deref()
@@ -1870,7 +1875,7 @@ impl eframe::App for MemoApp {
                 {
                     let host = self.shell.content_host;
                     let new_title = match self.shell.nav {
-                        nav::NavItem::Calendar => "新建任务",
+                        nav::NavItem::Today | nav::NavItem::Calendar => "新建任务",
                         nav::NavItem::GenderPrivate => "新建私密",
                         _ => "新建备忘",
                     };

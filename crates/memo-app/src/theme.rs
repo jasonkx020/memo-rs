@@ -81,62 +81,64 @@ pub struct Palette {
     pub period_fertile: Color32,
 }
 
-pub const ROUND_CARD: f32 = 4.0;
-pub const ROUND_CTRL: f32 = 4.0;
+pub const ROUND_CARD: f32 = 10.0;
+pub const ROUND_CTRL: f32 = 8.0;
+/// 主壳左右浮卡片圆角（对齐效果稿 16px）
+pub const ROUND_SHELL: f32 = 16.0;
 pub const MAC_ROUND_SHEET: f32 = 10.0;
 pub const MAC_ROUND_CTRL: f32 = 6.0;
 pub const MAC_ROUND_PILL: f32 = 8.0;
 
 fn light_palette() -> Palette {
+    // 对齐 docs/ui-mockup：暖纸底 + 松针绿
     Palette {
-        // chrome：浅灰顶栏（不再用海军蓝块）
-        navy: Color32::from_rgb(0xF5, 0xF5, 0xF7),
-        navy_mid: Color32::from_rgb(0xEB, 0xEB, 0xEF),
-        bg: Color32::from_rgb(0xF7, 0xF7, 0xF8),
-        panel: Color32::from_rgb(0xF0, 0xF0, 0xF2),
+        navy: Color32::from_rgb(0xFA, 0xF8, 0xF5),
+        navy_mid: Color32::from_rgb(0xE2, 0xDC, 0xD3),
+        bg: Color32::from_rgb(0xEB, 0xE6, 0xDF),
+        panel: Color32::from_rgb(0xFA, 0xF8, 0xF5),
         card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-        border: Color32::from_rgb(0xE5, 0xE5, 0xEA),
-        border_strong: Color32::from_rgb(0xD2, 0xD2, 0xD7),
-        text: Color32::from_rgb(0x1D, 0x1D, 0x1F),
-        text_muted: Color32::from_rgb(0x6E, 0x6E, 0x73),
-        accent: Color32::from_rgb(0x00, 0x7A, 0xFF),
-        accent_hover: Color32::from_rgb(0x00, 0x64, 0xD1),
-        accent_soft: Color32::from_rgb(0xE8, 0xF1, 0xFF),
-        success: Color32::from_rgb(0x05, 0x96, 0x69),
-        success_soft: Color32::from_rgb(0xD1, 0xFA, 0xE5),
-        danger: Color32::from_rgb(0xDC, 0x26, 0x26),
-        danger_soft: Color32::from_rgb(0xFE, 0xE2, 0xE2),
+        border: Color32::from_rgb(0xD8, 0xD2, 0xC8),
+        border_strong: Color32::from_rgb(0xC4, 0xBC, 0xB0),
+        text: Color32::from_rgb(0x1C, 0x24, 0x20),
+        text_muted: Color32::from_rgb(0x5A, 0x65, 0x5E),
+        accent: Color32::from_rgb(0x2F, 0x5D, 0x4A),
+        accent_hover: Color32::from_rgb(0x24, 0x4A, 0x3B),
+        accent_soft: Color32::from_rgb(0xE4, 0xEF, 0xE9),
+        success: Color32::from_rgb(0x1F, 0x7A, 0x4D),
+        success_soft: Color32::from_rgb(0xDC, 0xF5, 0xE7),
+        danger: Color32::from_rgb(0xB4, 0x23, 0x18),
+        danger_soft: Color32::from_rgb(0xFE, 0xE4, 0xE2),
         warn: Color32::from_rgb(0xB4, 0x53, 0x09),
-        list_hover: Color32::from_rgb(0xE8, 0xE8, 0xED),
-        widget_active: Color32::from_rgb(0xD6, 0xE8, 0xFF),
-        code_bg: Color32::from_rgb(0xF2, 0xF2, 0xF7),
-        mac_bg: Color32::from_rgb(0xF0, 0xF0, 0xF2),
-        mac_bg_top: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+        list_hover: Color32::from_rgb(0xF0, 0xEB, 0xE4),
+        widget_active: Color32::from_rgb(0xD5, 0xE8, 0xDE),
+        code_bg: Color32::from_rgb(0xF3, 0xEF, 0xE8),
+        mac_bg: Color32::from_rgb(0xEB, 0xE6, 0xDF),
+        mac_bg_top: Color32::from_rgb(0xFA, 0xF8, 0xF5),
         mac_card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-        mac_separator: Color32::from_rgb(0xE5, 0xE5, 0xEA),
-        mac_fill: Color32::from_rgb(0xF2, 0xF2, 0xF7),
-        mac_fill_hover: Color32::from_rgb(0xE5, 0xE5, 0xEA),
-        mac_text: Color32::from_rgb(0x1D, 0x1D, 0x1F),
-        mac_text_secondary: Color32::from_rgb(0x6E, 0x6E, 0x73),
-        mac_text_tertiary: Color32::from_rgb(0x8E, 0x8E, 0x93),
-        mac_blue: Color32::from_rgb(0x00, 0x7A, 0xFF),
-        mac_blue_pressed: Color32::from_rgb(0x00, 0x64, 0xD1),
-        mac_red: Color32::from_rgb(0xFF, 0x3B, 0x30),
-        chrome_fg: Color32::from_rgb(0x1D, 0x1D, 0x1F),
-        chrome_stroke: Color32::from_rgb(0xE5, 0xE5, 0xEA),
+        mac_separator: Color32::from_rgb(0xD8, 0xD2, 0xC8),
+        mac_fill: Color32::from_rgb(0xFA, 0xF8, 0xF5),
+        mac_fill_hover: Color32::from_rgb(0xF0, 0xEB, 0xE4),
+        mac_text: Color32::from_rgb(0x1C, 0x24, 0x20),
+        mac_text_secondary: Color32::from_rgb(0x5A, 0x65, 0x5E),
+        mac_text_tertiary: Color32::from_rgb(0x8A, 0x93, 0x8C),
+        mac_blue: Color32::from_rgb(0x2F, 0x5D, 0x4A),
+        mac_blue_pressed: Color32::from_rgb(0x24, 0x4A, 0x3B),
+        mac_red: Color32::from_rgb(0xB4, 0x23, 0x18),
+        chrome_fg: Color32::from_rgb(0x1C, 0x24, 0x20),
+        chrome_stroke: Color32::from_rgb(0xD8, 0xD2, 0xC8),
         remind_bg: Color32::from_rgb(0xFE, 0xF3, 0xC7),
         remind_fg: Color32::from_rgb(0xB4, 0x53, 0x09),
-        shell_accent: Color32::from_rgb(0x3B, 0x82, 0xF6),
-        shell_accent_soft: Color32::from_rgb(0xEF, 0xF6, 0xFF),
-        shell_nav_selected: Color32::from_rgb(0xDB, 0xEA, 0xFE),
-        shell_chip_green: Color32::from_rgb(0xD1, 0xFA, 0xE5),
-        shell_chip_green_fg: Color32::from_rgb(0x05, 0x96, 0x69),
-        shell_chip_gray: Color32::from_rgb(0xF3, 0xF4, 0xF6),
-        shell_chip_gray_fg: Color32::from_rgb(0x6B, 0x72, 0x80),
-        shell_warn_bg: Color32::from_rgb(0xFF, 0xF7, 0xED),
-        shell_warn_fg: Color32::from_rgb(0xC2, 0x41, 0x0C),
-        shell_tag_bg: Color32::from_rgb(0xDB, 0xEA, 0xFE),
-        shell_tag_fg: Color32::from_rgb(0x1D, 0x4E, 0xD8),
+        shell_accent: Color32::from_rgb(0x2F, 0x5D, 0x4A),
+        shell_accent_soft: Color32::from_rgb(0xE4, 0xEF, 0xE9),
+        shell_nav_selected: Color32::from_rgb(0xE4, 0xEF, 0xE9),
+        shell_chip_green: Color32::from_rgb(0xDC, 0xF5, 0xE7),
+        shell_chip_green_fg: Color32::from_rgb(0x1F, 0x7A, 0x4D),
+        shell_chip_gray: Color32::from_rgb(0xEE, 0xEA, 0xE3),
+        shell_chip_gray_fg: Color32::from_rgb(0x5A, 0x65, 0x5E),
+        shell_warn_bg: Color32::from_rgb(0xFE, 0xF3, 0xC7),
+        shell_warn_fg: Color32::from_rgb(0xB4, 0x53, 0x09),
+        shell_tag_bg: Color32::from_rgb(0xE4, 0xEF, 0xE9),
+        shell_tag_fg: Color32::from_rgb(0x2F, 0x5D, 0x4A),
         shell_women_pill: Color32::from_rgb(0xFD, 0xE8, 0xF0),
         shell_women_pill_fg: Color32::from_rgb(0xDB, 0x27, 0x7A),
         shell_men_pill: Color32::from_rgb(0xE0, 0xF2, 0xFE),
@@ -579,6 +581,13 @@ pub fn category_icon_color(cat: MemoCategory) -> Color32 {
 /// 左侧菜单图标语义色。
 pub fn nav_icon_color(item: NavItem) -> Color32 {
     match item {
+        NavItem::Today => {
+            if dark_icons() {
+                Color32::from_rgb(0x7A, 0xB8, 0x9A)
+            } else {
+                Color32::from_rgb(0x2F, 0x5D, 0x4A)
+            }
+        }
         NavItem::Calendar => {
             if dark_icons() {
                 Color32::from_rgb(0x8E, 0xA4, 0xC8)
@@ -586,7 +595,14 @@ pub fn nav_icon_color(item: NavItem) -> Color32 {
                 Color32::from_rgb(0x3D, 0x5A, 0x80)
             }
         }
-        NavItem::Trash => text_muted(),
+        NavItem::Nodes => {
+            if dark_icons() {
+                Color32::from_rgb(0x9A, 0xB0, 0xC4)
+            } else {
+                Color32::from_rgb(0x4A, 0x6B, 0x5C)
+            }
+        }
+        NavItem::Settings | NavItem::Trash => text_muted(),
         other => other
             .category()
             .map(category_icon_color)
@@ -830,8 +846,8 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
         ThemeMode::Dark => Visuals::dark(),
     };
     visuals.dark_mode = matches!(mode, ThemeMode::Dark);
-    visuals.window_fill = p.card;
-    visuals.panel_fill = p.panel;
+    visuals.window_fill = p.bg;
+    visuals.panel_fill = p.bg;
     visuals.extreme_bg_color = p.bg;
     visuals.faint_bg_color = p.panel;
     visuals.code_bg_color = p.code_bg;
@@ -976,9 +992,38 @@ pub fn top_bar_frame() -> Frame {
 
 pub fn bottom_bar_frame() -> Frame {
     Frame::none()
-        .fill(navy())
+        .fill(bg())
+        .inner_margin(Margin::symmetric(18.0, 6.0))
+}
+
+/// 效果稿浮层卡片：侧栏 / 主区白壳。
+pub fn shell_card_frame() -> Frame {
+    Frame::none()
+        .fill(card())
         .stroke(Stroke::new(1.0, border()))
-        .inner_margin(Margin::symmetric(14.0, 7.0))
+        .rounding(Rounding::same(ROUND_SHELL))
+        .inner_margin(Margin::ZERO)
+        .shadow(egui::epaint::Shadow {
+            offset: Vec2::new(0.0, 8.0),
+            blur: 28.0,
+            spread: 0.0,
+            color: Color32::from_rgba_unmultiplied(28, 36, 32, 18),
+        })
+}
+
+/// 侧栏表面（略暖于纯白）。
+pub fn shell_rail_frame() -> Frame {
+    Frame::none()
+        .fill(panel())
+        .stroke(Stroke::new(1.0, border()))
+        .rounding(Rounding::same(ROUND_SHELL))
+        .inner_margin(Margin::symmetric(12.0, 16.0))
+        .shadow(egui::epaint::Shadow {
+            offset: Vec2::new(0.0, 8.0),
+            blur: 28.0,
+            spread: 0.0,
+            color: Color32::from_rgba_unmultiplied(28, 36, 32, 18),
+        })
 }
 
 pub fn list_row_fill(selected: bool, hovered: bool) -> Color32 {

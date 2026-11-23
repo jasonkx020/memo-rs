@@ -430,68 +430,328 @@ pub fn show(
     tx: &Sender<BgMsg>,
 ) {
     let q = search.trim().to_lowercase();
-    let today_n = collect_due_today(all, &q).len();
-    let rail_stats = task_rail_stats(cal, all, &q);
-    // 页头进左栏，「+ 新建」不占右栏高度，日历顶对齐上移
-    let (side_w, cal_w, full_h) = split_cal_detail(ui);
+    // 对齐 HTML：左月历面板 · 右选中日列表
+    let full_h = ui.available_height().max(120.0);
+    let avail = ui.available_width();
+    let gap = 20.0_f32;
+    let day_w = ((avail - gap) * 0.38).clamp(240.0, 360.0).min(avail * 0.45);
+    let cal_w = (avail - gap - day_w).max(200.0);
+
+    ui.label(
+        RichText::new("按月查看排期。点日期看当天列表与黄历运势；点任务打开右侧详情。")
+            .size(13.0)
+            .color(theme::mac_text_tertiary()),
+    );
+    ui.add_space(12.0);
 
     ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), full_h),
+        Vec2::new(avail, (full_h - 28.0).max(100.0)),
         egui::Layout::left_to_right(egui::Align::Min),
         |ui| {
-            ui.set_max_height(full_h);
-            ui.set_clip_rect(ui.max_rect());
-            ui.spacing_mut().item_spacing.x = page_shell::PAGE_GAP;
+            let h = ui.available_height().max(100.0);
+            ui.spacing_mut().item_spacing.x = gap;
+
+            // 左：月历 + 黄历 + 运势（单层 surface 卡，对齐 HTML cal-panel）
             ui.allocate_ui_with_layout(
-                Vec2::new(side_w, full_h),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_max_width(side_w);
-                    ui.set_min_height(full_h);
-                    ui.set_max_height(full_h);
-                    ui.set_clip_rect(ui.max_rect());
-                    show_task_rail_header(ui, today_n, rail_stats, open_new);
-                    ui.add_space(page_shell::PAGE_GAP);
-                    // 列表区吃满页头以下剩余高度，保证长列表可滚到底
-                    let list_h = ui.available_height().max(40.0);
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width(), list_h),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.set_min_height(list_h);
-                            ui.set_max_height(list_h);
-                            show_work_side(
-                                ui,
-                                svc,
-                                cal,
-                                all,
-                                &q,
-                                selected,
-                                editing,
-                                open_new,
-                                picked,
-                                pick_edit,
-                                pick_delete,
-                                open_sticky,
-                                tx,
-                            );
-                        },
-                    );
-                },
-            );
-            ui.allocate_ui_with_layout(
-                Vec2::new(cal_w, full_h),
+                Vec2::new(cal_w, h),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_max_width(cal_w);
-                    ui.set_min_height(full_h);
-                    ui.set_max_height(full_h);
-                    ui.set_clip_rect(ui.max_rect());
-                    show_month(ui, svc, cal, all, &q, selected, editing, open_new, picked);
+                    ui.set_min_height(h);
+                    Frame::none()
+                        .fill(theme::panel())
+                        .stroke(Stroke::new(1.0, theme::border()))
+                        .rounding(Rounding::same(12.0))
+                        .inner_margin(Margin::same(16.0))
+                        .show(ui, |ui| {
+                            let inner_h = (h - 34.0).max(80.0);
+                            ui.set_min_height(inner_h);
+                            ui.set_max_height(inner_h);
+                            show_month(
+                                ui, svc, cal, all, &q, selected, editing, open_new, picked,
+                            );
+                        });
+                },
+            );
+
+            // 右：选中日任务（day-head + 列表，对齐 HTML day-panel）
+            ui.allocate_ui_with_layout(
+                Vec2::new(day_w, h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_max_width(day_w);
+                    ui.set_min_height(h);
+                    Frame::none()
+                        .fill(theme::panel())
+                        .stroke(Stroke::new(1.0, theme::border()))
+                        .rounding(Rounding::same(12.0))
+                        .inner_margin(Margin::same(16.0))
+                        .show(ui, |ui| {
+                            ui.set_min_height((h - 34.0).max(80.0));
+                            let day = cal.selected;
+                            let on = events_on(all, day, &q);
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} 月 {} 日",
+                                            day.month(),
+                                            day.day()
+                                        ))
+                                        .size(20.0)
+                                        .strong()
+                                        .color(theme::text()),
+                                    );
+                                    ui.label(
+                                        RichText::new(if on.is_empty() {
+                                            format!("{} · 这天没有任务", weekday_zh(day))
+                                        } else {
+                                            format!("{} · {} 项", weekday_zh(day), on.len())
+                                        })
+                                        .size(12.5)
+                                        .color(theme::mac_text_tertiary()),
+                                    );
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("+ 当天")
+                                                        .size(12.5)
+                                                        .strong()
+                                                        .color(theme::shell_accent()),
+                                                )
+                                                .fill(theme::shell_accent_soft())
+                                                .rounding(Rounding::same(9.0))
+                                                .min_size(Vec2::new(64.0, 32.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            *open_new = true;
+                                        }
+                                    },
+                                );
+                            });
+                            ui.add_space(12.0);
+                            egui::ScrollArea::vertical()
+                                .id_source("cal_day_list_html")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    if on.is_empty() {
+                                        Frame::none()
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                theme::border(),
+                                            ))
+                                            .rounding(Rounding::same(10.0))
+                                            .inner_margin(Margin::symmetric(16.0, 20.0))
+                                            .show(ui, |ui| {
+                                                ui.set_min_width(ui.available_width());
+                                                ui.vertical_centered(|ui| {
+                                                    ui.label(
+                                                        RichText::new("这天没有安排")
+                                                            .size(13.5)
+                                                            .color(theme::text_muted()),
+                                                    );
+                                                });
+                                            });
+                                    } else {
+                                        show_task_cards(
+                                            ui,
+                                            svc,
+                                            &on,
+                                            CalListLayout::List,
+                                            selected,
+                                            editing,
+                                            picked,
+                                            pick_edit,
+                                            pick_delete,
+                                            open_sticky,
+                                            tx,
+                                        );
+                                    }
+                                });
+                        });
                 },
             );
         },
     );
+}
+
+/// 「今日」主路径：过期 / 今日到期 / 未安排；黄历运势默认折叠。
+pub fn show_today(
+    ui: &mut egui::Ui,
+    svc: &Arc<MemoService>,
+    cal: &mut CalendarUi,
+    all: &[MemoView],
+    search: &str,
+    selected: &mut Option<String>,
+    editing: &mut bool,
+    open_new: &mut bool,
+    picked: &mut Option<String>,
+    pick_edit: &mut bool,
+    pick_delete: &mut bool,
+    open_sticky: &mut Option<String>,
+    tx: &Sender<BgMsg>,
+) {
+    let q = search.trim().to_lowercase();
+    let today_d = today();
+    cal.selected = today_d;
+
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} · {}",
+                    format_md(today_d),
+                    weekday_zh(today_d)
+                ))
+                .size(30.0)
+                .strong()
+                .color(theme::text()),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("先处理过期与今日到期，其它可以稍后再说。")
+                    .size(13.5)
+                    .color(theme::text_muted()),
+            );
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("快速记下")
+                            .size(13.0)
+                            .strong()
+                            .color(theme::shell_accent()),
+                    )
+                    .fill(theme::shell_accent_soft())
+                    .rounding(Rounding::same(8.0))
+                    .min_size(Vec2::new(88.0, 34.0)),
+                )
+                .clicked()
+            {
+                *open_new = true;
+            }
+        });
+    });
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new("本地加密 · 同步与节点见左侧「节点」")
+            .size(12.0)
+            .color(theme::text_muted()),
+    );
+    ui.add_space(16.0);
+
+    let overdue = collect_overdue(all, &q);
+    let due = collect_due_today(all, &q);
+    let inbox = unscheduled(all, &q);
+
+    section_label(ui, "已过期", overdue.len());
+    if overdue.is_empty() {
+        ui.label(
+            RichText::new("没有过期任务")
+                .size(13.0)
+                .color(theme::text_muted()),
+        );
+    } else {
+        show_task_cards(
+            ui,
+            svc,
+            &overdue,
+            CalListLayout::List,
+            selected,
+            editing,
+            picked,
+            pick_edit,
+            pick_delete,
+            open_sticky,
+            tx,
+        );
+    }
+    ui.add_space(18.0);
+
+    section_label(ui, "今日到期", due.len());
+    if due.is_empty() {
+        ui.label(
+            RichText::new("今天没有到期项")
+                .size(13.0)
+                .color(theme::text_muted()),
+        );
+    } else {
+        show_task_cards(
+            ui,
+            svc,
+            &due,
+            CalListLayout::List,
+            selected,
+            editing,
+            picked,
+            pick_edit,
+            pick_delete,
+            open_sticky,
+            tx,
+        );
+    }
+    ui.add_space(18.0);
+
+    section_label(ui, "未安排", inbox.len());
+    if inbox.is_empty() {
+        ui.label(
+            RichText::new("收件箱是空的")
+                .size(13.0)
+                .color(theme::text_muted()),
+        );
+    } else {
+        show_task_cards(
+            ui,
+            svc,
+            &inbox,
+            CalListLayout::List,
+            selected,
+            editing,
+            picked,
+            pick_edit,
+            pick_delete,
+            open_sticky,
+            tx,
+        );
+    }
+
+    ui.add_space(20.0);
+    egui::CollapsingHeader::new(
+        RichText::new("今日参考 · 黄历与运势")
+            .size(13.0)
+            .strong()
+            .color(theme::text_muted()),
+    )
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.add_space(8.0);
+        show_huangli_row(ui, today_d);
+        ui.add_space(8.0);
+        show_fortune_panel(ui, svc, cal);
+    });
+}
+
+fn section_label(ui: &mut egui::Ui, title: &str, n: usize) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(title)
+                .size(11.0)
+                .strong()
+                .color(theme::mac_text_tertiary()),
+        );
+        ui.label(
+            RichText::new(n.to_string())
+                .size(11.0)
+                .color(theme::mac_text_tertiary()),
+        );
+    });
+    ui.add_space(10.0);
 }
 
 /// 右侧工作区：日议程或周任务。
@@ -731,103 +991,98 @@ pub(crate) fn show_month(
     open_new: &mut bool,
     picked: &mut Option<String>,
 ) {
-    let frame_h = ui.available_height();
-    // 内高须扣掉上下 margin + 描边，否则 Frame 外高会撑破右栏（与私密同公式）
-    const FRAME_PAD: f32 = 10.0;
-    let stroke_h = 2.0;
-    let inner_budget = (frame_h - FRAME_PAD * 2.0 - stroke_h).max(80.0);
-    Frame::none()
-        .fill(theme::card())
-        .stroke(Stroke::new(1.0, theme::border()))
-        .rounding(Rounding::same(12.0))
-        .inner_margin(Margin::same(FRAME_PAD))
-        .show(ui, |ui| {
-            ui.set_min_height(inner_budget);
-            ui.set_max_height(inner_budget);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.horizontal(|ui| {
-                if ui.small_button("‹").clicked() {
-                    shift_month(cal, -1);
-                }
-                ui.label(
-                    RichText::new(format!("{:04} 年 {:02} 月", cal.year, cal.month))
-                        .strong()
-                        .size(14.0)
-                        .color(theme::text()),
-                );
-                if ui.small_button("›").clicked() {
-                    shift_month(cal, 1);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let today_btn = ui.add(
-                        egui::Button::new(
-                            RichText::new("今天").size(12.0).color(theme::text()),
-                        )
-                        .fill(theme::panel())
-                        .stroke(Stroke::new(1.0, theme::border()))
-                        .rounding(Rounding::same(8.0))
-                        .min_size(Vec2::new(48.0, 26.0)),
-                    );
-                    if today_btn.clicked() {
-                        let t = today();
-                        cal.year = t.year();
-                        cal.month = t.month();
-                        cal.selected = t;
-                    }
-                });
-            });
-            ui.add_space(4.0);
-            show_huangli_row(ui, cal.selected);
-            ui.add_space(4.0);
-            show_fortune_panel(ui, svc, cal);
-            ui.add_space(6.0);
-            // 网格区关掉默认行距，只用显式 gap，避免底部多出空隙或溢出
-            let gap = 3.0_f32;
-            let cell_w = ((ui.available_width() - gap * 6.0) / 7.0).max(1.0);
-            ui.columns(7, |cols| {
-                for (i, name) in ["一", "二", "三", "四", "五", "六", "日"].iter().enumerate() {
-                    cols[i].label(
-                        RichText::new(*name)
-                            .size(11.0)
-                            .strong()
-                            .color(theme::text_muted()),
-                    );
-                }
-            });
-            // 纵向刚好填满剩余高度：6 行 + 5 个 gap
-            let n_rows = 6_usize;
-            let remain = ui.available_height().max(1.0);
-            let cell_h = ((remain - gap * (n_rows - 1) as f32) / n_rows as f32).max(1.0);
-            let first = NaiveDate::from_ymd_opt(cal.year, cal.month, 1).unwrap_or_else(today);
-            let pad = first.weekday().num_days_from_monday() as i64;
-            let start = first - Duration::try_days(pad).unwrap_or_default();
-            for week in 0..n_rows {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for d in 0..7 {
-                        let day =
-                            start + Duration::try_days((week * 7 + d) as i64).unwrap_or_default();
-                        day_cell(
-                            ui,
-                            cal,
-                            all,
-                            q,
-                            day,
-                            cell_w,
-                            cell_h,
-                            selected,
-                            editing,
-                            open_new,
-                            picked,
-                        );
-                    }
-                });
-                if week + 1 < n_rows {
-                    ui.add_space(gap);
-                }
+    // 外层已由日历页包了 surface 卡；此处不再套第二层描边，避免双边框。
+    let inner_budget = ui.available_height().max(80.0);
+    ui.set_min_height(inner_budget);
+    ui.set_max_height(inner_budget);
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.horizontal(|ui| {
+        if ui.small_button("‹").clicked() {
+            shift_month(cal, -1);
+        }
+        ui.label(
+            RichText::new(format!("{} 年 {} 月", cal.year, cal.month))
+                .strong()
+                .size(16.0)
+                .color(theme::text()),
+        );
+        if ui.small_button("›").clicked() {
+            shift_month(cal, 1);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let today_btn = ui.add(
+                egui::Button::new(RichText::new("今天").size(12.0).color(theme::text()))
+                    .fill(Color32::WHITE)
+                    .stroke(Stroke::new(1.0, theme::border()))
+                    .rounding(Rounding::same(8.0))
+                    .min_size(Vec2::new(48.0, 28.0)),
+            );
+            if today_btn.clicked() {
+                let t = today();
+                cal.year = t.year();
+                cal.month = t.month();
+                cal.selected = t;
             }
         });
+    });
+    ui.add_space(8.0);
+    // 黄历白卡片（对齐 HTML .huangli）
+    Frame::none()
+        .fill(Color32::WHITE)
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(12.0, 10.0))
+        .show(ui, |ui| {
+            show_huangli_row(ui, cal.selected);
+        });
+    ui.add_space(8.0);
+    show_fortune_panel(ui, svc, cal);
+    ui.add_space(8.0);
+    // 网格区关掉默认行距，只用显式 gap，避免底部多出空隙或溢出
+    let gap = 3.0_f32;
+    ui.columns(7, |cols| {
+        for (i, name) in ["一", "二", "三", "四", "五", "六", "日"].iter().enumerate() {
+            cols[i].label(
+                RichText::new(*name)
+                    .size(11.0)
+                    .strong()
+                    .color(theme::text_muted()),
+            );
+        }
+    });
+    // 纵向刚好填满剩余高度：6 行 + 5 个 gap
+    let n_rows = 6_usize;
+    let remain = ui.available_height().max(1.0);
+    let cell_h = ((remain - gap * (n_rows - 1) as f32) / n_rows as f32).max(1.0);
+    let cell_w = ((ui.available_width() - gap * 6.0) / 7.0).max(1.0);
+    let first = NaiveDate::from_ymd_opt(cal.year, cal.month, 1).unwrap_or_else(today);
+    let pad = first.weekday().num_days_from_monday() as i64;
+    let start = first - Duration::try_days(pad).unwrap_or_default();
+    for week in 0..n_rows {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for d in 0..7 {
+                let day = start + Duration::try_days((week * 7 + d) as i64).unwrap_or_default();
+                day_cell(
+                    ui,
+                    cal,
+                    all,
+                    q,
+                    day,
+                    cell_w,
+                    cell_h,
+                    selected,
+                    editing,
+                    open_new,
+                    picked,
+                );
+            }
+        });
+        if week + 1 < n_rows {
+            ui.add_space(gap);
+        }
+    }
 }
 
 fn shift_month(cal: &mut CalendarUi, delta: i32) {
@@ -1975,15 +2230,18 @@ fn warn_task_card(
     };
     let excerpt = content_excerpt(m, 36);
     let deadline = deadline_date(&m.due_date, &m.end_date);
+    // 效果稿：任务条落在暖灰 surface 上；过期仍用警示底
     let fill = if matches!(accent, TaskAccent::Overdue) && !m.done {
         theme::warn_overdue_bg()
     } else {
-        theme::card()
+        theme::panel()
     };
     let stroke_c = if matches!(accent, TaskAccent::Overdue) && !m.done {
         theme::warn_overdue_border()
+    } else if selected.as_deref() == Some(m.id.as_str()) {
+        theme::shell_accent()
     } else {
-        theme::border()
+        Color32::TRANSPARENT
     };
 
     let mut consumed = false;
