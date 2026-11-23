@@ -64,6 +64,7 @@ fn acquire_inner(data_dir: &Path) -> Result<SingleInstanceGuard, ()> {
     Ok(SingleInstanceGuard { _file: file })
 }
 
+#[cfg(windows)]
 fn read_owner_pid(data_dir: &Path) -> Option<u32> {
     let mut file = OpenOptions::new().read(true).open(lock_path(data_dir)).ok()?;
     let mut s = String::new();

@@ -1,3 +1,6 @@
+mod node_start;
+pub use node_start::{start_node, NodeStartOpts, StartedNode};
+
 use memo_core::config::NodeRole;
 use memo_core::disk::{
     self, estimate_sync_need, probe_data_dir, DiskSpace, INCREMENTAL_MIN_FREE, SKIP_FULL_SYNC_FREE,

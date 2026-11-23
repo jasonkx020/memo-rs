@@ -8,19 +8,19 @@ name = "memo"
 path = "src/main.rs"
 
 [features]
-default = ["tray"]
-# 透传桌面托盘（Win / macOS / Ubuntu）；无 GTK 的服务器：--no-default-features
-tray = ["memo-app/tray"]
+# 默认带桌面 UI。游戏/无图形服务器：
+#   cargo build -p memo-cli --release --no-default-features
+default = ["ui"]
+ui = ["dep:memo-app", "memo-app/tray"]
 
 [dependencies]
 memo-core = { workspace = true }
 memo-sync = { workspace = true }
-memo-app = { workspace = true, default-features = false }
+memo-app = { workspace = true, optional = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rpassword = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }
-zeroize = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.52.0", features = ["Win32_System_Console", "Win32_Foundation"] }

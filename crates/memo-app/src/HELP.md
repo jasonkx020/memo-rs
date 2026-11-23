@@ -117,4 +117,4 @@
 ## FAQ
 
 - **发现不到节点**：检查同网段、同集群盐、防火墙放行 UDP 17000 / TCP 监听端口，且双方均为新版本。
-- **headless**：`memo --headless --identity <指纹>` 或 `--identity-file path.memokey`（明文包直接导入后提示设本机登录密码；旧版加密包先问包口令）。
+- **无界面节点**：`memo --no-ui`（可选 `--identity` / 环境变量 `MEMO_IDENTITY`，或 `--identity-file`）。服务器首次设 `MEMO_LOGIN_PASSWORD` 即可自动创建存储节点身份。`--headless` 为隐藏别名。

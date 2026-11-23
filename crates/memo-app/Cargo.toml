@@ -5,8 +5,7 @@ edition.workspace = true
 
 [features]
 default = ["tray"]
-# Windows / macOS / Ubuntu 桌面托盘；无 GTK 的纯服务器可关：
-#   cargo build -p memo-cli --no-default-features
+# 由 memo-cli 的 ui 特性启用。纯服务器请编 memo-cli --no-default-features（不依赖本 crate）。
 tray = ["dep:tray-icon"]
 
 [dependencies]

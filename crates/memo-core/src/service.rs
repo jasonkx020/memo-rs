@@ -1401,10 +1401,6 @@ pub fn unlock_with_identity(
     Ok((svc, audit))
 }
 
-/// 兼容旧 API：已废弃。
-pub fn unlock(_cfg: Config, _password: &[u8]) -> anyhow::Result<(Arc<MemoService>, Arc<AuditLog>)> {
-    anyhow::bail!("请使用身份密钥对登录（unlock_with_identity）")
-}
 
 #[cfg(test)]
 mod restore_tests {

@@ -28,6 +28,9 @@ mod commercial;
 mod theme;
 mod tip_code;
 mod update_check;
+mod runtime_boot;
+mod settings_view;
+mod app;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText};
 use identity_gate::{GateAction, IdentityGateState};
@@ -37,7 +40,6 @@ use memo_core::person::Gender;
 use memo_core::service::HistoryEvent;
 use memo_core::store::{MemoCategory, MemoLifecycle, MemoPriority, MemoVisibility};
 use memo_form::{FormMode, MemoFormState};
-use memo_sync::{EngineBroadcaster, SyncEngine};
 use msg::BgMsg;
 use runtime::AppRuntime;
 use shell::{MemoDrawerAction, ShellAction, ShellUi};
@@ -65,49 +67,9 @@ fn auto_lock_label(minutes: u32) -> String {
     }
 }
 
-fn settings_item_header(ui: &mut egui::Ui, title: &str, description: &str) {
-    ui.label(
-        RichText::new(title)
-            .size(13.5)
-            .strong()
-            .color(theme::text()),
-    );
-    if !description.is_empty() {
-        ui.add_space(3.0);
-        ui.label(
-            RichText::new(description)
-                .size(12.0)
-                .color(theme::text_muted()),
-        );
-    }
-    ui.add_space(6.0);
-}
-
-fn settings_item_gap(ui: &mut egui::Ui) {
-    ui.add_space(14.0);
-}
-
-fn settings_section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(title)
-            .size(16.0)
-            .strong()
-            .color(theme::text()),
-    );
-    ui.add_space(6.0);
-    ui.separator();
-    ui.add_space(10.0);
-}
-
-fn settings_text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> bool {
-    ui.add(
-        egui::TextEdit::singleline(text)
-            .desired_width(width)
-            .hint_text(theme::hint(hint)),
-    )
-    .changed()
-}
+use settings_view::{
+    settings_item_gap, settings_item_header, settings_section, settings_text_field,
+};
 
 fn theme_pref_label(p: memo_core::ThemePreference) -> &'static str {
     p.label()
@@ -1541,7 +1503,7 @@ impl eframe::App for MemoApp {
                                     let _ = id;
                                     existing
                                 } else {
-                                    unlock_runtime_identity(cfg, id, &local_password)?
+                                    runtime_boot::unlock_runtime_identity(cfg, id, &local_password)?
                                 };
                                 Ok((rt, session_pw))
                             })()
@@ -3620,85 +3582,5 @@ impl eframe::App for MemoApp {
     }
 }
 
-fn unlock_runtime_identity(
-    cfg: Config,
-    identity: IdentityKeys,
-    local_password: &str,
-) -> anyhow::Result<Arc<AppRuntime>> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("memo-sync")
-        .worker_threads(2)
-        .build()
-        .map_err(|e| anyhow::anyhow!("无法启动后台运行时: {e}"))?;
+pub use runtime_boot::{run_gui, run_gui_with_opts};
 
-        let (svc, engine) = {
-        let _guard = rt.enter();
-        let (svc, _audit) =
-            memo_core::service::unlock_with_identity(cfg.clone(), &identity, local_password)?;
-        let _ = svc.restore_from_hosted();
-        let _ = svc.purge_expired_trash();
-        svc.ensure_session_person()?;
-        // LICENSE_ENFORCED 时未授权会关闭发现/可见/托管；当前版本全开
-        let ok = commercial::commercial_features_ok();
-        let lan_discovery = cfg.lan_discovery && ok;
-        let node_visible = cfg.node_visible && ok;
-        let engine = SyncEngine::new_with_identity(
-            cfg.node_id.clone(),
-            cfg.listen_port,
-            cfg.peers.clone(),
-            svc.store(),
-            svc.person_store(),
-            cfg.cluster_salt_hex.clone(),
-            lan_discovery,
-            cfg.node_role,
-            node_visible,
-            cfg.accept_foreign_backup && ok,
-            identity.fingerprint.clone(),
-            identity.alias.clone(),
-            PathBuf::from(&cfg.data_dir),
-        );
-        engine.set_service(&svc);
-        engine.set_backup_targets(cfg.backup_targets.clone());
-        svc.set_broadcaster(Arc::new(EngineBroadcaster::new(engine.clone())));
-        engine.start();
-        (svc, engine)
-    };
-
-    Ok(Arc::new(AppRuntime {
-        svc,
-        engine,
-        cfg,
-        _rt: rt,
-    }))
-}
-
-pub fn run_gui(cfg: Config) -> eframe::Result<()> {
-    run_gui_with_opts(cfg, false)
-}
-
-/// `start_hidden`：开机 `--tray` 时主窗先隐藏，仅托盘常驻。
-pub fn run_gui_with_opts(cfg: Config, start_hidden: bool) -> eframe::Result<()> {
-    if single_instance::try_acquire(std::path::Path::new(&cfg.data_dir))
-        == single_instance::AcquireResult::AlreadyRunning
-    {
-        return Ok(());
-    }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 640.0])
-            .with_min_inner_size([960.0, 640.0])
-            .with_title("分布式备忘录")
-            .with_icon(app_icon::window_icon()),
-        centered: true,
-        ..Default::default()
-    };
-    eframe::run_native(
-        "分布式备忘录",
-        options,
-        Box::new(move |cc| {
-            fonts::configure_cjk_fonts(&cc.egui_ctx);
-            Box::new(MemoApp::new(cfg, start_hidden))
-        }),
-    )
-}

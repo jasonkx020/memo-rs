@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# macOS 发布构建（使用较新 Rust / rust-toolchain.toml 的 stable，非 Windows 1.77.2）
+# macOS 发布构建
+# 桌面（默认）: ./pack-green-macos.sh
+# 无 UI 服务器: MEMO_SERVER=1 ./pack-green-macos.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,21 +19,38 @@ printf '%s\n' "$MIN_RUST" "$RUSTC_VER" | sort -V | head -n1 | grep -qx "$MIN_RUS
   exit 1
 }
 
+# 请用 MEMO_SERVER=1。旧名 MEMO_NO_TRAY / MEMO_NO_UI 仍映射（已弃用）。
+if [[ "${MEMO_NO_TRAY:-0}" == "1" || "${MEMO_NO_UI:-0}" == "1" ]]; then
+  echo "提示: 请改用 MEMO_SERVER=1（MEMO_NO_TRAY/MEMO_NO_UI 已弃用）" >&2
+  MEMO_SERVER=1
+fi
+SERVER="${MEMO_SERVER:-0}"
 ARCH="$(uname -m)"
-echo "[1/2] 发布构建（memo-cli --release，宿主机架构: ${ARCH}，toolchain=$(rustc -V)）..."
-cargo build -p memo-cli --release --locked
+
+CARGO_ARGS=(build -p memo-cli --release --locked)
+OUT_NAME="memo"
+if [[ "$SERVER" == "1" ]]; then
+  CARGO_ARGS+=(--no-default-features)
+  OUT_NAME="memo-server"
+  echo "模式: 服务器（无 UI）· ${ARCH}"
+else
+  echo "模式: 桌面（UI + 托盘）· ${ARCH}"
+fi
+
+echo "[1/2] 发布构建（${CARGO_ARGS[*]}，toolchain=$(rustc -V)）..."
+cargo "${CARGO_ARGS[@]}"
 
 mkdir -p dist
-cp -f target/release/memo dist/memo
-chmod +x dist/memo
+cp -f target/release/memo "dist/${OUT_NAME}"
+chmod +x "dist/${OUT_NAME}"
+if [[ "$SERVER" == "1" ]]; then
+  cp -f "dist/${OUT_NAME}" dist/memo
+  chmod +x dist/memo
+fi
 
 echo
-echo "完成: dist/memo"
-echo "说明: 复制该文件即可使用；同网段自动发现需放行 TCP 端口 + UDP 17000"
-echo "无窗口常驻: ./memo --no-ui --identity <指纹>（详见 docs/server-node.md / deploy/launchd）"
-echo "架构: ${ARCH}（Apple Silicon 与 Intel 需分别在对应机器上构建，或自行配置交叉编译）"
+echo "完成: dist/${OUT_NAME}"
+echo "无窗口常驻: ./memo --no-ui --identity <指纹>（详见 docs/server-node.md）"
+echo "架构: ${ARCH}"
 echo
-# 可选 notarize / codesign（售卖分发建议）:
-#   codesign --force --sign "Developer ID Application: ..." dist/memo
-echo
-ls -lh dist/memo
+ls -lh dist/memo*

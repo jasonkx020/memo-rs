@@ -15,6 +15,7 @@ pub mod identity_keys;
 pub mod license;
 pub mod male_health;
 pub mod memo_doc;
+pub mod node_lock;
 pub mod peer_acl;
 pub mod person;
 pub mod service;

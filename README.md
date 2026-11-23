@@ -14,34 +14,37 @@ AES-256-GCM、Argon2id、Ed25519 审计链、LWW-Map、Tokio TCP、egui。
 
 ## 绿色包构建
 
-**Windows**（脚本强制 1.77.2 + 静态 CRT，见 `.cargo/config.toml`）：
+| 平台 | 桌面（含 UI） | 无 UI 服务器 |
+|------|--------------|--------------|
+| Windows（1.77.2 + 静态 CRT） | `pack-green.bat` → `dist\memo.exe` | `pack-server.bat` → `dist\memo-server.exe`（兼 `memo.exe`） |
+| Linux（stable ≥ 1.78） | `./pack-green.sh` | `./pack-server.sh` |
+| macOS | `./pack-green-macos.sh` | `./pack-server-macos.sh` |
 
 ```bat
 pack-green.bat
+pack-server.bat
 ```
-
-产物：`dist\memo.exe`。
-
-**Linux / macOS**（stable，建议 ≥ 1.78）：
 
 ```bash
-chmod +x pack-green.sh pack-green-macos.sh   # 首次
-./pack-green.sh            # Linux
-./pack-green-macos.sh      # macOS
+chmod +x pack-green.sh pack-server.sh pack-green-macos.sh pack-server-macos.sh
+./pack-green.sh          # 桌面
+./pack-server.sh         # 服务器（--no-default-features）
 ```
 
-托盘默认开启，兼容 **Windows / macOS / Ubuntu** 桌面。Linux（Ubuntu）需系统开发包：
+| 构建 | feature | 依赖 |
+|------|---------|------|
+| 桌面（默认） | `ui` | GTK / X11 / OpenGL；Ubuntu 见下方 apt |
+| 服务器 | 无 | 不需要桌面库 |
+
+Ubuntu 桌面编译：
 
 ```bash
 sudo apt install build-essential pkg-config libgl1-mesa-dev \
-  libgtk-3-dev libgdk-pixbuf2.0-dev libayatana-appindicator3-dev \
+  libgtk-3-dev libgdk-pixbuf2.0-dev libayatana-appindicator3-dev libxdo-dev \
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
 ```
 
-无桌面服务器（不装 GTK）可关托盘再编：`MEMO_NO_TRAY=1 ./pack-green.sh`。
-
-产物：`dist/memo`。GUI 需本机 OpenGL；无窗口主节点：`memo --no-ui --identity <指纹>`。  
-Apple Silicon 与 Intel 需分别在对应机器构建（或自行交叉编译）。
+服务器不建终端用户：设 `MEMO_LOGIN_PASSWORD` 后 `memo --no-ui` 会自动创建**存储节点身份**。详见 [docs/server-node.md](docs/server-node.md)。
 
 依赖版本为兼容 Win7 构建做了钉死（同一 `Cargo.lock`）；Linux/macOS 仍用新 rustc 编译这些依赖即可。  
 渲染使用 **OpenGL(glow)**。
