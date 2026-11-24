@@ -850,6 +850,8 @@ fn show_merged_care_page(
     if pe {
         if let Some(n) = next_period {
             parts.push(format!("预计经期 {}", n.format("%m-%d")));
+        } else {
+            parts.push("预计经期 —".into());
         }
     }
     if ce {
@@ -869,14 +871,35 @@ fn show_merged_care_page(
             parts.push("体检 —".into());
         }
     }
-    if !parts.is_empty() {
+    if pe || !parts.is_empty() {
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(parts.join(" · "))
-                    .size(11.0)
-                    .color(theme::text_muted()),
-            );
+            if !parts.is_empty() {
+                ui.label(
+                    RichText::new(parts.join(" · "))
+                        .size(11.0)
+                        .color(theme::text_muted()),
+                );
+            }
+            if pe {
+                ui.add_space(6.0);
+                if theme::ghost_button(ui, "重算")
+                    .on_hover_text("按已标记经期日重算，保证今天起有一次预测")
+                    .clicked()
+                {
+                    let fresh = svc.list();
+                    match period_view::recalc_period_prediction(svc, &fresh) {
+                        Ok(msg) => {
+                            *status_line = msg;
+                            if let Some(updated) = svc.current_cycle() {
+                                *cycle = updated;
+                            }
+                        }
+                        Err(e) => *status_line = e,
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
         });
     }
     ui.add_space(4.0);

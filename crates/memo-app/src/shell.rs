@@ -51,25 +51,26 @@ pub fn begin_new_memo(
     data_dir: &str,
     private_branch: PrivateBranch,
 ) {
-    use crate::memo_form::FormScope;
-    let (cat, scope) = match nav {
-        NavItem::Credentials => (MemoCategory::Credentials, FormScope::Credentials),
-        NavItem::GenderPrivate => {
-            let cat = match private_branch {
-                PrivateBranch::Todo | PrivateBranch::Care => MemoCategory::Todo,
-                PrivateBranch::Credentials => MemoCategory::Credentials,
-            };
-            (cat, FormScope::GenderPrivate)
-        }
-        _ => (MemoCategory::Todo, FormScope::Calendar),
+    use crate::memo_form::CreateEntryKind;
+    let entry = match nav {
+        NavItem::Credentials => CreateEntryKind::Memo,
+        NavItem::GenderPrivate => match private_branch {
+            PrivateBranch::Credentials => CreateEntryKind::PrivateMemo,
+            PrivateBranch::Todo | PrivateBranch::Care => CreateEntryKind::PrivateTask,
+        },
+        _ => CreateEntryKind::Task,
     };
     let stamp = today_ymd();
-    let prefill = if nav.is_task_space() {
+    let prefill = if matches!(
+        entry,
+        CreateEntryKind::Task | CreateEntryKind::PrivateTask
+    ) && nav.is_task_space()
+    {
         calendar_ymd.map(|d| format!("{d} 09:00"))
     } else {
         None
     };
-    *edit_form = MemoFormState::begin_create(cat, &stamp, prefill.as_deref(), scope);
+    *edit_form = MemoFormState::begin_create(entry, &stamp, prefill.as_deref());
     edit_form.data_dir = Some(std::path::PathBuf::from(data_dir));
     *editing = false;
     *show_new_memo = true;
@@ -177,10 +178,14 @@ pub struct ShellUi {
     pub last_nav_warn_ymd: String,
     /// 表单 / 详情抽屉宽度（按身份持久化）
     pub drawer: page_shell::DrawerWidths,
+    /// 关预览后仍高亮的列表条目（今日/日历/备忘/私密共用）
+    pub list_focus: Option<String>,
     /// 解锁恢复选中后：下一帧按导航重置侧栏抽屉动画（与鼠标点开同为滑入）。
     pub pending_side_drawer_anim: bool,
     /// 设置页左栏分类
     pub settings_tab: SettingsTab,
+    /// 关怀页「应用设置」入口：只弹关怀相关设置，不打开完整设置。
+    pub show_care_settings: bool,
 }
 
 impl Default for ShellUi {
@@ -197,8 +202,10 @@ impl Default for ShellUi {
             content_host: egui::Rect::NOTHING,
             last_nav_warn_ymd: String::new(),
             drawer: page_shell::DrawerWidths::default(),
+            list_focus: None,
             pending_side_drawer_anim: false,
             settings_tab: SettingsTab::default(),
+            show_care_settings: false,
         }
     }
 }
@@ -425,12 +432,37 @@ pub fn request_lock(
     }
 }
 
+/// 在线用鲜艳绿（深色 success 在白底上看不清）；闪烁由绘制处叠加。
 fn status_dot_color(st: PeerStatus) -> Color32 {
     match st {
-        PeerStatus::Online => theme::success(),
+        PeerStatus::Online => Color32::from_rgb(0x22, 0xC5, 0x5E),
         PeerStatus::Stale => theme::warn(),
         PeerStatus::Offline | PeerStatus::Undiscovered => theme::text_muted(),
     }
+}
+
+fn paint_peer_status_dot(ui: &mut egui::Ui, center: egui::Pos2, st: PeerStatus) {
+    let base = status_dot_color(st);
+    let (fill, glow) = if st == PeerStatus::Online {
+        let t = ui.ctx().input(|i| i.time);
+        let u = (t * 2.8).sin() as f32 * 0.5 + 0.5;
+        ui.ctx().request_repaint();
+        // 亮暗交替，并带一圈半透明光晕
+        let fill = Color32::from_rgba_unmultiplied(
+            0x22,
+            0xC5,
+            0x5E,
+            (180.0 + u * 75.0) as u8,
+        );
+        let glow = Color32::from_rgba_unmultiplied(0x22, 0xC5, 0x5E, (40.0 + u * 70.0) as u8);
+        (fill, Some((4.0 + u * 2.5, glow)))
+    } else {
+        (base, None)
+    };
+    if let Some((r, c)) = glow {
+        ui.painter().circle_filled(center, r, c);
+    }
+    ui.painter().circle_filled(center, 4.5, fill);
 }
 
 fn peer_backup_checked(targets: &[String], id: &str) -> bool {
@@ -622,12 +654,8 @@ fn show_nodes_panel(
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let (dot, _) =
-                                ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                            ui.painter().circle_filled(
-                                dot.center(),
-                                4.0,
-                                status_dot_color(p.status),
-                            );
+                                ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                            paint_peer_status_dot(ui, dot.center(), p.status);
                             ui.add_space(4.0);
                             ui.vertical(|ui| {
                                 ui.label(
@@ -1366,6 +1394,15 @@ pub fn show(
                     editing,
                     nav_locked,
                     show_settings,
+                    &alias_show,
+                    show_change_pw,
+                    show_help,
+                    show_about,
+                    show_export,
+                    export_pw,
+                    export_path,
+                    export_ids,
+                    data_dir,
                     &mut action,
                 );
             }
@@ -1392,19 +1429,7 @@ pub fn show(
                                     ui,
                                     shell,
                                     search,
-                                    &alias_show,
-                                    selected,
-                                    editing,
                                     nav_locked,
-                                    show_settings,
-                                    show_change_pw,
-                                    show_help,
-                                    show_about,
-                                    show_export,
-                                    export_pw,
-                                    export_path,
-                                    export_ids,
-                                    data_dir,
                                     update_hint_ver,
                                     update_hint_url,
                                     &mut action,
@@ -1489,6 +1514,8 @@ pub fn show(
                                     settings_draft,
                                     live_cfg,
                                     &alias_show,
+                                    svc,
+                                    status_line,
                                 );
                             } else {
                                 show_shell_body(
@@ -1538,7 +1565,7 @@ pub fn show(
 
     if shell.gender.request_open_settings {
         shell.gender.request_open_settings = false;
-        *show_settings = true;
+        shell.show_care_settings = true;
     }
     if shell.cal.request_open_settings {
         shell.cal.request_open_settings = false;
@@ -1615,6 +1642,7 @@ fn show_shell_body(
                         &all,
                         search,
                         selected,
+                        &mut shell.list_focus,
                         editing,
                         &mut action.open_new_memo,
                         &mut picked,
@@ -1631,6 +1659,7 @@ fn show_shell_body(
                                     &all,
                     search,
                                     selected,
+                                    &mut shell.list_focus,
                                     editing,
                                     &mut action.open_new_memo,
                                     &mut picked,
@@ -1659,6 +1688,7 @@ fn show_shell_body(
                             memo_doc,
                             edit_form,
                         );
+                        shell.list_focus = Some(id);
                         if pick_edit {
                             begin_memo_edit(
                                         &all,
@@ -1892,6 +1922,7 @@ fn show_shell_body(
                     &filtered,
                         &all,
                         selected,
+                    &mut shell.list_focus,
                     title_draft,
                     body_draft,
                     visibility_draft,
@@ -2252,25 +2283,13 @@ fn show_update_hint(ui: &mut egui::Ui, latest: &str, download_url: &str) {
     }
 }
 
-/// 主卡片顶栏：标题 · 搜索 · 身份 · 新建（对齐效果稿）。
+/// 主卡片顶栏：标题 · 搜索 · 新建（身份已迁至左栏顶部）。
 #[allow(clippy::too_many_arguments)]
 fn show_shell_topbar(
     ui: &mut egui::Ui,
     shell: &mut ShellUi,
     search: &mut String,
-    alias_show: &str,
-    selected: &mut Option<String>,
-    editing: &mut bool,
     nav_locked: bool,
-    show_settings: &mut bool,
-    show_change_pw: &mut bool,
-    show_help: &mut bool,
-    show_about: &mut bool,
-    show_export: &mut bool,
-    export_pw: &mut String,
-    export_path: &mut String,
-    export_ids: &mut Option<Vec<String>>,
-    data_dir: &str,
     update_hint_ver: Option<&str>,
     update_hint_url: Option<&str>,
     action: &mut ShellAction,
@@ -2288,84 +2307,45 @@ fn show_shell_topbar(
             show_update_hint(ui, ver, url);
         }
 
+        // 搜索 + 新建：固定 TOP_BAR_CTRL_H，垂直中线对齐
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.set_height(TOP_BAR_CTRL_H);
             ui.spacing_mut().item_spacing.x = 10.0;
 
             let new_enabled = !nav_locked
                 && (shell.nav.is_task_space()
                     || shell.nav.is_credentials()
                     || shell.nav.is_gender_private());
-            if ui
-                .add_enabled(
-                    new_enabled,
-                    egui::Button::new(
-                        RichText::new("新建")
-                            .size(13.5)
-                            .strong()
-                            .color(Color32::WHITE),
+            let new_resp = ui
+                .add_enabled_ui(new_enabled, |ui| {
+                    ui.add_sized(
+                        Vec2::new(68.0, TOP_BAR_CTRL_H),
+                        egui::Button::new(
+                            RichText::new("新建")
+                                .size(13.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(theme::shell_accent())
+                        .rounding(Rounding::same(9.0)),
                     )
-                    .fill(theme::shell_accent())
-                    .rounding(Rounding::same(9.0))
-                    .min_size(Vec2::new(68.0, 36.0)),
-                )
+                })
+                .inner
                 .on_hover_text(if new_enabled {
                     "新建条目"
                 } else {
                     "当前页不支持新建，或请先关闭编辑"
-                })
-                .clicked()
-            {
+                });
+            if new_resp.clicked() {
                 action.open_new_memo = true;
             }
 
-            let identity_resp = show_identity_chip(ui, alias_show);
-            let identity_menu_id = ui.make_persistent_id("shell_identity_menu");
-            if identity_resp.clicked() {
-                ui.memory_mut(|m| m.toggle_popup(identity_menu_id));
-            }
-            egui::popup_below_widget(ui, identity_menu_id, &identity_resp, |ui| {
-                ui.set_min_width(148.0);
-                        if ui.button("设置").clicked() {
-                            shell.nav = NavItem::Settings;
-                            ui.memory_mut(|m| m.close_popup());
-                        }
-                if ui.button("切换身份 / 锁定").clicked() {
-                    request_lock(shell, selected, editing, action);
-                    ui.memory_mut(|m| m.close_popup());
-                }
-                if ui.button("重置密码").clicked() {
-                    *show_change_pw = true;
-                    ui.memory_mut(|m| m.close_popup());
-                }
-                if ui.button("帮助").clicked() {
-                    *show_help = true;
-                    ui.memory_mut(|m| m.close_popup());
-                }
-                if ui.button("关于").clicked() {
-                    *show_about = true;
-                    ui.memory_mut(|m| m.close_popup());
-                }
-                if ui.button("导出").clicked() {
-                    let dir = std::path::PathBuf::from(data_dir).join("exports");
-                    let path = dir.join(format!(
-                        "memo-all-{}.txt",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0)
-                    ));
-                    *export_ids = None;
-                    *export_path = path.display().to_string();
-                    export_pw.clear();
-                    *show_export = true;
-                    ui.memory_mut(|m| m.close_popup());
-                }
-            });
-
-            let search_w =
-                page_shell::fit_avail_width(ui, ui.available_width().min(320.0).max(140.0));
+            let search_w = page_shell::fit_avail_width(
+                ui,
+                (ui.available_width() - 10.0).min(320.0).max(140.0),
+            );
             let (search_rect, search_click) =
-                ui.allocate_exact_size(Vec2::new(search_w, 36.0), Sense::click());
+                ui.allocate_exact_size(Vec2::new(search_w, TOP_BAR_CTRL_H), Sense::click());
             ui.painter().rect(
                 search_rect,
                 Rounding::same(9.0),
@@ -2406,6 +2386,7 @@ fn show_shell_topbar(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_left_rail(
     ui: &mut egui::Ui,
     shell: &mut ShellUi,
@@ -2419,6 +2400,15 @@ fn show_left_rail(
     editing: &mut bool,
     nav_locked: bool,
     show_settings: &mut bool,
+    alias_show: &str,
+    show_change_pw: &mut bool,
+    show_help: &mut bool,
+    show_about: &mut bool,
+    show_export: &mut bool,
+    export_pw: &mut String,
+    export_path: &mut String,
+    export_ids: &mut Option<Vec<String>>,
+    data_dir: &str,
     action: &mut ShellAction,
 ) {
     let _ = private_overdue_n;
@@ -2436,23 +2426,52 @@ fn show_left_rail(
         full.max,
     );
 
-    // —— 上：品牌 + 主导航 + 系统（可裁剪）——
+    // —— 上：身份（取代品牌行）+ 主导航 + 系统（可裁剪）——
     {
         let mut top = ui.child_ui(top_rect, egui::Layout::top_down(egui::Align::Min));
         top.set_clip_rect(top_rect);
-        top.horizontal(|ui| {
-            ui.label(
-                RichText::new("Memo")
-                    .size(26.0)
-                    .strong()
-                    .color(theme::text()),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("效果稿")
-                    .size(10.0)
-                    .color(theme::mac_text_tertiary()),
-            );
+        let identity_resp = show_identity_chip(&mut top, alias_show);
+        let identity_menu_id = top.make_persistent_id("shell_identity_menu");
+        if identity_resp.clicked() {
+            top.memory_mut(|m| m.toggle_popup(identity_menu_id));
+        }
+        egui::popup_below_widget(&top, identity_menu_id, &identity_resp, |ui| {
+            ui.set_min_width(148.0);
+            if ui.button("设置").clicked() {
+                shell.nav = NavItem::Settings;
+                ui.memory_mut(|m| m.close_popup());
+            }
+            if ui.button("切换身份 / 锁定").clicked() {
+                request_lock(shell, selected, editing, action);
+                ui.memory_mut(|m| m.close_popup());
+            }
+            if ui.button("重置密码").clicked() {
+                *show_change_pw = true;
+                ui.memory_mut(|m| m.close_popup());
+            }
+            if ui.button("帮助").clicked() {
+                *show_help = true;
+                ui.memory_mut(|m| m.close_popup());
+            }
+            if ui.button("关于").clicked() {
+                *show_about = true;
+                ui.memory_mut(|m| m.close_popup());
+            }
+            if ui.button("导出").clicked() {
+                let dir = std::path::PathBuf::from(data_dir).join("exports");
+                let path = dir.join(format!(
+                    "memo-all-{}.txt",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                ));
+                *export_ids = None;
+                *export_path = path.display().to_string();
+                export_pw.clear();
+                *show_export = true;
+                ui.memory_mut(|m| m.close_popup());
+            }
         });
         top.add_space(12.0);
 
@@ -2484,6 +2503,7 @@ fn show_left_rail(
                 show_settings,
                 selected,
                 editing,
+                &mut shell.list_focus,
             );
         }
 
@@ -2507,6 +2527,7 @@ fn show_left_rail(
                 show_settings,
                 selected,
                 editing,
+                &mut shell.list_focus,
             );
         }
     }
@@ -2531,6 +2552,7 @@ fn show_left_rail(
             show_settings,
             selected,
             editing,
+            &mut shell.list_focus,
         );
         let lock_resp = foot.add(
             egui::Button::new(
@@ -2779,6 +2801,7 @@ fn show_top_tabs(
                     }
         if !tab_locked && resp.clicked() {
             shell.nav = *item;
+            shell.list_focus = None;
             if item.is_gender_private() {
                 select_gender_hub(selected, editing);
             } else {
@@ -2938,6 +2961,7 @@ fn nav_row(
     show_settings: &mut bool,
     selected: &mut Option<String>,
     editing: &mut bool,
+    list_focus: &mut Option<String>,
 ) {
     let sel = *current == item && !locked;
     ui.add_space(2.0);
@@ -3118,6 +3142,7 @@ fn nav_row(
             return;
         }
         *current = item;
+        *list_focus = None;
         // 设置走中央页，不再强制弹窗
         if item.is_gender_private() {
             // 私密默认进关怀卡，不强制 hub
@@ -3340,6 +3365,7 @@ fn show_split(
     filtered: &[MemoView],
     all_memos: &[MemoView],
     selected: &mut Option<String>,
+    list_focus: &mut Option<String>,
     title_draft: &mut String,
     body_draft: &mut String,
     visibility_draft: &mut MemoVisibility,
@@ -3371,7 +3397,7 @@ fn show_split(
     _cred_sort: &mut CredSort,
     cred_tag: &mut Option<String>,
     private_branch: &mut PrivateBranch,
-    open_new_memo: &mut bool,
+    _open_new_memo: &mut bool,
     open_sticky: &mut Option<String>,
     tx: &Sender<BgMsg>,
 ) {
@@ -3379,13 +3405,10 @@ fn show_split(
     // 必须在 horizontal 之前取高度：horizontal 内 available_height 不可靠
     let full_h = ui.available_height().max(120.0);
     let gap = page_shell::PAGE_GAP;
-    // 备忘页对齐 HTML：单栏列表 + 叠层详情抽屉（无右栏过滤轨）
-    // 私密：左列表固定 · 右关怀日历伸展
+    // 备忘 / 私密任务备忘：单栏列表 + 叠层抽屉（对齐 HTML）
     // 其它：左列表 · 右详情
-    let (list_w, detail_w) = if nav.is_credentials() {
+    let (list_w, detail_w) = if nav.is_credentials() || nav.is_gender_private() {
         (avail.max(1.0), 0.0)
-    } else if nav.is_gender_private() {
-        page_shell::page_rail_split(avail)
     } else {
         // 勿 .max(120/160) 硬底：窄窗时 list+detail 会超过 avail → allocate 退进程
         if !avail.is_finite() || avail <= gap + 2.0 {
@@ -3404,32 +3427,55 @@ fn show_split(
     let list_n = filtered.iter().filter(|m| !is_private_hub(&m.id)).count();
     let credentials_page = nav.is_credentials();
     let private_page = nav.is_gender_private();
+    let private_cred_list =
+        private_page && matches!(*private_branch, PrivateBranch::Credentials);
+    let card_list = credentials_page || private_cred_list;
     // 备忘 / 私密：页头进左栏，右栏顶对齐上移
 
-    // 私密：顶部分段对齐 HTML
+    // 私密：顶部分段对齐 HTML（关怀 | 私密任务 | 私密备忘）
     if private_page {
+        let prev_branch = *private_branch;
         show_private_seg(ui, private_branch);
-        ui.add_space(14.0);
+        if *private_branch != prev_branch {
+            // 切分段时收起关怀日历 / 详情选中，回到对应列表入口
+            if selected.as_deref() == Some(HUB_GENDER_PRIVATE) || is_new_draft(selected.as_deref().unwrap_or("")) {
+                *selected = None;
+            }
+            *editing = false;
+            if matches!(*private_branch, PrivateBranch::Care) {
+                *list_focus = None;
+            }
+        }
+        ui.add_space(16.0);
         if matches!(*private_branch, PrivateBranch::Care) {
             if selected.as_deref() == Some(HUB_GENDER_PRIVATE) {
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new("← 返回关怀")
-                                .size(12.5)
-                                .color(theme::shell_accent()),
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("← 关怀入口")
+                                    .size(12.5)
+                                    .strong()
+                                    .color(theme::shell_accent()),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .frame(false),
                         )
-                        .fill(Color32::TRANSPARENT)
-                        .frame(false),
-                    )
-                    .clicked()
-                {
-                    *selected = None;
-                    *editing = false;
-                }
-                ui.add_space(8.0);
+                        .clicked()
+                    {
+                        *selected = None;
+                        *editing = false;
+                    }
+                });
+                ui.add_space(10.0);
                 gender_private_view::show(ui, svc, gender_ui, all_memos, status_line);
             } else {
+                ui.label(
+                    RichText::new("本机私密 · 经期与体检。点卡片进入关怀日历。")
+                        .size(13.0)
+                        .color(theme::mac_text_tertiary()),
+                );
+                ui.add_space(14.0);
                 show_private_care_cards(ui, svc, gender_ui, selected, editing, status_line);
             }
             return;
@@ -3469,7 +3515,6 @@ fn show_split(
                         ui,
                         "备忘",
                         &format!("{list_n} 条 · 永久保存"),
-                        open_new_memo,
                     );
                     ui.add_space(page_shell::PAGE_GAP);
                 } else if private_page {
@@ -3483,7 +3528,6 @@ fn show_split(
                                 PrivateBranch::Care => "关怀",
                             },
                             &format!("{list_n} 条"),
-                            open_new_memo,
                         );
                         ui.add_space(page_shell::PAGE_GAP);
                     }
@@ -3518,24 +3562,6 @@ fn show_split(
                                     .color(theme::text_muted()),
                             );
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("+")
-                                            .color(Color32::WHITE)
-                                            .strong()
-                                            .size(14.0),
-                                    )
-                                    .fill(theme::shell_accent())
-                                    .rounding(Rounding::same(6.0))
-                                    .min_size(Vec2::new(28.0, 26.0)),
-                                )
-                                .clicked()
-                            {
-                                *open_new_memo = true;
-                            }
-                        });
                     });
                     ui.add_space(8.0);
                 }
@@ -3546,7 +3572,6 @@ fn show_split(
                 let mut due_today_ids = std::collections::HashSet::new();
                 let mut due_soon_ids = std::collections::HashSet::new();
                 let display: Vec<&MemoView> = if private_warn {
-                    let hub: Vec<_> = filtered.iter().filter(|m| is_private_hub(&m.id)).collect();
                     let branch_cat = match *private_branch {
                         PrivateBranch::Todo | PrivateBranch::Care => MemoCategory::Todo,
                         PrivateBranch::Credentials => MemoCategory::Credentials,
@@ -3613,8 +3638,8 @@ fn show_split(
                         );
                         ui.add_space(6.0);
                     }
+                    // 不插「关怀与健康」虚拟卡；关怀入口只在「关怀」分段
                     let mut out = Vec::with_capacity(filtered.len());
-                    out.extend(hub);
                     out.extend(overdue);
                     out.extend(due_today);
                     out.extend(due_soon);
@@ -3633,7 +3658,25 @@ fn show_split(
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         if filtered.is_empty() {
-                            ui.label(theme::muted_label("暂无备忘"));
+                            let empty = if private_page {
+                                match *private_branch {
+                                    PrivateBranch::Todo => "还没有私密任务",
+                                    PrivateBranch::Credentials => "还没有私密备忘",
+                                    PrivateBranch::Care => "暂无内容",
+                                }
+                            } else if credentials_page {
+                                "还没有备忘"
+                            } else {
+                                "暂无备忘"
+                            };
+                            ui.add_space(24.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new(empty)
+                                        .size(13.5)
+                                        .color(theme::text_muted()),
+                                );
+                            });
                             return;
                         }
                         let mut last_group = "";
@@ -3704,7 +3747,9 @@ fn show_split(
                                     last_group = group;
                                 }
                             }
-                            let is_sel = selected.as_deref() == Some(m.id.as_str());
+                            let is_sel = !is_hub
+                                && (selected.as_deref() == Some(m.id.as_str())
+                                    || list_focus.as_deref() == Some(m.id.as_str()));
                             let stripe = if is_hub {
                                 None
                             } else if is_od {
@@ -3716,19 +3761,19 @@ fn show_split(
                             } else {
                                 None
                             };
-                            let border = if credentials_page && is_sel {
-                                theme::border()
-                            } else if is_sel {
-                                theme::shell_accent()
-                            } else if is_hub {
+                            // 选中主信号：强调软底；描边保持普通边框
+                            let border = if is_hub {
                                 theme::period_day()
                             } else if let Some(c) = stripe {
-                                c
+                                if is_sel {
+                                    theme::border()
+                                } else {
+                                    c
+                                }
                             } else {
                                 theme::border()
                             };
-                            // 备忘选中：浅蓝底；其它：白底 / hub 浅蓝
-                            let card_fill = if credentials_page && is_sel {
+                            let card_fill = if is_sel {
                                 theme::shell_accent_soft()
                             } else if is_hub {
                                 theme::shell_women_pill().linear_multiply(0.45)
@@ -3738,18 +3783,15 @@ fn show_split(
                             let mut toggled_done = false;
                             let resp = Frame::none()
                                 .fill(card_fill)
-                                .stroke(Stroke::new(
-                                    if is_sel && !credentials_page { 1.8 } else { 1.0 },
-                                    border,
-                                ))
-                                .rounding(Rounding::same(if credentials_page { 8.0 } else { 12.0 }))
+                                .stroke(Stroke::new(1.0, border))
+                                .rounding(Rounding::same(if card_list { 10.0 } else { 12.0 }))
                                 .inner_margin(Margin::symmetric(
-                                    if credentials_page { 10.0 } else { 12.0 },
-                                    if credentials_page { 7.0 } else { 10.0 },
+                                    if card_list { 14.0 } else { 12.0 },
+                                    if card_list { 12.0 } else { 10.0 },
                                 ))
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
-                                    if credentials_page && !is_hub {
+                                    if card_list && !is_hub {
                                         show_cred_list_row_body(ui, m);
                                     } else {
                                     ui.horizontal(|ui| {
@@ -3969,6 +4011,7 @@ fn show_split(
                                 if is_hub {
                                     // 关掉备忘抽屉，右栏日历本就在
                                     select_gender_hub(selected, editing);
+                                    *list_focus = None;
                                 } else {
                                     load_selection(
                                         svc,
@@ -3987,6 +4030,7 @@ fn show_split(
                                         memo_doc,
                                         edit_form,
                                     );
+                                    *list_focus = Some(m.id.clone());
                                 }
                             }
                             if !is_hub {
@@ -4010,6 +4054,7 @@ fn show_split(
                                             memo_doc,
                                             edit_form,
                                         );
+                                        *list_focus = Some(m.id.clone());
                                         ui.close_menu();
                                     }
                                     if theme::menu_item_mark(ui, "签", "生成桌面便签").clicked()
@@ -4026,14 +4071,14 @@ fn show_split(
                                     }
                                 });
                             }
-                            ui.add_space(if credentials_page { 4.0 } else { 6.0 });
+                            ui.add_space(if card_list { 8.0 } else { 6.0 });
                         }
                     });
             },
         );
 
-        // 备忘页无右栏（详情走叠层抽屉）；私密仍画关怀日历
-        if !credentials_page && detail_w > 1.0 {
+        // 备忘 / 私密列表无右栏（详情走叠层抽屉）
+        if !credentials_page && !private_page && detail_w > 1.0 {
             ui.allocate_ui_with_layout(
                 Vec2::new(detail_w, body_h),
                 egui::Layout::top_down(egui::Align::Min),
@@ -4042,44 +4087,40 @@ fn show_split(
                     ui.set_max_height(body_h);
                     ui.set_max_width(detail_w);
                     ui.set_clip_rect(ui.max_rect());
-                    if private_page {
-                        gender_private_view::show(ui, svc, gender_ui, all_memos, status_line);
-                    } else {
-                        show_detail(
-                            ui,
-                            svc,
-                            filtered,
-                            all_memos,
-                            gender_ui,
-                            selected,
-                            title_draft,
-                            body_draft,
-                            visibility_draft,
-                            category_draft,
-                            due_date_draft,
-                            end_date_draft,
-                            tags_draft,
-                            done_draft,
-                            priority_draft,
-                            editing,
-                            memo_doc,
-                            edit_form,
-                            status_line,
-                            show_delete,
-                            show_export,
-                            export_pw,
-                            export_path,
-                            export_ids,
-                            show_history,
-                            history_entity,
-                            history_events,
-                            history_sel_a,
-                            history_sel_b,
-                            data_dir,
-                            open_sticky,
-                            tx,
-                        );
-                    }
+                    show_detail(
+                        ui,
+                        svc,
+                        filtered,
+                        all_memos,
+                        gender_ui,
+                        selected,
+                        title_draft,
+                        body_draft,
+                        visibility_draft,
+                        category_draft,
+                        due_date_draft,
+                        end_date_draft,
+                        tags_draft,
+                        done_draft,
+                        priority_draft,
+                        editing,
+                        memo_doc,
+                        edit_form,
+                        status_line,
+                        show_delete,
+                        show_export,
+                        export_pw,
+                        export_path,
+                        export_ids,
+                        show_history,
+                        history_entity,
+                        history_events,
+                        history_sel_a,
+                        history_sel_b,
+                        data_dir,
+                        open_sticky,
+                        tx,
+                    );
                 },
             );
         }
@@ -4495,6 +4536,7 @@ fn archive_type_label(c: MemoCategory, tags: &[String]) -> &'static str {
 }
 
 fn show_private_seg(ui: &mut egui::Ui, private_branch: &mut PrivateBranch) {
+    // 浅底轨 + 选中松绿软底（相对 panel 有对比）+ accent 字
     Frame::none()
         .fill(theme::panel())
         .stroke(Stroke::new(1.0, theme::border()))
@@ -4509,23 +4551,34 @@ fn show_private_seg(ui: &mut egui::Ui, private_branch: &mut PrivateBranch) {
                     (PrivateBranch::Credentials, "私密备忘"),
                 ] {
                     let on = *private_branch == b;
-                    let (fill, fg) = if on {
-                        (theme::card(), theme::shell_accent())
+                    let fill = if on {
+                        theme::shell_accent_soft()
                     } else {
-                        (Color32::TRANSPARENT, theme::text_muted())
+                        Color32::TRANSPARENT
                     };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(label).size(13.0).strong().color(fg),
-                            )
-                            .fill(fill)
-                            .rounding(Rounding::same(8.0))
-                            .stroke(Stroke::NONE)
-                            .min_size(Vec2::new(0.0, 32.0)),
-                        )
-                        .clicked()
-                    {
+                    let fg = if on {
+                        theme::shell_accent()
+                    } else {
+                        theme::text_muted()
+                    };
+                    let btn = egui::Button::new(
+                        RichText::new(label).size(13.0).strong().color(fg),
+                    )
+                    .fill(fill)
+                    .rounding(Rounding::same(8.0))
+                    .stroke(Stroke::NONE)
+                    .min_size(Vec2::new(0.0, 32.0));
+                    let resp = ui.add(btn);
+                    if on {
+                        let r = resp.rect.expand(0.5);
+                        ui.painter().rect(
+                            r.translate(Vec2::new(0.0, 1.0)),
+                            Rounding::same(8.0),
+                            Color32::from_black_alpha(18),
+                            Stroke::NONE,
+                        );
+                    }
+                    if resp.clicked() {
                         *private_branch = b;
                     }
                 }
@@ -4566,59 +4619,93 @@ fn show_private_care_cards(
 
     let avail = ui.available_width();
     let gap = 12.0;
-    let col = ((avail - gap) * 0.5).max(160.0);
+    let col = if avail > 420.0 {
+        ((avail - gap) * 0.5).max(180.0)
+    } else {
+        avail
+    };
+    let use_row = avail > 420.0;
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for (title, desc, tag) in [
-            (
-                "经期",
-                "记录与预测周期，仅本机私密空间。",
-                period_tag.as_str(),
-            ),
-            (
-                "体检",
-                "下次体检提醒与当日备注。",
-                check_tag.as_str(),
-            ),
-        ] {
-            let resp = Frame::none()
-                .fill(theme::card())
-                .stroke(Stroke::new(1.0, theme::border()))
-                .rounding(Rounding::same(12.0))
-                .inner_margin(Margin::same(18.0))
-                .show(ui, |ui| {
-                    ui.set_width(col - 4.0);
-                    ui.label(
-                        RichText::new(title)
-                            .size(18.0)
-                            .strong()
-                            .color(theme::text()),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(desc)
-                            .size(13.0)
-                            .color(theme::text_muted()),
-                    );
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(tag)
-                            .size(11.5)
-                            .strong()
-                            .color(theme::shell_accent()),
-                    );
-                })
-                .response
-                .interact(Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if resp.clicked() {
-                select_gender_hub(selected, editing);
-                gender_ui.tip.clear();
-                *status_line = format!("已打开{title}");
-            }
+    let cards = [
+        (
+            "经期",
+            "记录与预测周期，仅本机私密空间。",
+            period_tag.as_str(),
+        ),
+        (
+            "体检",
+            "下次体检提醒与当日备注。",
+            check_tag.as_str(),
+        ),
+    ];
+
+    let mut draw_card = |ui: &mut egui::Ui, title: &str, desc: &str, tag: &str, width: f32| {
+        let w = (width - 4.0).max(120.0);
+        let id = ui.make_persistent_id(("priv_care_card", title));
+        let hovered = ui.memory(|m| m.data.get_temp::<bool>(id).unwrap_or(false));
+        let border = if hovered {
+            theme::shell_accent()
+        } else {
+            theme::border()
+        };
+        // 近似 HTML：暖白底 + 悬停描边变绿
+        let fill = Color32::from_rgb(252, 250, 247);
+        let resp = Frame::none()
+            .fill(fill)
+            .stroke(Stroke::new(if hovered { 1.5 } else { 1.0 }, border))
+            .rounding(Rounding::same(12.0))
+            .inner_margin(Margin::same(18.0))
+            .show(ui, |ui| {
+                ui.set_width(w);
+                ui.set_min_height(118.0);
+                ui.label(
+                    RichText::new(title)
+                        .size(18.0)
+                        .strong()
+                        .color(theme::text()),
+                );
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(desc).size(13.0).color(theme::text_muted()),
+                    )
+                    .wrap(true),
+                );
+                ui.add_space(14.0);
+                ui.label(
+                    RichText::new(tag)
+                        .size(11.5)
+                        .strong()
+                        .color(theme::shell_accent()),
+                );
+            })
+            .response
+            .interact(Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        ui.memory_mut(|m| m.data.insert_temp(id, resp.hovered()));
+        if resp.hovered() {
+            ui.ctx().request_repaint();
         }
-    });
+        if resp.clicked() {
+            select_gender_hub(selected, editing);
+            gender_ui.tip.clear();
+            *status_line = format!("已打开{title}");
+        }
+    };
+
+    if use_row {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (title, desc, tag) in cards {
+                draw_card(ui, title, desc, tag, col);
+            }
+        });
+    } else {
+        for (title, desc, tag) in cards {
+            draw_card(ui, title, desc, tag, avail);
+            ui.add_space(gap);
+        }
+    }
 }
 
 /// 备忘列表行：对齐 HTML memo-card（图标块 · 标题/摘要 · 类型 pill）。
@@ -4728,7 +4815,6 @@ fn show_credentials_page_header(
     history_sel_a: &mut Option<usize>,
     history_sel_b: &mut Option<usize>,
     data_dir: &str,
-    open_new_memo: &mut bool,
     open_sticky: &mut Option<String>,
     list_n: usize,
     _tx: &Sender<BgMsg>,
@@ -4752,7 +4838,7 @@ fn show_credentials_page_header(
                 .as_ref()
                 .is_some_and(|id| !is_private_hub(id) && !is_new_draft(id));
 
-            // RTL：更多 → 编辑/保存 → 新建
+            // RTL：更多 → 编辑（新建统一走主顶栏）
             let more_btn = ui.add_enabled(
                 has_sel,
                 egui::Button::new(RichText::new("更多 ▾").size(13.0).color(theme::text_muted()))
@@ -4822,7 +4908,7 @@ fn show_credentials_page_header(
                 }
             });
 
-            // 编辑在右侧抽屉完成；页头只保留入口
+            // 编辑在右侧抽屉完成；页头只保留入口（新建统一走主顶栏）
             ui.add_enabled_ui(has_sel && !*editing, |ui| {
                     if theme::page_outline_button(ui, "编辑").clicked() {
                         begin_memo_edit(
@@ -4843,9 +4929,6 @@ fn show_credentials_page_header(
                         );
                     }
                 });
-            if theme::page_primary_button(ui, "+ 新建").clicked() {
-                *open_new_memo = true;
-            }
         });
     });
 }
@@ -5038,7 +5121,7 @@ pub(crate) fn cancel_memo_edit(
     );
 }
 
-/// 私密备忘只读详情（叠在关怀日历上的查看抽屉内）。
+/// 私密条目只读预览（对齐 HTML：标题 → 摘要 → 正文 → 行动）。
 #[allow(clippy::too_many_arguments)]
 fn show_private_memo_detail(
     ui: &mut egui::Ui,
@@ -5076,239 +5159,216 @@ fn show_private_memo_detail(
         return;
     }
     let meta = filtered.iter().find(|m| m.id == id);
+    let type_name = archive_type_label(*category_draft, &parse_tags(tags_draft));
 
-        ui.horizontal_wrapped(|ui| {
+    // 状态徽章
+    let (badge_bg, badge_fg, badge_text) = if *done_draft {
+        (theme::success_soft(), theme::success(), "已完成")
+    } else if memo_core::is_overdue(due_date_draft, end_date_draft, *done_draft) {
+        (
+            theme::warn_overdue_bg(),
+            theme::warn_overdue_fg(),
+            "已过期",
+        )
+    } else if memo_core::is_due_today(due_date_draft, end_date_draft, *done_draft) {
+        (
+            theme::warn_due_today_bg(),
+            theme::warn_due_today_fg(),
+            "今天到期",
+        )
+    } else {
+        (
+            theme::shell_accent_soft(),
+            theme::shell_accent(),
+            "私密",
+        )
+    };
+    Frame::none()
+        .fill(badge_bg)
+        .rounding(Rounding::same(99.0))
+        .inner_margin(Margin::symmetric(10.0, 4.0))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(badge_text)
+                    .size(12.0)
+                    .strong()
+                    .color(badge_fg),
+            );
+        });
+    ui.add_space(12.0);
+
+    let title_show = if title_draft.is_empty() {
+        "(无标题)"
+    } else {
+        title_draft.as_str()
+    };
+    let mut heading = RichText::new(title_show)
+        .size(24.0)
+        .strong()
+        .color(theme::text());
+    if *done_draft {
+        heading = heading.strikethrough().color(theme::text_muted());
+    }
+    ui.label(heading);
+
+    let mut sub_bits: Vec<String> = vec![type_name.to_string()];
+    if let Some(m) = meta {
+        sub_bits.push(format!("更新 {}", format_relative_modified(&m.modified_at)));
+    }
+    if !due_date_draft.is_empty() {
+        let d = memo_core::display_due(due_date_draft);
+        if !end_date_draft.trim().is_empty() {
+            sub_bits.push(format!("{d} ～ {}", end_date_draft.trim()));
+        } else {
+            sub_bits.push(format!("到期 {d}"));
+        }
+    }
+    let tags = parse_tags(tags_draft);
+    if !tags.is_empty() {
+        sub_bits.push(
+            tags.iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join("  "),
+        );
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(sub_bits.join(" · "))
+            .size(13.0)
+            .color(theme::text_muted()),
+    );
+
+    // 到期警示（仅必要时）
+    let od = memo_core::is_overdue(due_date_draft, end_date_draft, *done_draft);
+    let dt = memo_core::is_due_today(due_date_draft, end_date_draft, *done_draft);
+    let soon = memo_core::is_due_soon(
+        due_date_draft,
+        end_date_draft,
+        *done_draft,
+        PRIVATE_DUE_SOON_DAYS,
+    );
+    if od || dt || soon {
+        ui.add_space(12.0);
+        let days_left = memo_core::days_until_due(due_date_draft, end_date_draft, *done_draft);
+        let (bg, fg, border, line) = if od {
+            let n = memo_core::overdue_days(due_date_draft, end_date_draft, *done_draft)
+                .unwrap_or(1);
+            (
+                theme::warn_overdue_bg(),
+                theme::warn_overdue_fg(),
+                theme::warn_overdue_border(),
+                format!("已逾期 {n} 天"),
+            )
+        } else if dt {
+            (
+                theme::warn_due_today_bg(),
+                theme::warn_due_today_fg(),
+                theme::warn_due_today_border(),
+                "今天到期".into(),
+            )
+        } else {
+            let n = days_left.unwrap_or(1);
+            (
+                theme::warn_due_soon_bg(),
+                theme::warn_due_soon_fg(),
+                theme::warn_due_soon_border(),
+                format!("还有 {n} 天"),
+            )
+        };
+        Frame::none()
+            .fill(bg)
+            .stroke(Stroke::new(1.0, border))
+            .rounding(Rounding::same(8.0))
+            .inner_margin(Margin::symmetric(12.0, 8.0))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(line).size(13.0).strong().color(fg));
+            });
+    }
+
+    ui.add_space(18.0);
+    if body_draft.trim().is_empty() {
+        ui.label(
+            RichText::new("暂无正文")
+                .size(14.5)
+                .italics()
+                .color(theme::text_muted()),
+        );
+    } else {
+        let mid = selected.as_deref().unwrap_or("");
+        doc_editor::show_viewer_body_ex(
+            ui,
+            body_draft,
+            Some(std::path::Path::new(svc.config().data_dir.as_str())),
+            mid,
+        );
+    }
+
+    ui.add_space(20.0);
+    ui.separator();
+    ui.add_space(12.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
         ui.add_enabled_ui(!*editing, |ui| {
-                if theme::primary_button(ui, "编辑").clicked() {
-                    begin_memo_edit(
-                        filtered,
-                        selected,
-                        title_draft,
-                        body_draft,
-                        visibility_draft,
-                        category_draft,
-                        due_date_draft,
-                        end_date_draft,
-                        tags_draft,
-                        done_draft,
-                        priority_draft,
-                        editing,
-                        edit_form,
-                        status_line,
-                    );
-                }
-        });
-            ui.separator();
-            if theme::ghost_button(ui, "复制全文").clicked() {
-                ui.output_mut(|o| o.copied_text = format!("{}\n\n{}", title_draft, body_draft));
-                *status_line = "已复制到剪贴板".into();
-            }
-            if theme::ghost_button(ui, "导出").clicked() {
-                let dir = std::path::PathBuf::from(data_dir).join("exports");
-                let path = dir.join(format!(
-                    "memo-{}-{}.txt",
-                    &id[..8.min(id.len())],
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0)
-                ));
-                *export_ids = Some(vec![id.clone()]);
-                *export_path = path.display().to_string();
-                export_pw.clear();
-                *show_export = true;
-            }
-            if theme::ghost_button(ui, "历史").clicked() {
-                match svc.history_for("memo", &id) {
-                    Ok(ev) => {
-                        *history_entity = "memo".into();
-                        *history_events = ev;
-                        *history_sel_a = None;
-                        *history_sel_b = None;
-                        *show_history = true;
-                    }
-                    Err(e) => *status_line = format!("读取历史失败: {e}"),
-                }
-            }
-            if theme::danger_button(ui, "删除").clicked() {
-                *show_delete = true;
-            }
-        });
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-                let title_show = if title_draft.is_empty() {
-                    "(无标题)"
-                } else {
-                    title_draft.as_str()
-                };
-                ui.horizontal(|ui| {
-                    let mut heading = RichText::new(title_show).size(22.0).color(theme::text());
-                    if *done_draft {
-                        heading = heading.strikethrough();
-                    }
-                    ui.heading(heading);
-                    Frame::none()
-                        .fill(theme::panel())
-                        .rounding(Rounding::same(6.0))
-                        .inner_margin(Margin::symmetric(8.0, 2.0))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new("只读")
-                                    .size(11.0)
-                                    .color(theme::text_muted()),
-                            );
-                        });
-                });
-                if let Some(m) = meta {
-                    let src = svc.display_name_for(&m.node_id);
-                        let vis = if m.visibility == MemoVisibility::Private {
-                            format!("🔒 {}", m.visibility.label())
-                        } else {
-                            m.visibility.label().to_string()
-                        };
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {} · v{} · {} · {}",
-                                m.category.label(),
-                                m.priority.label(),
-                                m.version,
-                                src,
-                                vis
-                            ))
-                            .small()
-                            .color(theme::text_muted()),
-                        );
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if *done_draft {
-                        ui.label(RichText::new("已完成").small().color(theme::success()));
-                    }
-                    let tags = parse_tags(tags_draft);
-                    for t in &tags {
-                        tag_pill(ui, t);
-                    }
-                });
-
-                let due_l = if due_date_draft.is_empty() {
-                    String::new()
-                } else {
-                    let d = memo_core::display_due(due_date_draft);
-                    if !end_date_draft.trim().is_empty() {
-                        format!("{d} ～ {}", end_date_draft.trim())
-                    } else {
-                        d
-                    }
-                };
-                let od = memo_core::is_overdue(due_date_draft, end_date_draft, *done_draft);
-                let dt = memo_core::is_due_today(due_date_draft, end_date_draft, *done_draft);
-                let soon = memo_core::is_due_soon(
+            if theme::page_primary_button(ui, "编辑").clicked() {
+                begin_memo_edit(
+                    filtered,
+                    selected,
+                    title_draft,
+                    body_draft,
+                    visibility_draft,
+                    category_draft,
                     due_date_draft,
                     end_date_draft,
-                    *done_draft,
-                    PRIVATE_DUE_SOON_DAYS,
+                    tags_draft,
+                    done_draft,
+                    priority_draft,
+                    editing,
+                    edit_form,
+                    status_line,
                 );
-    let days_left = memo_core::days_until_due(due_date_draft, end_date_draft, *done_draft);
-                if od || dt || soon {
-                    ui.add_space(8.0);
-                    let (bg, fg, border, line) = if od {
-            let n = memo_core::overdue_days(due_date_draft, end_date_draft, *done_draft)
-                        .unwrap_or(1);
-                        (
-                            theme::warn_overdue_bg(),
-                            theme::warn_overdue_fg(),
-                            theme::warn_overdue_border(),
-                            format!("⚠ 到期 {due_l} (已逾期 {n} 天)"),
-                        )
-                    } else if dt {
-                        (
-                            theme::warn_due_today_bg(),
-                            theme::warn_due_today_fg(),
-                            theme::warn_due_today_border(),
-                            format!("⏰ 到期 {due_l} (今天到期)"),
-                        )
-                    } else {
-                        let n = days_left.unwrap_or(1);
-                        (
-                            theme::warn_due_soon_bg(),
-                            theme::warn_due_soon_fg(),
-                            theme::warn_due_soon_border(),
-                            format!("⏳ 到期 {due_l} (还有 {n} 天)"),
-                        )
-                    };
-                    Frame::none()
-                        .fill(bg)
-                        .stroke(Stroke::new(1.0, border))
-                        .rounding(Rounding::same(8.0))
-                        .inner_margin(Margin::symmetric(12.0, 10.0))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.label(RichText::new(line).size(13.5).strong().color(fg));
-                        });
-                } else if !due_l.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(format!("到期 {due_l}"))
-                            .size(12.5)
-                            .color(theme::text_muted()),
-                    );
+            }
+        });
+        if theme::page_outline_button(ui, "复制").clicked() {
+            ui.output_mut(|o| {
+                o.copied_text = format!("{}\n\n{}", title_draft, body_draft)
+            });
+            *status_line = "已复制到剪贴板".into();
+        }
+        if theme::page_outline_button(ui, "删除").clicked() {
+            *show_delete = true;
+        }
+        // 次要：导出 / 历史收在菜单感更弱的文字按钮后
+        if theme::page_outline_button(ui, "导出").clicked() {
+            let dir = std::path::PathBuf::from(data_dir).join("exports");
+            let path = dir.join(format!(
+                "memo-{}-{}.txt",
+                &id[..8.min(id.len())],
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            ));
+            *export_ids = Some(vec![id.clone()]);
+            *export_path = path.display().to_string();
+            export_pw.clear();
+            *show_export = true;
+        }
+        if theme::page_outline_button(ui, "历史").clicked() {
+            match svc.history_for("memo", &id) {
+                Ok(ev) => {
+                    *history_entity = "memo".into();
+                    *history_events = ev;
+                    *history_sel_a = None;
+                    *history_sel_b = None;
+                    *show_history = true;
                 }
-
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("备注内容")
-                        .size(12.5)
-                        .strong()
-                        .color(theme::text_muted()),
-                );
-                ui.add_space(6.0);
-
-                let note_resp = Frame::none()
-        .fill(theme::panel())
-                    .rounding(Rounding::same(12.0))
-                    .inner_margin(Margin::symmetric(16.0, 14.0))
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        if body_draft.trim().is_empty() {
-                            ui.label(
-                    RichText::new(
-                        "（仅本人可见。可记经期感受、体检、用药保健、情绪，或为伴侣留下的笔记）",
-                    )
-                                    .size(13.5)
-                                    .italics()
-                                    .color(theme::text_muted()),
-                            );
-                        } else {
-                            let mid = selected.as_deref().unwrap_or("");
-                            doc_editor::show_viewer_body_ex(
-                                ui,
-                                body_draft,
-                                Some(std::path::Path::new(svc.config().data_dir.as_str())),
-                                mid,
-                            );
-                        }
-                            ui.add_space(10.0);
-                            ui.horizontal(|ui| {
-                let (bar, _) = ui.allocate_exact_size(Vec2::new(3.0, 36.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(bar, Rounding::same(1.5), theme::border());
-                                ui.add_space(8.0);
-                                ui.label(
-                                    RichText::new(
-                        "经期日与体检日请在右栏关怀日历标记；系统提醒仅供参考，不能替代就医。",
-                                    )
-                                    .size(12.0)
-                                    .color(theme::text_muted()),
-                                );
-                            });
-                    });
-                    theme::paint_dashed_rect(
-                        ui.painter(),
-                        note_resp.response.rect,
-                        Stroke::new(1.2, theme::border()),
-                    );
-                }
+                Err(e) => *status_line = format!("读取历史失败: {e}"),
+            }
+        }
+    });
+}
 
 /// 非备忘页右栏详情（备忘已改右栏过滤轨 + 抽屉查看）。
 #[allow(clippy::too_many_arguments)]
@@ -5357,7 +5417,7 @@ fn show_detail(
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
             ui.label(
-                theme::muted_label("点左侧列表查看详情\n或点「+ 新建」添加").size(14.0),
+                theme::muted_label("点左侧列表查看详情\n或点右上角「新建」添加").size(14.0),
             );
         });
         return;

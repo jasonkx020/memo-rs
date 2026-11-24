@@ -1,15 +1,19 @@
 //! 设置页：对齐 HTML 效果稿的左分类 + 右表单。
 
 use crate::autostart;
+use crate::gender_private_view;
 use crate::theme;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
-use memo_core::config::{self, Config};
+use memo_core::config::{self, Config, NodeRole};
+use memo_core::service::MemoService;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
     Look,
     Local,
+    Care,
     Net,
     Backup,
 }
@@ -100,6 +104,8 @@ pub fn show_page(
     draft: &mut Config,
     live_cfg: &mut Config,
     alias: &str,
+    svc: &Arc<MemoService>,
+    status_line: &mut String,
 ) {
     let nav_w = 140.0_f32.min(ui.available_width() * 0.28).max(110.0);
     let gap = 16.0;
@@ -117,10 +123,12 @@ pub fn show_page(
                 for (t, label) in [
                     (SettingsTab::Look, "外观"),
                     (SettingsTab::Local, "本机"),
+                    (SettingsTab::Care, "关怀"),
                     (SettingsTab::Net, "网络"),
                     (SettingsTab::Backup, "备份"),
                 ] {
                     let on = *tab == t;
+                    let care = matches!(t, SettingsTab::Care);
                     let (outer, _) = ui.allocate_exact_size(
                         Vec2::new(ui.available_width(), 38.0),
                         Sense::hover(),
@@ -136,14 +144,22 @@ pub fn show_page(
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     let fill = if on {
-                        theme::shell_accent_soft()
+                        if care {
+                            theme::shell_women_pill()
+                        } else {
+                            theme::shell_accent_soft()
+                        }
                     } else if hovered {
                         theme::c().list_hover
                     } else {
                         Color32::TRANSPARENT
                     };
                     let fg = if on || hovered {
-                        theme::shell_accent()
+                        if care {
+                            theme::shell_women_pill_fg()
+                        } else {
+                            theme::shell_accent()
+                        }
                     } else {
                         theme::text_muted()
                     };
@@ -165,23 +181,30 @@ pub fn show_page(
             },
         );
 
-        // 右表单
+        // 右表单：高度钳在分配区内，避免 Frame 边距把底边撑出 clip
         let pane_w = (ui.available_width() - 4.0).max(200.0);
         ui.allocate_ui_with_layout(
             Vec2::new(pane_w, h),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
+                const FRAME_PAD: f32 = 20.0;
+                let frame_h = ui.available_height().max(160.0);
+                let stroke_h = 2.0;
+                let inner_budget =
+                    (frame_h - FRAME_PAD * 2.0 - stroke_h).max(80.0);
                 Frame::none()
                     .fill(theme::panel())
                     .stroke(Stroke::new(1.0, theme::border()))
                     .rounding(Rounding::same(12.0))
-                    .inner_margin(Margin::same(20.0))
+                    .inner_margin(Margin::same(FRAME_PAD))
                     .show(ui, |ui| {
-                        ui.set_min_height((h - 8.0).max(160.0));
+                        ui.set_min_height(inner_budget);
+                        ui.set_max_height(inner_budget);
                         ui.set_width(ui.available_width());
                         egui::ScrollArea::vertical()
                             .id_source("settings_page_scroll")
                             .auto_shrink([false, false])
+                            .max_height(inner_budget)
                             .show(ui, |ui| {
                                 let field_w = ui.available_width().min(420.0);
                                 match *tab {
@@ -267,7 +290,7 @@ pub fn show_page(
                                         settings_item_header(
                                             ui,
                                             "数据目录",
-                                            "改路径后需重启。settings.json 仍在用户配置目录。",
+                                            "改路径后需重启。应用配置仍在系统用户目录。",
                                         );
                                         if settings_text_field(
                                             ui,
@@ -284,12 +307,61 @@ pub fn show_page(
                                             "请在身份菜单「重置密码」中更换。",
                                         );
                                     }
+                                    SettingsTab::Care => {
+                                        settings_section(ui, "关怀与健康");
+                                        ui.label(
+                                            RichText::new(
+                                                "经期与体检图层开关；关闭后标记与日期仍保留。",
+                                            )
+                                            .size(12.5)
+                                            .color(theme::shell_women_pill_fg()),
+                                        );
+                                        ui.add_space(12.0);
+                                        gender_private_view::show_care_health_settings(
+                                            ui,
+                                            svc,
+                                            status_line,
+                                        );
+                                    }
                                     SettingsTab::Net => {
                                         settings_section(ui, "网络");
+                                        settings_item_header(
+                                            ui,
+                                            "节点角色",
+                                            "主机每 10s 广播并受理登记；从机不广播，发现主机后主动连接。更改后需重启。",
+                                        );
+                                        egui::ComboBox::from_id_source("settings_page_node_role")
+                                            .selected_text(draft.node_role.label())
+                                            .width(field_w.min(220.0))
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut draft.node_role,
+                                                    NodeRole::Master,
+                                                    "主机",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut draft.node_role,
+                                                    NodeRole::Slave,
+                                                    "从机",
+                                                );
+                                            });
+                                        if draft.node_role != live_cfg.node_role {
+                                            live_cfg.node_role = draft.node_role;
+                                            let mut persist = live_cfg.clone();
+                                            persist.node_role = draft.node_role;
+                                            let _ = config::save_settings(&persist);
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                RichText::new("已保存。重启后按新角色生效。")
+                                                    .size(12.0)
+                                                    .color(theme::warn()),
+                                            );
+                                        }
+                                        settings_item_gap(ui);
                                         if switch_row(
                                             ui,
                                             "局域网自动发现",
-                                            "UDP 17000 寻找同集群主机",
+                                            "同网段自动寻找主机",
                                             &mut draft.lan_discovery,
                                         ) {
                                             live_cfg.lan_discovery = draft.lan_discovery;
@@ -297,20 +369,30 @@ pub fn show_page(
                                             persist.lan_discovery = draft.lan_discovery;
                                             let _ = config::save_settings(&persist);
                                         }
-                                        if switch_row(
-                                            ui,
-                                            "显示本节点",
-                                            "仅主机广播时生效",
-                                            &mut draft.node_visible,
-                                        ) {
-                                            live_cfg.node_visible = draft.node_visible;
-                                            let mut persist = live_cfg.clone();
-                                            persist.node_visible = draft.node_visible;
-                                            let _ = config::save_settings(&persist);
+                                        ui.add_enabled_ui(draft.node_role.is_master(), |ui| {
+                                            if switch_row(
+                                                ui,
+                                                "显示本节点",
+                                                "显示=对外广播，可被同网段发现；隐藏=不广播",
+                                                &mut draft.node_visible,
+                                            ) {
+                                                live_cfg.node_visible = draft.node_visible;
+                                                let mut persist = live_cfg.clone();
+                                                persist.node_visible = draft.node_visible;
+                                                let _ = config::save_settings(&persist);
+                                            }
+                                        });
+                                        if !draft.node_role.is_master() {
+                                            ui.label(
+                                                RichText::new("当前为从机，不会对外广播。")
+                                                    .size(12.0)
+                                                    .color(theme::text_muted()),
+                                            );
+                                            ui.add_space(8.0);
                                         }
-                                        settings_item_header(ui, "监听端口", "");
+                                        settings_item_header(ui, "监听端口", "更改后需重启。");
                                         let mut port = draft.listen_port.to_string();
-                                        if settings_text_field(ui, &mut port, "7000", field_w) {
+                                        if settings_text_field(ui, &mut port, "例如 7000", field_w) {
                                             if let Ok(p) = port.parse::<u16>() {
                                                 if p > 0 {
                                                     draft.listen_port = p;
@@ -320,17 +402,17 @@ pub fn show_page(
                                         settings_item_gap(ui);
                                         settings_item_header(
                                             ui,
-                                            "集群盐 cluster_salt_hex",
-                                            "同集群各机必须相同。与登录密码无关。",
+                                            "集群盐",
+                                            "同集群各机必须相同；与登录密码无关。修改后需重启。",
                                         );
                                         let _ = settings_text_field(
                                             ui,
                                             &mut draft.cluster_salt_hex,
-                                            "32 位 hex",
+                                            "各机填写相同内容",
                                             field_w,
                                         );
                                         settings_item_gap(ui);
-                                        settings_item_header(ui, "手填对端", "每行一个 IP:端口");
+                                        settings_item_header(ui, "手填对端", "每行一个地址");
                                         let mut peers = draft.peers.join("\n");
                                         if ui
                                             .add(
@@ -381,6 +463,7 @@ pub fn show_page(
                                         );
                                     }
                                 }
+                                ui.add_space(16.0);
                             });
                     });
             },

@@ -247,8 +247,29 @@ pub(crate) fn sync_cfg_from_marks(
     let _ = svc.set_cycle(pid, cfg.clone());
 }
 
+/// 按手标强制重算预测（跳过日闸）：超时窗默认确认 + 保证今天起有一次预测。
+pub fn recalc_period_prediction(
+    svc: &MemoService,
+    memos: &[MemoView],
+) -> Result<String, String> {
+    let pid = ensure_cycle_person(svc)?;
+    let mut cfg = svc.get_cycle(&pid).unwrap_or_default();
+    if !cfg.period_enabled {
+        return Err("经期记录已关闭，请先在设置中开启".into());
+    }
+    let marked = period_marked_days(memos);
+    if marked.is_empty() && cfg.last_start.is_empty() {
+        return Ok("请先标记经期日后再重算".into());
+    }
+    let next = run_period_recalc(svc, &pid, &mut cfg, memos)?;
+    match next {
+        Some(d) => Ok(format!("已重算：下次预计 {}", d.format("%m-%d"))),
+        None => Ok("请先标记经期日后再重算".into()),
+    }
+}
+
 /// 跨自然日自动按手标重算预测（启动首日 + 长期开机挂机）。
-/// 返回是否执行了重算。
+/// 返回是否执行了重算（含自动确认）。
 pub fn ensure_daily_predict_recalc(svc: &MemoService, memos: &[MemoView]) -> bool {
     let Ok(pid) = ensure_cycle_person(svc) else {
         return false;
@@ -257,10 +278,7 @@ pub fn ensure_daily_predict_recalc(svc: &MemoService, memos: &[MemoView]) -> boo
     if !cfg.period_enabled {
         return false;
     }
-    let today = chrono::Local::now()
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string();
+    let today = today_ymd();
     if cfg.last_predict_ymd == today {
         return false;
     }
@@ -270,24 +288,56 @@ pub fn ensure_daily_predict_recalc(svc: &MemoService, memos: &[MemoView]) -> boo
         let _ = svc.set_cycle(&pid, cfg);
         return false;
     }
+    let _ = run_period_recalc(svc, &pid, &mut cfg, memos);
+    true
+}
+
+/// 共享重算：统计 → 超时默认确认 → 默认周期回退 → 下次 start≥今天 → 落盘。
+fn run_period_recalc(
+    svc: &MemoService,
+    pid: &str,
+    cfg: &mut CycleConfig,
+    memos: &[MemoView],
+) -> Result<Option<NaiveDate>, String> {
+    let mut marked = period_marked_days(memos);
+    if marked.is_empty() && cfg.last_start.is_empty() {
+        cfg.last_predict_ymd = today_ymd();
+        let _ = svc.set_cycle(pid, cfg.clone());
+        return Ok(None);
+    }
     let old_next = cfg.next_predicted_start();
     let stats = analyze_period_marks(&marked);
-    apply_effective_cfg(&mut cfg, &stats);
+    apply_effective_cfg(cfg, &stats);
+
+    // 预测超时未手标 → 默认推理日为经期
+    let auto_days = cfg.overdue_prediction_days_to_confirm(&marked);
+    if !auto_days.is_empty() {
+        for ymd in &auto_days {
+            if is_marked_day(&marked, ymd) {
+                continue;
+            }
+            if let Err(e) = add_period_day_memo(svc, ymd) {
+                let _ = e;
+                continue;
+            }
+            marked.push(ymd.clone());
+        }
+        marked.sort();
+        marked.dedup();
+        let stats = analyze_period_marks(&marked);
+        apply_effective_cfg(cfg, &stats);
+        cfg.remind_seen_for.clear();
+    }
+
+    memo_core::ensure_prediction_defaults(cfg);
     let new_next = cfg.next_predicted_start();
     if old_next != new_next {
         cfg.remind_seen_for.clear();
-    } else if let Some(start) = new_next {
-        // 预计整段经期已早于今天时也清已读，便于新一轮关怀
-        let period = cfg.period_days.max(1) as i64;
-        let end = start + Duration::try_days(period - 1).unwrap_or_default();
-        let today_d = chrono::Local::now().date_naive();
-        if end < today_d {
-            cfg.remind_seen_for.clear();
-        }
     }
-    cfg.last_predict_ymd = today;
-    let _ = svc.set_cycle(&pid, cfg);
-    true
+    cfg.last_predict_ymd = today_ymd();
+    svc.set_cycle(pid, cfg.clone())
+        .map_err(|e| e.to_string())?;
+    Ok(new_next)
 }
 
 fn legend_dot(ui: &mut egui::Ui, color: Color32, label: &str) {

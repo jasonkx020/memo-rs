@@ -258,22 +258,20 @@ impl CycleConfig {
         offset < period
     }
 
-    /// 唯一下一次（或进行中）预测经期开始日：从 `last_start + cycle` 起，
-    /// 若整段经期已早于今天则逐周期推进。
+    /// 下一次预测经期开始日：从 `last_start + cycle` 起，
+    /// 以今天为起点，保证返回的开始日不早于今天（进行中的过期起点会跳到下一轮）。
     pub fn next_predicted_start(&self) -> Option<NaiveDate> {
         if !self.can_predict() {
             return None;
         }
         let last = NaiveDate::parse_from_str(&self.last_start, "%Y-%m-%d").ok()?;
         let cycle = self.cycle_days as i64;
-        let period = self.period_days.max(1) as i64;
         let today = chrono::Local::now().date_naive();
         let step = Duration::try_days(cycle)?;
         let mut next = last + step;
         // 最多推进若干年，避免异常配置死循环
         for _ in 0..48 {
-            let end = next + Duration::try_days(period - 1).unwrap_or_default();
-            if end >= today {
+            if next >= today {
                 return Some(next);
             }
             next += step;
@@ -313,6 +311,55 @@ impl CycleConfig {
                 out.push(ymd);
             }
             d += Duration::try_days(1).unwrap_or_default();
+        }
+        out
+    }
+
+    /// 预测经期整段已超时、且该窗内无任何手标时，应默认落成经期日的日期列表。
+    ///
+    /// - 仅处理 `预测结束日 < 今天` 的完整窗（进行中仍显示浅粉预测，不提前落成，以免打断本轮剩余预测）
+    /// - 某窗内已有手标：视为用户已确认，跳过该窗
+    /// - 长期未打开可跨多轮 overdue 窗一并补齐
+    pub fn overdue_prediction_days_to_confirm(&self, marked_ymds: &[String]) -> Vec<String> {
+        if !self.can_predict() {
+            return Vec::new();
+        }
+        let Ok(last) = NaiveDate::parse_from_str(&self.last_start, "%Y-%m-%d") else {
+            return Vec::new();
+        };
+        let Some(cycle_step) = Duration::try_days(self.cycle_days as i64) else {
+            return Vec::new();
+        };
+        let period = self.period_days.max(1) as i64;
+        let today = chrono::Local::now().date_naive();
+        let marked: std::collections::HashSet<NaiveDate> = marked_ymds
+            .iter()
+            .filter_map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+            .collect();
+
+        let mut out = Vec::new();
+        let mut start = last + cycle_step;
+        for _ in 0..48 {
+            let win_end = start + Duration::try_days(period - 1).unwrap_or_default();
+            // 窗尚未整段超时（进行中或未到）→ 停止
+            if win_end >= today {
+                break;
+            }
+            // 该预测窗内已有手标 → 用户已确认起止，不自动补
+            let window_has_mark = (0..period).any(|i| {
+                let d = start + Duration::try_days(i).unwrap_or_default();
+                marked.contains(&d)
+            });
+            if !window_has_mark {
+                let mut d = start;
+                while d <= win_end {
+                    if !marked.contains(&d) {
+                        out.push(d.format("%Y-%m-%d").to_string());
+                    }
+                    d += Duration::try_days(1).unwrap_or_default();
+                }
+            }
+            start += cycle_step;
         }
         out
     }
@@ -412,6 +459,7 @@ pub fn analyze_period_marks(marked_ymds: &[String]) -> PeriodMarkStats {
 }
 
 /// 用标记统计刷新配置中的自动字段（尊重 manual_* 覆盖）。
+/// 有手标但尚不足推算时：周期默认 28、经期长默认 5，保证能给出今天起的下次预测。
 pub fn apply_mark_stats(cfg: &mut CycleConfig, stats: &PeriodMarkStats) {
     if let Some(ls) = &stats.last_start {
         cfg.last_start = ls.clone();
@@ -421,6 +469,8 @@ pub fn apply_mark_stats(cfg: &mut CycleConfig, stats: &PeriodMarkStats) {
     if !cfg.manual_period {
         if let Some(p) = stats.avg_period.or(stats.last_period) {
             cfg.period_days = p;
+        } else if !cfg.last_start.is_empty() {
+            cfg.period_days = 5;
         } else {
             cfg.period_days = 0;
         }
@@ -431,9 +481,23 @@ pub fn apply_mark_stats(cfg: &mut CycleConfig, stats: &PeriodMarkStats) {
         } else if cfg.last_start.is_empty() {
             cfg.cycle_days = 0;
         } else if cfg.cycle_days < 15 {
-            // 仅一段经期时尚无间隔：保留有效值，否则默认 28 天参考周期
+            // 仅一段经期时尚无间隔：默认 28 天参考周期
             cfg.cycle_days = 28;
         }
+    }
+    ensure_prediction_defaults(cfg);
+}
+
+/// 有 last_start 时补齐可预测所需的默认周期/经期长（不覆盖 manual_*）。
+pub fn ensure_prediction_defaults(cfg: &mut CycleConfig) {
+    if cfg.last_start.is_empty() {
+        return;
+    }
+    if !cfg.manual_cycle && cfg.cycle_days < 15 {
+        cfg.cycle_days = 28;
+    }
+    if !cfg.manual_period && cfg.period_days < 1 {
+        cfg.period_days = 5;
     }
 }
 
@@ -587,10 +651,90 @@ mod tests {
         cfg.cycle_days = 28;
         cfg.period_days = 5;
         let next = cfg.next_predicted_start().expect("next");
-        let end = next + Duration::try_days(4).unwrap();
-        assert!(end >= today);
+        assert!(next >= today);
         // 应是 last+28 之后再推进至少一轮
         assert!(next > last + Duration::try_days(28).unwrap());
+    }
+
+    #[test]
+    fn next_predicted_skips_ongoing_past_start() {
+        let mut cfg = CycleConfig::default();
+        let today = chrono::Local::now().date_naive();
+        // 预测窗已开始 2 天（start < today，end 仍在未来）→ 应跳到下一轮 start >= today
+        let pred_start = today - Duration::try_days(2).unwrap();
+        let last = pred_start - Duration::try_days(28).unwrap();
+        cfg.last_start = last.format("%Y-%m-%d").to_string();
+        cfg.cycle_days = 28;
+        cfg.period_days = 5;
+        let next = cfg.next_predicted_start().expect("next");
+        assert!(next >= today);
+        assert_eq!(next, pred_start + Duration::try_days(28).unwrap());
+    }
+
+    #[test]
+    fn single_mark_gets_default_cycle_and_future_predict() {
+        let today = chrono::Local::now().date_naive();
+        let last = today - Duration::try_days(5).unwrap();
+        let ymds = vec![
+            last.format("%Y-%m-%d").to_string(),
+            (last + Duration::try_days(1).unwrap())
+                .format("%Y-%m-%d")
+                .to_string(),
+        ];
+        let stats = analyze_period_marks(&ymds);
+        let mut cfg = CycleConfig::default();
+        apply_mark_stats(&mut cfg, &stats);
+        assert_eq!(cfg.cycle_days, 28);
+        assert!(cfg.period_days >= 1);
+        assert!(cfg.can_predict());
+        let next = cfg.next_predicted_start().expect("next");
+        assert!(next >= today);
+    }
+
+    #[test]
+    fn no_marks_no_predict() {
+        let mut cfg = CycleConfig::default();
+        apply_mark_stats(&mut cfg, &PeriodMarkStats::default());
+        assert!(cfg.last_start.is_empty());
+        assert!(!cfg.can_predict());
+        assert!(cfg.next_predicted_start().is_none());
+    }
+
+    #[test]
+    fn overdue_prediction_confirms_full_past_window() {
+        let mut cfg = CycleConfig::default();
+        let today = chrono::Local::now().date_naive();
+        // 上次开始 33 天前：预测窗 last+28 .. last+32 已整段早于今天
+        let last = today - Duration::try_days(33).unwrap();
+        cfg.last_start = last.format("%Y-%m-%d").to_string();
+        cfg.cycle_days = 28;
+        cfg.period_days = 5;
+        let days = cfg.overdue_prediction_days_to_confirm(&[]);
+        assert_eq!(days.len(), 5);
+        let start = last + Duration::try_days(28).unwrap();
+        assert_eq!(days[0], start.format("%Y-%m-%d").to_string());
+        assert_eq!(
+            days[4],
+            (start + Duration::try_days(4).unwrap())
+                .format("%Y-%m-%d")
+                .to_string()
+        );
+        // 窗内已有手标则不自动补
+        let marked = vec![start.format("%Y-%m-%d").to_string()];
+        assert!(cfg.overdue_prediction_days_to_confirm(&marked).is_empty());
+    }
+
+    #[test]
+    fn overdue_prediction_skips_ongoing_window() {
+        let mut cfg = CycleConfig::default();
+        let today = chrono::Local::now().date_naive();
+        // 预测开始 = 今天往前 2 天 → 窗仍进行中，不提前落成
+        let pred_start = today - Duration::try_days(2).unwrap();
+        let last = pred_start - Duration::try_days(28).unwrap();
+        cfg.last_start = last.format("%Y-%m-%d").to_string();
+        cfg.cycle_days = 28;
+        cfg.period_days = 5;
+        assert!(cfg.overdue_prediction_days_to_confirm(&[]).is_empty());
     }
 
     #[test]

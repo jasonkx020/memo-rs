@@ -883,10 +883,12 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
     visuals.widgets.active.rounding = Rounding::same(ROUND_CTRL);
     visuals.widgets.open.bg_fill = p.accent_soft;
     visuals.widgets.open.weak_bg_fill = p.panel;
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0, p.text);
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, p.accent);
     visuals.widgets.open.rounding = Rounding::same(ROUND_CTRL);
-    visuals.selection.bg_fill = p.accent;
-    visuals.selection.stroke = Stroke::new(1.0, p.accent_hover);
+    // ComboBox / 菜单选中项：软底 + 强调色字，避免深底深字看不清
+    visuals.selection.bg_fill = p.accent_soft;
+    visuals.selection.stroke = Stroke::new(1.0, p.accent);
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();

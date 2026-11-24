@@ -27,8 +27,8 @@ pub use config::{
 };
 pub use peer_acl::{PeerAclEntry, PeerAclStore};
 pub use cycle::{
-    apply_mark_stats, analyze_period_marks, CycleConfig, CycleStore, OvulationPreset, PeriodEpisode,
-    PeriodMarkStats,
+    apply_mark_stats, analyze_period_marks, ensure_prediction_defaults, CycleConfig, CycleStore,
+    OvulationPreset, PeriodEpisode, PeriodMarkStats,
 };
 pub use disk::{format_bytes, DiskSpace};
 pub use due::{

@@ -1,23 +1,128 @@
 //! 无边框、可拖动、置顶的桌面便签（deferred 子 Viewport）。
-//! 可编辑并回写备忘；打开列表与位置仅本机落盘（按身份隔离，不同步）。
+//! 只读展示来源路径与正文；打开列表与位置仅本机落盘（按身份隔离，不同步）。
 
 use crate::theme;
 use eframe::egui::{
-    self, Color32, Frame, Margin, Pos2, RichText, Sense, Stroke, TextEdit, Vec2, ViewportBuilder,
-    ViewportClass, ViewportCommand, ViewportId,
+    self, Color32, Frame, Margin, Pos2, RichText, Sense, Stroke, Vec2, ViewportBuilder,
+    ViewportClass, ViewportCommand, ViewportId, WindowLevel,
 };
 use memo_core::service::MemoView;
+use memo_core::store::{MemoCategory, MemoSpace};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// 桌面便签纸色（本机会话，不同步）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StickyColor {
+    #[default]
+    Yellow,
+    Peach,
+    Mint,
+    Sky,
+    Lilac,
+    Blush,
+}
+
+impl StickyColor {
+    pub const ALL: [StickyColor; 6] = [
+        StickyColor::Yellow,
+        StickyColor::Peach,
+        StickyColor::Mint,
+        StickyColor::Sky,
+        StickyColor::Lilac,
+        StickyColor::Blush,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StickyColor::Yellow => "淡黄",
+            StickyColor::Peach => "蜜桃",
+            StickyColor::Mint => "薄荷绿",
+            StickyColor::Sky => "天空蓝",
+            StickyColor::Lilac => "淡紫",
+            StickyColor::Blush => "雾粉",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StickyPalette {
+    bg: Color32,
+    border: Color32,
+    title: Color32,
+    body: Color32,
+    chip_bg: Color32,
+    chip_fg: Color32,
+}
+
+fn palette(c: StickyColor) -> StickyPalette {
+    // 高对比：纸底 / 描边 / 标题+正文（深字）
+    match c {
+        StickyColor::Yellow => StickyPalette {
+            bg: Color32::from_rgb(0xFF, 0xF3, 0xA0),
+            border: Color32::from_rgb(0xC4, 0xA0, 0x00),
+            title: Color32::from_rgb(0x3D, 0x32, 0x00),
+            body: Color32::from_rgb(0x4F, 0x42, 0x08),
+            chip_bg: Color32::from_rgba_unmultiplied(0x3D, 0x32, 0x00, 36),
+            chip_fg: Color32::from_rgb(0x3D, 0x32, 0x00),
+        },
+        StickyColor::Peach => StickyPalette {
+            bg: Color32::from_rgb(0xFF, 0xD4, 0xC2),
+            border: Color32::from_rgb(0xC4, 0x5A, 0x32),
+            title: Color32::from_rgb(0x4A, 0x18, 0x08),
+            body: Color32::from_rgb(0x5C, 0x28, 0x18),
+            chip_bg: Color32::from_rgba_unmultiplied(0x4A, 0x18, 0x08, 36),
+            chip_fg: Color32::from_rgb(0x4A, 0x18, 0x08),
+        },
+        StickyColor::Mint => StickyPalette {
+            bg: Color32::from_rgb(0xC8, 0xEF, 0xD4),
+            border: Color32::from_rgb(0x2F, 0x8A, 0x4E),
+            title: Color32::from_rgb(0x0E, 0x3B, 0x22),
+            body: Color32::from_rgb(0x1A, 0x4F, 0x30),
+            chip_bg: Color32::from_rgba_unmultiplied(0x0E, 0x3B, 0x22, 36),
+            chip_fg: Color32::from_rgb(0x0E, 0x3B, 0x22),
+        },
+        StickyColor::Sky => StickyPalette {
+            bg: Color32::from_rgb(0xBF, 0xE4, 0xFF),
+            border: Color32::from_rgb(0x2A, 0x7A, 0xB8),
+            title: Color32::from_rgb(0x0A, 0x30, 0x50),
+            body: Color32::from_rgb(0x15, 0x42, 0x62),
+            chip_bg: Color32::from_rgba_unmultiplied(0x0A, 0x30, 0x50, 36),
+            chip_fg: Color32::from_rgb(0x0A, 0x30, 0x50),
+        },
+        StickyColor::Lilac => StickyPalette {
+            bg: Color32::from_rgb(0xE0, 0xD2, 0xF5),
+            border: Color32::from_rgb(0x6B, 0x4A, 0xA8),
+            title: Color32::from_rgb(0x2A, 0x18, 0x50),
+            body: Color32::from_rgb(0x3A, 0x28, 0x68),
+            chip_bg: Color32::from_rgba_unmultiplied(0x2A, 0x18, 0x50, 36),
+            chip_fg: Color32::from_rgb(0x2A, 0x18, 0x50),
+        },
+        StickyColor::Blush => StickyPalette {
+            bg: Color32::from_rgb(0xFF, 0xD0, 0xDC),
+            border: Color32::from_rgb(0xC4, 0x48, 0x6A),
+            title: Color32::from_rgb(0x4A, 0x10, 0x28),
+            body: Color32::from_rgb(0x5C, 0x20, 0x38),
+            chip_bg: Color32::from_rgba_unmultiplied(0x4A, 0x10, 0x28, 36),
+            chip_fg: Color32::from_rgb(0x4A, 0x10, 0x28),
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StickyNote {
     pub id: String,
     pub title: String,
     pub body: String,
+    pub space: MemoSpace,
+    pub category: MemoCategory,
+    pub color: StickyColor,
+    /// 是否置顶（默认 false：返回桌面可见、可被其它窗盖住；可点「钉」置顶）
+    pub pinned: bool,
     pub dirty: bool,
     pub dirty_since: Option<Instant>,
     pub request_focus: bool,
@@ -28,6 +133,13 @@ pub struct StickyNote {
     pub flush_now: bool,
     /// 从会话恢复后需强制 OuterPosition/InnerSize，直到与目标接近
     pub apply_geom: bool,
+    /// 切换置顶后需发 WindowLevel
+    pub apply_pin: bool,
+}
+
+/// 新建便签默认不置顶：返回桌面即可看见，可被其它窗覆盖；需要时再点「钉」。
+fn default_pinned() -> bool {
+    false
 }
 
 pub type StickyHandle = Arc<Mutex<StickyNote>>;
@@ -35,9 +147,26 @@ pub type StickyHandle = Arc<Mutex<StickyNote>>;
 const DEBOUNCE: Duration = Duration::from_millis(800);
 const DEFAULT_SIZE: [f32; 2] = [280.0, 180.0];
 
+fn origin_label(space: MemoSpace, category: MemoCategory) -> &'static str {
+    let is_memo = category.bucket() == MemoCategory::Credentials;
+    match (space, is_memo) {
+        (MemoSpace::Normal, false) => "任务",
+        (MemoSpace::Normal, true) => "备忘",
+        (MemoSpace::Private, false) => "私密任务",
+        (MemoSpace::Private, true) => "私密备忘",
+    }
+}
+
 impl StickyNote {
     pub fn from_memo(m: &MemoView) -> StickyHandle {
-        Self::from_memo_geom(m, None, None, false)
+        Self::from_memo_geom(
+            m,
+            None,
+            None,
+            false,
+            StickyColor::default(),
+            default_pinned(),
+        )
     }
 
     pub fn from_memo_geom(
@@ -45,6 +174,8 @@ impl StickyNote {
         pos: Option<[f32; 2]>,
         size: Option<[f32; 2]>,
         apply_geom: bool,
+        color: StickyColor,
+        pinned: bool,
     ) -> StickyHandle {
         Arc::new(Mutex::new(Self {
             id: m.id.clone(),
@@ -54,6 +185,10 @@ impl StickyNote {
                 m.title.clone()
             },
             body: m.content.clone(),
+            space: m.space,
+            category: m.category,
+            color,
+            pinned,
             dirty: false,
             dirty_since: None,
             request_focus: false,
@@ -62,6 +197,7 @@ impl StickyNote {
             size: size.or(Some(DEFAULT_SIZE)),
             flush_now: false,
             apply_geom: apply_geom && pos.is_some(),
+            apply_pin: false,
         }))
     }
 
@@ -71,6 +207,8 @@ impl StickyNote {
         }
         self.title = m.title.clone();
         self.body = m.content.clone();
+        self.space = m.space;
+        self.category = m.category;
     }
 
     pub fn mark_dirty(&mut self) {
@@ -97,6 +235,10 @@ impl StickyNote {
         self.dirty_since = None;
         self.flush_now = false;
     }
+
+    pub fn origin_label(&self) -> &'static str {
+        origin_label(self.space, self.category)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +254,10 @@ pub struct StickyGeom {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    #[serde(default)]
+    pub color: StickyColor,
+    #[serde(default = "default_pinned")]
+    pub pinned: bool,
 }
 
 /// 按身份隔离的会话路径（仅本机）。
@@ -173,6 +319,8 @@ pub fn session_from_handles(person_fp: &str, stickies: &[(String, StickyHandle)]
             y: pos[1],
             w: size[0].max(200.0),
             h: size[1].max(120.0),
+            color: n.color,
+            pinned: n.pinned,
         });
     }
     StickySession {
@@ -183,30 +331,35 @@ pub fn session_from_handles(person_fp: &str, stickies: &[(String, StickyHandle)]
 
 /// 每帧注册 deferred 便签视口。
 pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
-    let (id_str, title, request_focus, closed, pos, size) = {
+    let (id_str, title, origin, request_focus, closed, pos, size, pinned) = {
         let n = note.lock();
         (
             n.id.clone(),
             n.title.clone(),
+            n.origin_label(),
             n.request_focus,
             n.closed,
             n.pos,
             n.size.unwrap_or(DEFAULT_SIZE),
+            n.pinned,
         )
     };
     if closed {
         return;
     }
 
+    let window_title = format!("{} · {}", origin, display_title(&title));
     let vid = ViewportId::from_hash_of(("sticky", id_str.as_str()));
     let mut builder = ViewportBuilder::default()
-        .with_title(format!("便签 · {}", display_title(&title)))
+        .with_title(window_title.clone())
         .with_decorations(false)
-        .with_always_on_top()
         .with_taskbar(false)
         .with_inner_size(size)
         .with_min_inner_size([200.0, 120.0])
         .with_resizable(true);
+    if pinned {
+        builder = builder.with_always_on_top();
+    }
     if let Some(p) = pos {
         builder = builder.with_position(Pos2::new(p[0], p[1]));
     }
@@ -215,6 +368,17 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
         ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
         note.lock().request_focus = false;
     }
+
+    // 「显示桌面」后 OS 会藏掉视口；主窗未聚焦时也要持续拉回可见，勿等用户点主程序。
+    ctx.send_viewport_cmd_to(vid, ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd_to(
+        vid,
+        ViewportCommand::WindowLevel(if pinned {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        }),
+    );
 
     let note_cb = note.clone();
     ctx.show_viewport_deferred(vid, builder, move |ctx, class| {
@@ -225,6 +389,16 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
+
+        // 子视口内再确认一次：从「显示桌面」回来时无需主窗抢焦点
+        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        let level = if note.pinned {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        };
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
+        note.apply_pin = false;
 
         // 恢复历史位置：强制 OuterPosition，避免 winit 忽略 builder.with_position
         if note.apply_geom {
@@ -252,18 +426,26 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
         }
 
         if class == ViewportClass::Embedded {
-            let mut open = true;
-            let title = note.title.clone();
+            let title = format!("{} · {}", note.origin_label(), display_title(&note.title));
             let id = note.id.clone();
+            let emb_pal = palette(note.color);
             drop(note);
-            egui::Window::new(format!("便签 · {}", display_title(&title)))
+            let mut open = true;
+            egui::Window::new(title)
                 .id(egui::Id::new(("sticky_embed", id.as_str())))
                 .open(&mut open)
                 .resizable(true)
                 .default_size(DEFAULT_SIZE)
+                .frame(
+                    Frame::none()
+                        .fill(emb_pal.bg)
+                        .stroke(Stroke::new(1.0, emb_pal.border))
+                        .inner_margin(Margin::symmetric(10.0, 8.0))
+                        .rounding(8.0),
+                )
                 .show(ctx, |ui| {
                     let mut n = note_cb.lock();
-                    paint_editable(ui, &mut n, false);
+                    paint_readonly(ui, &mut n, false);
                 });
             if !open {
                 let mut n = note_cb.lock();
@@ -275,15 +457,16 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
 
         let close_os = ctx.input(|i| i.viewport().close_requested());
         let mut close_btn = false;
+        let pal = palette(note.color);
         egui::CentralPanel::default()
             .frame(
                 Frame::none()
-                    .fill(sticky_bg())
-                    .stroke(Stroke::new(1.0, sticky_border()))
+                    .fill(pal.bg)
+                    .stroke(Stroke::new(1.0, pal.border))
                     .inner_margin(Margin::symmetric(10.0, 8.0)),
             )
             .show(ctx, |ui| {
-                close_btn = paint_editable(ui, &mut note, true);
+                close_btn = paint_readonly(ui, &mut note, true);
             });
 
         if close_os || close_btn {
@@ -312,116 +495,205 @@ fn display_title(title: &str) -> &str {
     }
 }
 
-fn sticky_bg() -> Color32 {
-    Color32::from_rgb(0xFF, 0xF6, 0xC8)
+fn paint_origin_chip(ui: &mut egui::Ui, label: &str, pal: StickyPalette) {
+    Frame::none()
+        .fill(pal.chip_bg)
+        .rounding(4.0)
+        .inner_margin(Margin::symmetric(6.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(label).size(11.0).color(pal.chip_fg));
+        });
 }
 
-fn sticky_border() -> Color32 {
-    Color32::from_rgb(0xE8, 0xD4, 0x6A)
+/// 菜单里用的饱和色点（六色可分）。
+fn color_swatch(c: StickyColor) -> Color32 {
+    match c {
+        StickyColor::Yellow => Color32::from_rgb(0xE6, 0xC2, 0x00),
+        StickyColor::Peach => Color32::from_rgb(0xE8, 0x70, 0x50),
+        StickyColor::Mint => Color32::from_rgb(0x3C, 0xB8, 0x6A),
+        StickyColor::Sky => Color32::from_rgb(0x3B, 0x9F, 0xE0),
+        StickyColor::Lilac => Color32::from_rgb(0x8B, 0x6A, 0xD4),
+        StickyColor::Blush => Color32::from_rgb(0xE8, 0x5A, 0x82),
+    }
+}
+
+const MENU_DOT: f32 = 16.0;
+
+/// 右键菜单内一行色点；点中改色并关菜单。
+fn paint_menu_color_dots(ui: &mut egui::Ui, note: &mut StickyNote) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add_space(4.0);
+        for &c in &StickyColor::ALL {
+            let selected = note.color == c;
+            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(MENU_DOT), Sense::click());
+            let resp = resp.on_hover_text(c.label());
+            let center = rect.center();
+            let r = MENU_DOT * 0.5 - 1.0;
+            ui.painter().circle_filled(center, r, color_swatch(c));
+            ui.painter().circle_stroke(
+                center,
+                r,
+                Stroke::new(
+                    if selected { 2.0 } else { 1.0 },
+                    if selected {
+                        Color32::from_rgb(0x1F, 0x29, 0x37)
+                    } else {
+                        Color32::from_rgba_unmultiplied(0x00, 0x00, 0x00, 55)
+                    },
+                ),
+            );
+            if resp.clicked() {
+                note.color = c;
+                ui.close_menu();
+            }
+        }
+    });
+}
+
+/// 便签右键菜单；点了关闭返回 true。
+fn sticky_context_menu(ui: &mut egui::Ui, note: &mut StickyNote, panel_h: f32) -> bool {
+    let mut close = false;
+    theme::style_context_menu(ui);
+    // 便签视口很小，菜单过高会被窗体裁掉
+    let max_h = (panel_h - 8.0).clamp(120.0, 280.0);
+    egui::ScrollArea::vertical()
+        .max_height(max_h)
+        .show(ui, |ui| {
+            let pin_label = if note.pinned {
+                "取消置顶"
+            } else {
+                "置顶"
+            };
+            let pin_mark = if note.pinned { "浮" } else { "钉" };
+            if theme::menu_item_mark(ui, pin_mark, pin_label).clicked() {
+                note.pinned = !note.pinned;
+                note.apply_pin = true;
+                ui.close_menu();
+            }
+            theme::menu_sep(ui);
+            theme::menu_section(ui, "纸色");
+            paint_menu_color_dots(ui, note);
+            ui.add_space(4.0);
+            theme::menu_sep(ui);
+            if theme::menu_item_danger_mark(ui, "关", "关闭便签").clicked() {
+                close = true;
+                ui.close_menu();
+            }
+        });
+    close
 }
 
 /// 返回是否点了关闭。
-fn paint_editable(ui: &mut egui::Ui, note: &mut StickyNote, enable_drag: bool) -> bool {
-    let panel = ui.max_rect();
-    let hovered = ui.rect_contains_pointer(panel);
-    if hovered {
-        ui.ctx().request_repaint();
-    }
-
-    const CLOSE_W: f32 = 28.0;
+fn paint_readonly(ui: &mut egui::Ui, note: &mut StickyNote, enable_drag: bool) -> bool {
+    let pal = palette(note.color);
     let mut close = false;
-    let mut on_close = false;
-    let mut title_bar = egui::Rect::NOTHING;
+    let panel = ui.max_rect();
+    let header_top = ui.cursor().min.y;
+    let row_h = ui.spacing().interact_size.y.max(22.0);
 
+    // 标题栏：chip + 限宽标题（控件改右键菜单，无悬停工具）
     ui.horizontal(|ui| {
-        let max_w = (ui.available_width() - CLOSE_W).max(40.0);
-        ui.set_max_width(max_w);
-        let r = ui.add(
-            TextEdit::singleline(&mut note.title)
-                .desired_width(max_w - 8.0)
-                .font(egui::TextStyle::Body)
-                .text_color(Color32::from_rgb(0x3A, 0x32, 0x1A))
-                .frame(false)
-                .hint_text("标题"),
+        ui.spacing_mut().item_spacing.x = 6.0;
+        paint_origin_chip(ui, note.origin_label(), pal);
+        let title = if note.title.trim().is_empty() {
+            "(无标题)"
+        } else {
+            note.title.as_str()
+        };
+        let title_w = ui.available_width().max(40.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(title_w, row_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(title).size(14.0).color(pal.title))
+                        .truncate(true),
+                );
+            },
         );
-        title_bar = r.rect;
-        if r.changed() {
-            note.mark_dirty();
-        }
     });
+    let row1_bottom = ui.cursor().min.y.max(header_top + row_h);
+    // 整行标题栏（含文字右侧空白）均可拖
+    let drag_rect = egui::Rect::from_min_max(
+        egui::pos2(panel.left(), header_top),
+        egui::pos2(panel.right(), row1_bottom),
+    );
+
     ui.add_space(2.0);
     ui.separator();
     ui.add_space(4.0);
 
-    let body_h = (ui.available_height() - 28.0).max(48.0);
+    let body_h = (ui.available_height() - 22.0).max(48.0);
     egui::ScrollArea::vertical()
         .id_source(("sticky_scroll", note.id.as_str()))
         .auto_shrink([false, false])
         .max_height(body_h)
         .show(ui, |ui| {
-            let r = ui.add(
-                TextEdit::multiline(&mut note.body)
-                    .desired_width(ui.available_width())
-                    .desired_rows(6)
-                    .frame(false)
-                    .text_color(Color32::from_rgb(0x4A, 0x40, 0x28))
-                    .hint_text("正文…"),
-            );
-            if r.changed() {
-                note.mark_dirty();
-            }
+            let body = if note.body.trim().is_empty() {
+                "（无正文）"
+            } else {
+                note.body.as_str()
+            };
+            ui.add(egui::Label::new(RichText::new(body).size(13.0).color(pal.body)).wrap(true));
         });
 
     ui.label(
-        RichText::new(if note.dirty {
-            "未保存 · 停顿后自动写回"
-        } else {
-            "已同步 · 拖动标题栏移动"
-        })
-        .size(10.5)
-        .color(theme::text_muted()),
+        RichText::new("只读 · 拖动标题栏 · 右键菜单")
+            .size(10.5)
+            .color(pal.chip_fg),
     );
 
+    // 正文区右键（不盖住标题栏，避免抢走拖动）
+    let body_rect = egui::Rect::from_min_max(
+        egui::pos2(panel.left(), row1_bottom),
+        panel.max,
+    );
+    let body_ctx = ui.interact(
+        body_rect,
+        egui::Id::new(("sticky_ctx_body", note.id.as_str())),
+        Sense::click(),
+    );
+    body_ctx.context_menu(|ui| {
+        if sticky_context_menu(ui, note, panel.height()) {
+            close = true;
+        }
+    });
+
     if enable_drag {
-        if hovered {
-            let close_rect = egui::Rect::from_min_size(
-                egui::pos2(panel.right() - CLOSE_W - 2.0, panel.top() + 2.0),
-                Vec2::new(CLOSE_W, 24.0),
-            );
-            let r = ui
-                .put(
-                    close_rect,
-                    egui::Button::new(
-                        RichText::new("×")
-                            .size(16.0)
-                            .color(Color32::from_rgb(0x6B, 0x5C, 0x3A)),
-                    )
-                    .fill(Color32::from_white_alpha(160))
-                    .frame(false)
-                    .min_size(Vec2::new(CLOSE_W, 24.0)),
-                )
-                .on_hover_text("关闭便签");
-            on_close = r.hovered() || r.is_pointer_button_down_on();
-            if r.clicked() {
+        let drag = ui
+            .interact(
+                drag_rect,
+                egui::Id::new(("sticky_drag", note.id.as_str())),
+                Sense::click_and_drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        // 标题栏也可右键
+        drag.context_menu(|ui| {
+            if sticky_context_menu(ui, note, panel.height()) {
                 close = true;
             }
-        }
-        // 仅标题栏空白处拖动（避免与 TextEdit 抢手势）
-        if title_bar == egui::Rect::NOTHING {
-            title_bar = egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), 28.0));
-        }
-        let drag_rect = egui::Rect::from_min_max(
-            title_bar.min,
-            egui::pos2(panel.right() - CLOSE_W - 4.0, title_bar.bottom()),
-        );
-        let drag = ui.interact(
-            drag_rect,
-            ui.id().with("sticky_drag").with(note.id.as_str()),
-            Sense::click_and_drag(),
-        );
-        if drag.drag_started() && !on_close && !close {
+        });
+        // 右键不拖动
+        if drag.drag_started()
+            && ui.input(|i| i.pointer.primary_down())
+            && !close
+        {
+            ui.ctx()
+                .set_cursor_icon(egui::CursorIcon::Grabbing);
             ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
         }
+    } else {
+        let title_ctx = ui.interact(
+            drag_rect,
+            egui::Id::new(("sticky_ctx_title", note.id.as_str())),
+            Sense::click(),
+        );
+        title_ctx.context_menu(|ui| {
+            if sticky_context_menu(ui, note, panel.height()) {
+                close = true;
+            }
+        });
     }
 
     close

@@ -56,8 +56,8 @@ pub fn run_gui_with_opts(cfg: Config, start_hidden: bool) -> eframe::Result<()> 
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 640.0])
-            .with_min_inner_size([960.0, 640.0])
+            .with_inner_size([960.0, 720.0])
+            .with_min_inner_size([960.0, 720.0])
             .with_title("分布式备忘录")
             .with_icon(app_icon::window_icon()),
         centered: true,

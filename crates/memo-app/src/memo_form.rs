@@ -13,12 +13,117 @@ use uuid::Uuid;
 /// 新建弹窗作用域：随主导航收窄分类/类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormScope {
-    /// 编辑：不限制
+    /// 编辑：不限制；新建四选一也用 Open
     #[default]
     Open,
     Calendar,
     Credentials,
     GenderPrivate,
+}
+
+/// 新建条目类型（四选一）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateEntryKind {
+    #[default]
+    Task,
+    Memo,
+    PrivateTask,
+    PrivateMemo,
+}
+
+impl CreateEntryKind {
+    pub const ALL: &'static [Self] = &[
+        Self::Task,
+        Self::Memo,
+        Self::PrivateTask,
+        Self::PrivateMemo,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Task => "任务",
+            Self::Memo => "备忘",
+            Self::PrivateTask => "私密任务",
+            Self::PrivateMemo => "私密备忘",
+        }
+    }
+
+    pub fn is_memo(self) -> bool {
+        matches!(self, Self::Memo | Self::PrivateMemo)
+    }
+
+    pub fn is_private(self) -> bool {
+        matches!(self, Self::PrivateTask | Self::PrivateMemo)
+    }
+
+    pub fn space(self) -> MemoSpace {
+        if self.is_private() {
+            MemoSpace::Private
+        } else {
+            MemoSpace::Normal
+        }
+    }
+
+    pub fn category(self) -> MemoCategory {
+        if self.is_memo() {
+            MemoCategory::Credentials
+        } else {
+            MemoCategory::Todo
+        }
+    }
+
+    pub fn default_tag(self) -> &'static str {
+        match self {
+            Self::Task => "待办",
+            Self::Memo => "备忘",
+            Self::PrivateTask | Self::PrivateMemo => "私密",
+        }
+    }
+
+    pub fn title_hint(self) -> &'static str {
+        match self {
+            Self::Task => "一句话说清要做什么",
+            Self::Memo => "例如：某网站账号 / 证件名",
+            Self::PrivateTask => "私密待办一句话",
+            Self::PrivateMemo => "例如：私密账号 / 日记名",
+        }
+    }
+
+    pub fn notes_hint(self) -> &'static str {
+        match self {
+            Self::Task => "补充步骤、材料等（可选）",
+            Self::Memo => "账号、号码等说明（可选）",
+            Self::PrivateTask => "仅本机可见的补充说明",
+            Self::PrivateMemo => "敏感信息说明（仅本机）",
+        }
+    }
+
+    pub fn tags_field_hint(self) -> &'static str {
+        match self {
+            Self::Task => "逗号分隔 · 任务常用",
+            Self::Memo => "逗号分隔 · 账号证件",
+            Self::PrivateTask => "逗号分隔 · 私密待办",
+            Self::PrivateMemo => "逗号分隔 · 私密备忘",
+        }
+    }
+
+    pub fn tags_section_hint(self) -> &'static str {
+        match self {
+            Self::Task => "待办相关标签",
+            Self::Memo => "账号证件等标签",
+            Self::PrivateTask => "私密待办标签",
+            Self::PrivateMemo => "私密备忘标签",
+        }
+    }
+
+    pub fn preset_tags(self) -> &'static [&'static str] {
+        match self {
+            Self::Task => &["待办", "提醒", "截止", "工作", "生活", "跟进"],
+            Self::Memo => &["账号", "密码", "证件", "到期", "订阅", "应急"],
+            Self::PrivateTask => &["私密", "健康", "生活", "工作", "跟进", "重要"],
+            Self::PrivateMemo => &["私密", "日记", "财务", "健康", "伴侣", "应急"],
+        }
+    }
 }
 
 pub fn categories_for(scope: FormScope) -> &'static [MemoCategory] {
@@ -125,6 +230,8 @@ pub struct MemoFormState {
     pub data_dir: Option<PathBuf>,
     /// 新建弹窗导航作用域；编辑为 Open
     pub scope: FormScope,
+    /// 新建四选一类型（编辑忽略）
+    pub create_kind: CreateEntryKind,
     /// 下一帧聚焦标题框（校验失败时）
     focus_title: bool,
     /// 外层 ScrollArea 强制滚到顶部的剩余帧数（标题在表单上部）
@@ -134,6 +241,8 @@ pub struct MemoFormState {
     /// 上次自动套用的标题/正文，用于判断是否可随分类刷新模板
     auto_title: String,
     auto_body: String,
+    /// 上次按类型自动写入的标签（用户手改后不再随类型覆盖）
+    auto_tags: String,
 }
 
 impl Default for MemoFormState {
@@ -154,11 +263,13 @@ impl Default for MemoFormState {
             attach_id: String::new(),
             data_dir: None,
             scope: FormScope::Open,
+            create_kind: CreateEntryKind::Task,
             focus_title: false,
             force_scroll_top: 0,
             flash_title_frames: 0,
             auto_title: String::new(),
             auto_body: String::new(),
+            auto_tags: String::new(),
         }
     }
 }
@@ -168,46 +279,79 @@ impl MemoFormState {
         *self = Self::default();
     }
 
-    /// 按导航作用域打开新建草稿并套用模板。
-    /// `prefill_due` 有值时为「某一天」；账号分类强制无日期。
+    /// 按新建类型打开草稿（四选一）；`prefill_due` 仅任务类生效。
     pub fn begin_create(
-        category: MemoCategory,
+        entry: CreateEntryKind,
         stamp: &str,
         prefill_due: Option<&str>,
-        scope: FormScope,
     ) -> Self {
-        let category = if category_allowed(scope, category) {
-            category
-        } else {
-            categories_for(scope)
-                .first()
-                .copied()
-                .unwrap_or(MemoCategory::Todo)
-        };
-        let space = match scope {
-            FormScope::GenderPrivate => MemoSpace::Private,
-            _ => MemoSpace::Normal,
-        };
         let mut s = Self {
-            category,
-            due_date: prefill_due.unwrap_or("").to_string(),
-            scope,
-            space,
+            scope: FormScope::Open,
+            create_kind: entry,
+            due_date: if entry.is_memo() {
+                String::new()
+            } else {
+                prefill_due.unwrap_or("").to_string()
+            },
             lan_share: LanShare::Off,
             visibility: MemoVisibility::Private,
             attach_id: Uuid::new_v4().to_string().replace('-', ""),
             ..Self::default()
         };
-        s.kind = infer_kind(s.category, &s.due_date, &s.end_date);
-        if !kind_allowed(scope, s.kind) {
-            s.kind = kinds_for(scope)
-                .first()
-                .copied()
-                .unwrap_or(DateKind::Parked);
-        }
-        s.sync_kind_fields();
-        s.apply_template(stamp, true);
+        s.create_kind = entry;
+        s.apply_create_kind(entry, stamp, true);
         s
+    }
+
+    /// 切换新建类型：同步空间/分类/日期类型，刷新模板与默认标签（手改标签不覆盖）。
+    pub fn apply_create_kind(&mut self, entry: CreateEntryKind, stamp: &str, force: bool) {
+        self.create_kind = entry;
+        self.scope = FormScope::Open;
+        self.space = entry.space();
+        self.category = entry.category();
+        self.lan_share = LanShare::Off;
+        self.visibility = MemoVisibility::Private;
+
+        if entry.is_memo() {
+            self.kind = DateKind::Credentials;
+            self.due_date.clear();
+            self.end_date.clear();
+            self.remind_before_days = 0;
+        } else if self.kind == DateKind::Credentials || force {
+            self.kind = if self.due_date.trim().is_empty() {
+                DateKind::Parked
+            } else {
+                DateKind::Day
+            };
+            if self.kind == DateKind::Day && self.due_date.trim().is_empty() {
+                self.due_date = format!("{} 09:00", today_ymd());
+            }
+        }
+        self.sync_kind_fields();
+        // 四选一已锁定分类，防止 sync 在 Open 下改回
+        self.category = entry.category();
+        self.space = entry.space();
+        self.lan_share = LanShare::Off;
+
+        self.apply_template(stamp, force);
+
+        let tags_pristine = self.tags.trim().is_empty() || self.tags == self.auto_tags;
+        if tags_pristine {
+            self.tags = format_tags(&[entry.default_tag().to_string()]);
+            self.auto_tags = self.tags.clone();
+        }
+    }
+
+    pub fn set_create_kind(&mut self, entry: CreateEntryKind, stamp: &str) {
+        if self.create_kind == entry {
+            return;
+        }
+        // 切到备忘类时丢掉日期；切到任务且无日期则保持 parked
+        if entry.is_memo() {
+            self.due_date.clear();
+            self.end_date.clear();
+        }
+        self.apply_create_kind(entry, stamp, false);
     }
 
     pub fn load_from_drafts(
@@ -245,12 +389,14 @@ impl MemoFormState {
             },
             data_dir: None,
             scope: FormScope::Open,
+            create_kind: CreateEntryKind::Task,
             focus_title: false,
             force_scroll_top: 0,
             flash_title_frames: 0,
             // 勿把已加载正文当作模板基线，否则改分类会误判 pristine 并整段覆盖
             auto_title: String::new(),
             auto_body: String::new(),
+            auto_tags: String::new(),
         };
         let raw_cat = category;
         if raw_cat.is_gender_private() {
@@ -626,9 +772,79 @@ fn kind_hint(kind: DateKind) -> &'static str {
 /// 与分类下拉同高，保证「分类 | 这是」两框中线对齐。
 const KIND_SEG_H: f32 = 30.0;
 
+fn kinds_for_create(entry: CreateEntryKind) -> &'static [DateKind] {
+    if entry.is_memo() {
+        &[DateKind::Credentials]
+    } else {
+        &[DateKind::Day, DateKind::Span, DateKind::Parked]
+    }
+}
+
+/// 新建四选一：任务 / 备忘 / 私密任务 / 私密备忘。
+fn show_create_kind_seg(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
+    let seg_w = fit_col_width(ui, ui.available_width());
+    ui.label(
+        RichText::new("新建类型")
+            .size(11.5)
+            .color(theme::text_muted()),
+    );
+    ui.add_space(2.0);
+    Frame::none()
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(2.0, 2.0))
+        .show(ui, |ui| {
+            let seg_w = fit_col_width(ui, seg_w);
+            ui.set_max_width(seg_w);
+            ui.set_width(seg_w);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let n = CreateEntryKind::ALL.len() as f32;
+                let gaps = 2.0 * (n - 1.0);
+                let avail = (ui.available_width() - gaps).max(0.0);
+                let btn_w = (avail / n).floor().max(1.0).min(96.0);
+                for &k in CreateEntryKind::ALL {
+                    let on = state.create_kind == k;
+                    let fill = if on {
+                        theme::shell_accent_soft()
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let fg = if on {
+                        theme::shell_accent()
+                    } else {
+                        theme::text_muted()
+                    };
+                    let btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(k.label())
+                                .size(12.0)
+                                .color(fg)
+                                .strong(),
+                        )
+                        .fill(fill)
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(btn_w, 28.0)),
+                    );
+                    if btn.clicked() {
+                        state.set_create_kind(k, stamp);
+                    }
+                }
+            });
+        });
+    ui.add_space(6.0);
+}
+
 /// 紧凑分段控件「这是」的选项条（不含标签；标签由调用方与分类列对称绘制）。
-fn show_kinds_seg(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
-    let kinds = kinds_for(state.scope);
+fn show_kinds_seg(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str, create_mode: bool) {
+    let kinds = if create_mode {
+        kinds_for_create(state.create_kind)
+    } else {
+        kinds_for(state.scope)
+    };
     if kinds.len() <= 1 {
         let k = kinds.first().copied().unwrap_or(state.kind);
         if state.kind != k {
@@ -930,14 +1146,21 @@ pub fn show_fields(
     id_salt: &str,
 ) {
     let stamp = today_ymd();
-    // 编辑用完整列表；新建用 state.scope
+    let is_create = mode == FormMode::Create;
+    // 编辑用完整列表；新建四选一用 Open + create_kind
     let scope = if mode == FormMode::Edit {
         FormScope::Open
     } else {
-        state.scope
+        FormScope::Open
     };
     let cats = categories_for(scope);
-    if state.space == MemoSpace::Private || state.scope == FormScope::GenderPrivate {
+    if is_create {
+        state.space = state.create_kind.space();
+        state.category = state.create_kind.category();
+        if state.create_kind.is_private() {
+            state.lan_share = LanShare::Off;
+        }
+    } else if state.space == MemoSpace::Private || state.scope == FormScope::GenderPrivate {
         state.space = MemoSpace::Private;
         state.lan_share = LanShare::Off;
     }
@@ -951,7 +1174,8 @@ pub fn show_fields(
     } else {
         MemoVisibility::Private
     };
-    let space_locked = state.scope == FormScope::GenderPrivate
+    let space_locked = is_create
+        || state.scope == FormScope::GenderPrivate
         || state.scope == FormScope::Calendar
         || state.scope == FormScope::Credentials;
     let lan_locked = state.space == MemoSpace::Private
@@ -1005,6 +1229,21 @@ pub fn show_fields(
         });
     }
 
+    if is_create {
+        show_create_kind_seg(ui, state, &stamp);
+    }
+
+    let title_ph = if is_create {
+        state.create_kind.title_hint()
+    } else {
+        title_hint(state.category)
+    };
+    let notes_ph = if is_create {
+        state.create_kind.notes_hint()
+    } else {
+        "在此填写备注…"
+    };
+
     // —— 标题 ——
     let need_focus = state.take_focus_title();
     let need_scroll = state.force_scroll_top > 0;
@@ -1032,7 +1271,7 @@ pub fn show_fields(
                         egui::TextEdit::singleline(&mut state.doc.title)
                             .id(title_id)
                             .desired_width((w - 2.0).clamp(1.0, w.max(1.0)))
-                            .hint_text(theme::hint(title_hint(state.category)))
+                            .hint_text(theme::hint(title_ph))
                             .margin(egui::vec2(9.0, 5.0)),
                     )
                 })
@@ -1053,7 +1292,16 @@ pub fn show_fields(
     const NOTES_MIN_H: f32 = 140.0;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 3.0;
-        field_label_hint(ui, "备注", false, Some("可选"));
+        field_label_hint(
+            ui,
+            "备注",
+            false,
+            if is_create {
+                Some(state.create_kind.notes_hint())
+            } else {
+                Some("可选")
+            },
+        );
         let notes_w = fit_col_width(ui, ui.available_width());
         ui.set_max_width(notes_w);
         ui.set_width(notes_w);
@@ -1064,14 +1312,15 @@ pub fn show_fields(
             state.data_dir.as_deref(),
             &state.attach_id,
             NOTES_MIN_H,
+            Some(notes_ph),
         );
     });
 
-    // —— 分类 | 这是 ——（仅 Open 编辑显示分类下拉；新建按页签锁定时隐藏）
+    // —— 分类 | 这是 ——（新建隐藏分类，由四选一决定；编辑可改分类）
     let selected_cat = state.category.bucket();
     let col_gap = 8.0;
     let row_w = fit_col_width(ui, w);
-    let show_cat_combo = cats.len() > 1;
+    let show_cat_combo = !is_create && cats.len() > 1;
     let half = if show_cat_combo {
         split_cols(row_w, 2, col_gap)
     } else {
@@ -1098,7 +1347,7 @@ pub fn show_fields(
             ui.spacing_mut().item_spacing.y = 0.0;
             field_label(ui, "这是", false);
             ui.add_space(2.0);
-            show_kinds_seg(ui, state, &stamp);
+            show_kinds_seg(ui, state, &stamp, is_create);
         });
     });
 
@@ -1210,7 +1459,11 @@ pub fn show_fields(
     ui.vertical(|ui| {
         ui.set_max_width(row_w);
         ui.spacing_mut().item_spacing.y = 2.0;
-        field_label(ui, "标签", false);
+        if is_create {
+            field_label_hint(ui, "标签", false, Some(state.create_kind.tags_section_hint()));
+        } else {
+            field_label(ui, "标签", false);
+        }
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(row_w);
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -1219,10 +1472,15 @@ pub fn show_fields(
             let tag_w = (ui.available_width() * 0.42)
                 .max(1.0)
                 .min(tag_max);
+            let tag_hint = if is_create {
+                state.create_kind.tags_field_hint()
+            } else {
+                "逗号或空格分隔"
+            };
             let tag_resp = ui.add(
                 egui::TextEdit::singleline(&mut state.tags)
                     .desired_width(tag_w)
-                    .hint_text(theme::hint("逗号或空格分隔"))
+                    .hint_text(theme::hint(tag_hint))
                     .margin(egui::vec2(8.0, 4.0)),
             );
             if tag_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -1230,11 +1488,20 @@ pub fn show_fields(
                 state.tags = format_tags(&tags);
             }
             ui.spacing_mut().button_padding = egui::vec2(7.0, 1.5);
-            let cat_tags = preset_tags_for(state.category, state.space);
-            for t in cat_tags.iter().chain(COMMON_TAGS.iter()).take(6) {
+            let mut chips: Vec<&str> = if is_create {
+                state.create_kind.preset_tags().iter().copied().take(6).collect()
+            } else {
+                preset_tags_for(state.category, state.space)
+                    .iter()
+                    .chain(COMMON_TAGS.iter())
+                    .copied()
+                    .take(6)
+                    .collect()
+            };
+            for t in chips.drain(..) {
                 let chip = ui.add(
                     egui::Button::new(
-                        RichText::new(*t)
+                        RichText::new(t)
                             .size(11.0)
                             .color(theme::shell_accent()),
                     )
@@ -1282,17 +1549,9 @@ mod tests {
         let widths = [
             1.0_f32, 12.0, 24.0, 40.0, 71.0, 72.0, 79.0, 80.0, 100.0, 200.0, 420.0,
         ];
-        for scope in [
-            FormScope::Credentials,
-            FormScope::Calendar,
-            FormScope::GenderPrivate,
-            FormScope::Open,
-        ] {
-            let cat = match scope {
-                FormScope::Credentials => MemoCategory::Credentials,
-                _ => MemoCategory::Todo,
-            };
-            let mut create = MemoFormState::begin_create(cat, stamp, None, scope);
+        for entry in CreateEntryKind::ALL {
+            let cat = entry.category();
+            let mut create = MemoFormState::begin_create(*entry, stamp, None);
             let mut edit = MemoFormState::load_from_drafts(
                 cat,
                 "历史标题",

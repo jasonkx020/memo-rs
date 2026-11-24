@@ -170,6 +170,8 @@ pub struct MemoApp {
     last_remind_scan: Instant,
     /// 桌面便签（memo_id → 共享句柄；deferred viewport 需 Send+Sync）
     stickies: HashMap<String, StickyHandle>,
+    /// 当前便签所属身份指纹（换身份解锁时用于拆旧便签）
+    sticky_person_fp: Option<String>,
     /// 系统托盘（退出时 take + dispose）
     tray: Option<tray::TrayHandle>,
     /// 真正退出（托盘菜单）；否则关主窗只隐藏
@@ -232,6 +234,7 @@ impl MemoApp {
             pending_sync_hint: 0,
             last_remind_scan: Instant::now() - Duration::from_secs(30),
             stickies: HashMap::new(),
+            sticky_person_fp: None,
             tray,
             quit_requested: false,
             main_hidden: start_hidden,
@@ -322,11 +325,21 @@ impl MemoApp {
     }
 
     fn save_sticky_session_now(&mut self) {
-        // 仅在主界面落盘；锁定后 stickies 已空，勿覆盖会话文件
-        let Screen::Main { rt, .. } = &self.screen else {
+        let fp = self
+            .sticky_person_fp
+            .clone()
+            .or_else(|| {
+                if let Screen::Main { rt, .. } = &self.screen {
+                    Some(rt.svc.session_fp().to_string())
+                } else {
+                    self.session_rt
+                        .as_ref()
+                        .map(|rt| rt.svc.session_fp().to_string())
+                }
+            });
+        let Some(fp) = fp else {
             return;
         };
-        let fp = rt.svc.session_fp().to_string();
         let pairs: Vec<_> = self
             .stickies
             .iter()
@@ -344,15 +357,30 @@ impl MemoApp {
         }
     }
 
+    fn clear_stickies(&mut self, ctx: &egui::Context) {
+        self.close_all_sticky_viewports(ctx);
+        self.stickies.clear();
+        self.sticky_person_fp = None;
+    }
+
+    fn note_sticky_owner(&mut self, fp: &str) {
+        self.sticky_person_fp = Some(fp.to_string());
+    }
+
     /// 解锁后按本机会话自动打开便签，并尽量恢复历史位置。
     fn restore_stickies_from_session(&mut self, rt: &AppRuntime) {
         let fp = rt.svc.session_fp().to_string();
         let Some(session) = sticky_note::load_session(Path::new(&self.cfg.data_dir), &fp) else {
+            if !self.stickies.is_empty() {
+                self.note_sticky_owner(&fp);
+            }
             return;
         };
         let list = rt.svc.list();
+        let mut opened = false;
         for g in session.notes {
             if self.stickies.contains_key(&g.id) {
+                opened = true;
                 continue;
             }
             let Some(m) = list.iter().find(|m| m.id == g.id) else {
@@ -365,8 +393,14 @@ impl MemoApp {
                     Some([g.x, g.y]),
                     Some([g.w.max(200.0), g.h.max(120.0)]),
                     true,
+                    g.color,
+                    g.pinned,
                 ),
             );
+            opened = true;
+        }
+        if opened || !self.stickies.is_empty() {
+            self.note_sticky_owner(&fp);
         }
     }
 
@@ -1041,6 +1075,14 @@ impl MemoApp {
                     {
                         self.editor_resume = None;
                     }
+                    // 换身份：关掉上一身份仍开着的便签
+                    if self
+                        .sticky_person_fp
+                        .as_ref()
+                        .is_some_and(|fp| fp != &unlock_fp)
+                    {
+                        self.clear_stickies(ctx);
+                    }
                     self.session_rt = Some(rt.clone());
                     self.shell = ShellUi::default();
                     self.shell.cal.load_prefs(
@@ -1062,6 +1104,8 @@ impl MemoApp {
                     let list = rt.svc.list();
                     let _ = period_view::ensure_daily_predict_recalc(&rt.svc, &list);
                     self.screen = Self::make_main(rt.clone(), &cfg);
+                    // 登录门强制浅色控件色后，需重刷主题
+                    self.last_theme_mode = None;
                     self.restore_editor_from_session(&rt);
                     // 进主壳后静默检查一次（stub 未配置时不打扰）
                     self.update_silent_done = false;
@@ -1367,8 +1411,7 @@ impl eframe::App for MemoApp {
                 self.flush_dirty_stickies(&rt, &mut dummy);
             }
             self.save_sticky_session_now();
-            self.close_all_sticky_viewports(ctx);
-            self.stickies.clear();
+            self.clear_stickies(ctx);
             self.stop_session_rt();
             if let Some(t) = self.tray.take() {
                 t.dispose();
@@ -1383,7 +1426,7 @@ impl eframe::App for MemoApp {
         }
 
         if self.pending_switch_person {
-            // 锁定 / 自动锁定：只挡 UI，保留 session_rt 使主节点继续 LAN 监听
+            // 锁定 / 自动锁定：只挡 UI，保留 session_rt 使主节点继续 LAN 监听；便签保持
             let rt_for_flush = self
                 .session_rt
                 .clone()
@@ -1402,10 +1445,11 @@ impl eframe::App for MemoApp {
                 if self.session_rt.is_none() {
                     self.session_rt = Some(rt.clone());
                 }
+                if !self.stickies.is_empty() {
+                    self.note_sticky_owner(rt.svc.session_fp());
+                }
             }
             self.save_sticky_session_now();
-            self.close_all_sticky_viewports(ctx);
-            self.stickies.clear();
             self.session_login_password = None;
             self.change_pw_old.clear();
             self.change_pw_new.clear();
@@ -1802,8 +1846,10 @@ impl eframe::App for MemoApp {
                         existing.lock().request_focus = true;
                         *status_line = "已聚焦桌面便签".into();
                     } else if let Ok(m) = rt.svc.get_view(&id) {
+                        let fp = rt.svc.session_fp().to_string();
                         self.stickies
                             .insert(id, sticky_note::StickyNote::from_memo(&m));
+                        self.sticky_person_fp = Some(fp);
                         self.sticky_session_dirty = true;
                         *status_line = "已生成桌面便签".into();
                     }
@@ -1820,6 +1866,7 @@ impl eframe::App for MemoApp {
                     || *show_export
                     || *show_change_pw
                     || *show_settings
+                    || self.shell.show_care_settings
                     || *show_backup
                     || *show_history
                     || *empty_trash_confirm
@@ -2213,7 +2260,7 @@ impl eframe::App for MemoApp {
                             ui.set_width(ui.available_width());
                             ui.label(
                                 RichText::new(
-                                    "修改本机登录密码。用于进入本机并加密数据备份；不加密 .memokey。",
+                                    "修改本机登录密码。用于进入本机并加密数据备份。",
                                 )
                                 .size(13.0)
                                 .color(theme::text_muted()),
@@ -2731,15 +2778,6 @@ impl eframe::App for MemoApp {
                                             });
 
                                             settings_item_gap(ui);
-                                            // —— 关怀与健康（私密页模块开关 / 调参）——
-                                            settings_section(ui, "关怀与健康");
-                                            gender_private_view::show_care_health_settings(
-                                                ui,
-                                                &rt.svc,
-                                                status_line,
-                                            );
-
-                                            settings_item_gap(ui);
                                             // —— 授权 ——
                                             settings_section(ui, "授权");
                                             {
@@ -3081,7 +3119,7 @@ impl eframe::App for MemoApp {
                                             settings_item_header(
                                                 ui,
                                                 "修改登录密码",
-                                                "用于进入本机并加密数据备份；不加密 .memokey。",
+                                                "用于进入本机并加密数据备份。",
                                             );
                                             {
                                                 let pw_w = field_w.min(ui.available_width());
@@ -3203,12 +3241,12 @@ impl eframe::App for MemoApp {
                                             settings_item_header(
                                                 ui,
                                                 "监听端口",
-                                                "TCP 同步监听端口。更改后需重启。",
+                                                "更改后需重启。",
                                             );
                                             let mut port =
                                                 settings_draft.listen_port.to_string();
                                             if settings_text_field(
-                                                ui, &mut port, "例如 17890", 120.0,
+                                                ui, &mut port, "例如 7000", 120.0,
                                             ) {
                                                 if let Ok(p) = port.parse() {
                                                     settings_draft.listen_port = p;
@@ -3244,7 +3282,7 @@ impl eframe::App for MemoApp {
                                             settings_item_header(
                                                 ui,
                                                 "局域网自动发现",
-                                                "同网段通过 UDP 17000 发现对端。关闭后只连接下方「对端列表」里手填的地址。",
+                                                "同网段自动寻找主机。关闭后只连接下方「对端列表」里手填的地址。",
                                             );
                                             ui.checkbox(
                                                 &mut settings_draft.lan_discovery,
@@ -3277,7 +3315,7 @@ impl eframe::App for MemoApp {
                                             settings_item_header(
                                                 ui,
                                                 "对端列表",
-                                                "手动指定对端，每行一个 host:port。同网段通常可依赖自动发现。",
+                                                "手动指定对端，每行一个地址。同网段通常可依赖自动发现。",
                                             );
                                             let mut peers_text =
                                                 settings_draft.peers.join("\n");
@@ -3286,7 +3324,9 @@ impl eframe::App for MemoApp {
                                                     egui::TextEdit::multiline(&mut peers_text)
                                                         .desired_rows(4)
                                                         .desired_width(field_w.max(480.0))
-                                                        .hint_text(theme::hint("host:port")),
+                                                        .hint_text(theme::hint(
+                                                            "例如 192.168.1.8:7000",
+                                                        )),
                                                 )
                                                 .changed()
                                             {
@@ -3300,12 +3340,12 @@ impl eframe::App for MemoApp {
                                             settings_item_header(
                                                 ui,
                                                 "集群盐",
-                                                "同局域网互通须一致。修改后需重启，且各节点使用相同值。",
+                                                "同集群各机必须相同；与登录密码无关。修改后需重启。",
                                             );
                                             settings_text_field(
                                                 ui,
                                                 &mut settings_draft.cluster_salt_hex,
-                                                "十六进制盐值",
+                                                "各机填写相同内容",
                                                 field_w.max(480.0),
                                             );
 
@@ -3345,7 +3385,7 @@ impl eframe::App for MemoApp {
                                             settings_item_header(
                                                 ui,
                                                 "加密备份文件",
-                                                "导出或导入本地 .memobak 加密备份。设置保存在系统用户配置目录。",
+                                                "导出或导入本地加密备份。",
                                             );
                                             ui.horizontal(|ui| {
                                                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -3424,6 +3464,62 @@ impl eframe::App for MemoApp {
                     }
                 }
 
+                if self.shell.show_care_settings {
+                    let modal = theme::begin_modal(ctx, "care_settings_modal");
+                    let mut open = true;
+                    theme::modal_fixed(ctx, "关怀与健康", [420.0, 360.0])
+                        .id(modal.window_id)
+                        .open(&mut open)
+                        .show(ctx, |ui| {
+                            Frame::none()
+                                .fill(theme::card())
+                                .inner_margin(Margin::symmetric(20.0, 14.0))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width().max(1.0));
+                                    ui.label(
+                                        RichText::new("经期与体检")
+                                            .size(15.0)
+                                            .strong()
+                                            .color(theme::shell_women_pill_fg()),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(
+                                            "仅显示关怀相关开关与调参；其它应用设置请到侧栏「设置」。",
+                                        )
+                                        .size(12.0)
+                                        .color(theme::text_muted()),
+                                    );
+                                    ui.add_space(12.0);
+                                    egui::ScrollArea::vertical()
+                                        .id_source("care_settings_scroll")
+                                        .max_height(220.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            gender_private_view::show_care_health_settings(
+                                                ui,
+                                                &rt.svc,
+                                                status_line,
+                                            );
+                                        });
+                                    ui.add_space(10.0);
+                                    ui.separator();
+                                    ui.add_space(6.0);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if theme::primary_button(ui, "完成").clicked() {
+                                                self.shell.show_care_settings = false;
+                                            }
+                                        },
+                                    );
+                                });
+                        });
+                    if modal.end(ctx, open) {
+                        self.shell.show_care_settings = false;
+                    }
+                }
+
                 if self.show_restart_confirm {
                     let modal = theme::begin_modal(ctx, "restart_confirm_modal");
                     let mut open = true;
@@ -3479,80 +3575,86 @@ impl eframe::App for MemoApp {
             }
         }
 
-        // 便签：须在 match 外处理，避免与 screen 字段借用冲突
-        if matches!(self.screen, Screen::Main { .. }) {
-            let rt = if let Screen::Main { rt, .. } = &self.screen {
-                rt.clone()
-            } else {
-                unreachable!()
-            };
-            let mut sticky_status = String::new();
-            self.flush_dirty_stickies(&rt, &mut sticky_status);
-            self.refresh_stickies_from_list(&rt);
-            if !sticky_status.is_empty() {
-                if let Screen::Main { status_line, .. } = &mut self.screen {
-                    *status_line = sticky_status;
-                }
-            }
-            let sticky_ids: Vec<String> = self.stickies.keys().cloned().collect();
-            let mut sticky_closed = Vec::new();
-            for sid in sticky_ids {
-                let Some(note) = self.stickies.get(&sid) else {
-                    continue;
-                };
-                if note.lock().closed {
-                    // 再注册一帧：回调里 Visible(false)，避免黑框残留
-                    sticky_note::show_viewport(ctx, note);
-                    sticky_note::force_hide_viewport(ctx, &sid);
-                    sticky_closed.push(sid);
-                    continue;
-                }
-                sticky_note::show_viewport(ctx, note);
-            }
-            let mut need_session_save = !sticky_closed.is_empty();
-            for sid in sticky_closed {
-                if let Some(h) = self.stickies.get(&sid) {
-                    let mut n = h.lock();
-                    n.flush_now = true;
-                    let title = n.title.clone();
-                    let body = n.body.clone();
-                    let dirty = n.dirty;
-                    drop(n);
-                    if dirty {
-                        let _ = rt.svc.edit(&sid, &title, &body);
+        // 便签：须在 match 外处理，避免与 screen 字段借用冲突；锁定后身份门仍继续画
+        let sticky_rt = match &self.screen {
+            Screen::Main { rt, .. } => Some(rt.clone()),
+            _ => self.session_rt.clone(),
+        };
+        if let Some(rt) = sticky_rt {
+            if !self.stickies.is_empty() || matches!(self.screen, Screen::Main { .. }) {
+                let mut sticky_status = String::new();
+                if !self.stickies.is_empty() {
+                    self.flush_dirty_stickies(&rt, &mut sticky_status);
+                    self.refresh_stickies_from_list(&rt);
+                    if !sticky_status.is_empty() {
+                        if let Screen::Main { status_line, .. } = &mut self.screen {
+                            *status_line = sticky_status;
+                        }
+                    }
+                    let sticky_ids: Vec<String> = self.stickies.keys().cloned().collect();
+                    let mut sticky_closed = Vec::new();
+                    for sid in sticky_ids {
+                        let Some(note) = self.stickies.get(&sid) else {
+                            continue;
+                        };
+                        if note.lock().closed {
+                            // 再注册一帧：回调里 Visible(false)，避免黑框残留
+                            sticky_note::show_viewport(ctx, note);
+                            sticky_note::force_hide_viewport(ctx, &sid);
+                            sticky_closed.push(sid);
+                            continue;
+                        }
+                        sticky_note::show_viewport(ctx, note);
+                    }
+                    let mut need_session_save = !sticky_closed.is_empty();
+                    for sid in sticky_closed {
+                        if let Some(h) = self.stickies.get(&sid) {
+                            let mut n = h.lock();
+                            n.flush_now = true;
+                            let title = n.title.clone();
+                            let body = n.body.clone();
+                            let dirty = n.dirty;
+                            drop(n);
+                            if dirty {
+                                let _ = rt.svc.edit(&sid, &title, &body);
+                            }
+                        }
+                        sticky_note::force_hide_viewport(ctx, &sid);
+                        self.stickies.remove(&sid);
+                    }
+                    if self.stickies.is_empty() {
+                        self.sticky_person_fp = None;
+                    }
+                    // 位置变动较频繁：约 1 秒落盘一次本机会话
+                    if self.sticky_session_dirty
+                        || self.last_sticky_session_save.elapsed() >= Duration::from_secs(1)
+                    {
+                        need_session_save = true;
+                    }
+                    if need_session_save {
+                        self.sticky_session_dirty = false;
+                        self.save_sticky_session_now();
                     }
                 }
-                sticky_note::force_hide_viewport(ctx, &sid);
-                self.stickies.remove(&sid);
-            }
-            // 位置变动较频繁：约 1 秒落盘一次本机会话
-            if self.sticky_session_dirty
-                || self.last_sticky_session_save.elapsed() >= Duration::from_secs(1)
-            {
-                need_session_save = true;
-            }
-            if need_session_save {
-                self.sticky_session_dirty = false;
-                self.save_sticky_session_now();
-            }
-            self.shell.cal.save_prefs_if_dirty(
-                Path::new(&self.cfg.data_dir),
-                rt.svc.session_fp(),
-            );
-            self.shell.drawer.save_if_dirty(
-                Path::new(&self.cfg.data_dir),
-                rt.svc.session_fp(),
-            );
-            if self.main_hidden
-                || !ctx.input(|i| i.viewport().focused.unwrap_or(false))
-            {
-                ctx.request_repaint_after(Duration::from_millis(200));
+                if matches!(self.screen, Screen::Main { .. }) {
+                    self.shell.cal.save_prefs_if_dirty(
+                        Path::new(&self.cfg.data_dir),
+                        rt.svc.session_fp(),
+                    );
+                    self.shell.drawer.save_if_dirty(
+                        Path::new(&self.cfg.data_dir),
+                        rt.svc.session_fp(),
+                    );
+                }
             }
         }
 
-        // 主窗藏托盘 / 身份门：保持低频刷新，便签与托盘退出才能响应
-        if self.main_hidden || matches!(self.screen, Screen::IdentityGate(_)) {
-            ctx.request_repaint_after(Duration::from_millis(200));
+        // 有便签时持续低频刷新：主窗未聚焦 /「显示桌面」后仍能把便签拉回可见
+        if !self.stickies.is_empty()
+            || self.main_hidden
+            || matches!(self.screen, Screen::IdentityGate(_))
+        {
+            ctx.request_repaint_after(Duration::from_millis(150));
         }
 
         self.show_help = show_help;

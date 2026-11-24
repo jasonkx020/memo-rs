@@ -101,6 +101,7 @@ fn fit_ui_width(ui: &egui::Ui) -> f32 {
 
 /// 编辑器。`min_h` 为整卡最小高度；正文可无限撑开，由外层滚动。
 /// `data_dir` / `memo_id` 保留签名兼容调用方（纯 TXT 不再插图）。
+/// `body_hint` 为备注 placeholder；`None` 用默认文案。
 pub fn show_editor(
     ui: &mut egui::Ui,
     doc: &mut Doc,
@@ -108,6 +109,7 @@ pub fn show_editor(
     _data_dir: Option<&Path>,
     _memo_id: &str,
     min_h: f32,
+    body_hint: Option<&str>,
 ) {
     let min_h = min_h.max(140.0);
     let avail = fit_ui_width(ui);
@@ -117,6 +119,7 @@ pub fn show_editor(
     }
 
     let editor_w = avail;
+    let hint = body_hint.unwrap_or("在此填写备注…");
     Frame::none()
         .fill(theme::card())
         .stroke(Stroke::new(1.0, theme::border()))
@@ -143,7 +146,7 @@ pub fn show_editor(
                             .desired_width(edit_w)
                             .desired_rows(rows)
                             .frame(false)
-                            .hint_text(theme::hint("在此填写备注…")),
+                            .hint_text(theme::hint(hint)),
                     );
                 });
         });

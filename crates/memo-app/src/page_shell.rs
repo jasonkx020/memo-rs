@@ -418,14 +418,9 @@ pub fn page_rail_split(avail: f32) -> (f32, f32) {
     (list, rail)
 }
 
-/// 左栏页头：标题 · 计数 · + 新建（写操作入口，编辑进抽屉）。
+/// 左栏页头：标题 · 计数（新建统一走主顶栏）。
 /// 仅画在左栏，右栏日历可顶对齐上移。
-pub fn show_page_header(
-    ui: &mut egui::Ui,
-    title: &str,
-    count_text: &str,
-    open_new: &mut bool,
-) {
+pub fn show_page_header(ui: &mut egui::Ui, title: &str, count_text: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(
@@ -441,24 +436,6 @@ pub fn show_page_header(
                     .color(theme::text_muted()),
             );
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new("+ 新建")
-                            .color(Color32::WHITE)
-                            .strong()
-                            .size(13.0),
-                    )
-                    .fill(theme::shell_accent())
-                    .rounding(Rounding::same(7.0))
-                    .min_size(Vec2::new(64.0, 28.0)),
-                )
-                .clicked()
-            {
-                *open_new = true;
-            }
-        });
     });
 }
 

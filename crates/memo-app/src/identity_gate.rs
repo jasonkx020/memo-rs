@@ -1,5 +1,6 @@
-﻿//! 桌面终端用户身份门：选择/生成/导入密钥对（macOS 风格设置助手）。
+﻿//! 桌面终端用户身份门：选择/生成/导入密钥对。
 //!
+//! 视觉对齐 `docs/ui-mockup/login.html`：品牌先行 + 登录动作，雾绿氛围。
 //! 与服务器「存储节点」身份不同：此处创建的是终端用户会话身份（含 Person、私人备忘）。
 //! 无 UI 存储节点请用 CLI 自动 bootstrap / `--init`，勿走本模块。
 
@@ -8,7 +9,10 @@ use crate::autostart;
 use crate::save_dialog;
 use crate::theme;
 use crate::tip_code;
-use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{
+    self, Align, Align2, Color32, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, Vec2,
+    Visuals,
+};
 use memo_core::config::{self, Config};
 use memo_core::identity_keys::{self, IdentityKeys, IdentityMeta};
 use std::path::PathBuf;
@@ -38,8 +42,6 @@ pub struct IdentityGateState {
     pub pending_identity: Option<IdentityKeys>,
     /// 用户主动退出后为 true（保留字段；单身份不再自动进入）
     pub skip_auto_unlock: bool,
-    /// 登录主按钮下方：开机自启动 / 生成·导入身份
-    pub show_more_options: bool,
 }
 
 impl IdentityGateState {
@@ -72,7 +74,6 @@ impl IdentityGateState {
             init_mode_import: false,
             pending_identity: None,
             skip_auto_unlock: false,
-            show_more_options: false,
         }
     }
 
@@ -112,25 +113,25 @@ fn local_password_fields(
     };
     if setup {
         field_label(ui, "登录密码（至少 6 位）");
-        let r = theme::password_field(ui, pass, "设置登录密码", w, 34.0);
+        let r = gate_password_field(ui, pass, "设置登录密码", w, 36.0);
         if focus_first {
             r.request_focus();
         }
         let mut submit = enter(ui, &r);
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         field_label(ui, "确认登录密码");
-        let r2 = theme::password_field(ui, pass2, "再输入一次", w, 34.0);
+        let r2 = gate_password_field(ui, pass2, "再输入一次", w, 36.0);
         submit |= enter(ui, &r2);
         ui.add_space(4.0);
         ui.label(
-            RichText::new("用于进入本机并加密数据备份；.memokey 密钥包本身无口令（靠签名验真，请妥善保管文件）。")
-                .size(11.5)
-                .color(theme::mac_text_secondary()),
+            RichText::new("用于进入本机并加密数据备份。密钥包请妥善保管。")
+                .size(11.0)
+                .color(gate_muted()),
         );
         submit
     } else {
         field_label(ui, "登录密码");
-        let r = theme::password_field(ui, pass, "输入登录密码", w, 34.0);
+        let r = gate_password_field(ui, pass, "输入登录密码", w, 36.0);
         if focus_first {
             r.request_focus();
         }
@@ -138,192 +139,424 @@ fn local_password_fields(
     }
 }
 
-/// 登录门全屏黑底（广告/能力展示面）。
-fn gate_black() -> Color32 {
-    Color32::from_rgb(0x08, 0x08, 0x0A)
+/// 登录门固定浅色品牌色（对齐 login.html，不受会话主题切换影响）。
+fn gate_paper() -> Color32 {
+    Color32::from_rgb(0xF3, 0xF6, 0xF2)
+}
+fn gate_grad_top() -> Color32 {
+    Color32::from_rgb(0xEE, 0xF4, 0xEF)
+}
+fn gate_grad_mid() -> Color32 {
+    Color32::from_rgb(0xDF, 0xEA, 0xE3)
+}
+fn gate_grad_bot() -> Color32 {
+    Color32::from_rgb(0xC9, 0xDB, 0xD0)
+}
+fn gate_ink() -> Color32 {
+    Color32::from_rgb(0x14, 0x22, 0x1C)
+}
+fn gate_ink_soft() -> Color32 {
+    Color32::from_rgb(0x2A, 0x3D, 0x34)
+}
+fn gate_muted() -> Color32 {
+    Color32::from_rgb(0x5C, 0x6F, 0x66)
+}
+fn gate_accent() -> Color32 {
+    Color32::from_rgb(0x2F, 0x5D, 0x4A)
+}
+fn gate_accent_mid() -> Color32 {
+    Color32::from_rgb(0x3A, 0x6F, 0x59)
+}
+fn gate_accent_deep() -> Color32 {
+    Color32::from_rgb(0x1E, 0x3F, 0x32)
+}
+fn gate_accent_soft() -> Color32 {
+    Color32::from_rgb(0xD8, 0xEB, 0xE1)
+}
+fn gate_line() -> Color32 {
+    Color32::from_rgba_unmultiplied(0x14, 0x22, 0x1C, 31) // ~0.12
+}
+fn gate_warn() -> Color32 {
+    Color32::from_rgb(0xB4, 0x23, 0x18)
+}
+fn gate_field_bg() -> Color32 {
+    Color32::from_rgb(0xFB, 0xFC, 0xFB)
+}
+fn gate_user_idle() -> Color32 {
+    Color32::from_rgb(0xFA, 0xFC, 0xFB)
 }
 
-fn paint_gate_bg(ui: &egui::Ui) {
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    Color32::from_rgba_unmultiplied(
+        lerp_u8(a.r(), b.r(), t),
+        lerp_u8(a.g(), b.g(), t),
+        lerp_u8(a.b(), b.b(), t),
+        lerp_u8(a.a(), b.a(), t),
+    )
+}
+
+/// 强制登录门浅色松针绿控件色，避免深色/腮红主题污染密码框与勾选。
+fn apply_gate_visuals(ctx: &egui::Context) {
+    let mut visuals = Visuals::light();
+    visuals.dark_mode = false;
+    visuals.window_fill = gate_paper();
+    visuals.panel_fill = gate_paper();
+    visuals.extreme_bg_color = gate_field_bg();
+    visuals.faint_bg_color = gate_accent_soft();
+    visuals.override_text_color = None;
+    visuals.hyperlink_color = gate_accent();
+    visuals.warn_fg_color = gate_warn();
+    visuals.error_fg_color = gate_warn();
+    visuals.window_stroke = Stroke::new(1.0, gate_line());
+    visuals.selection.bg_fill = gate_accent_soft();
+    visuals.selection.stroke = Stroke::new(1.0, gate_accent());
+
+    let round = egui::Rounding::same(10.0);
+    for w in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        w.rounding = round;
+        w.fg_stroke = Stroke::new(1.0, gate_ink());
+    }
+    visuals.widgets.noninteractive.bg_fill = Color32::WHITE;
+    visuals.widgets.noninteractive.weak_bg_fill = gate_paper();
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, gate_line());
+    visuals.widgets.inactive.bg_fill = gate_field_bg();
+    visuals.widgets.inactive.weak_bg_fill = gate_paper();
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, gate_line());
+    visuals.widgets.hovered.bg_fill = gate_accent_soft();
+    visuals.widgets.hovered.weak_bg_fill = gate_paper();
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, gate_accent());
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, gate_ink());
+    visuals.widgets.active.bg_fill = gate_accent();
+    visuals.widgets.active.weak_bg_fill = gate_accent_soft();
+    visuals.widgets.active.bg_stroke = Stroke::new(1.5, gate_accent_deep());
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.open.bg_fill = gate_accent_soft();
+    visuals.widgets.open.weak_bg_fill = gate_paper();
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, gate_accent());
+    ctx.set_visuals(visuals);
+}
+
+fn paint_soft_glow(
+    p: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    rgb: (u8, u8, u8),
+    peak_alpha: u8,
+) {
+    const LAYERS: i32 = 14;
+    for i in (0..LAYERS).rev() {
+        let t = i as f32 / (LAYERS - 1) as f32;
+        let r = radius * (0.18 + 0.82 * t);
+        let a = ((1.0 - t).powf(1.35) * peak_alpha as f32) as u8;
+        if a < 2 {
+            continue;
+        }
+        p.circle_filled(
+            center,
+            r,
+            Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, a),
+        );
+    }
+}
+
+fn paint_gate_bg(ui: &egui::Ui, wide: bool) {
     let rect = ui.ctx().screen_rect();
-    ui.painter().rect_filled(rect, 0.0, gate_black());
-    // 左侧微光，避免死黑平板
-    let glow = egui::Rect::from_min_max(
-        rect.left_top(),
-        egui::pos2(rect.left() + rect.width() * 0.55, rect.bottom()),
+    let p = ui.painter();
+
+    // 145° 雾绿底：纵向色带逼近 HTML linear-gradient
+    const BANDS: i32 = 40;
+    for i in 0..BANDS {
+        let t0 = i as f32 / BANDS as f32;
+        let t1 = (i + 1) as f32 / BANDS as f32;
+        let c = if t0 < 0.42 {
+            lerp_color(gate_grad_top(), gate_grad_mid(), t0 / 0.42)
+        } else {
+            lerp_color(gate_grad_mid(), gate_grad_bot(), (t0 - 0.42) / 0.58)
+        };
+        let y0 = rect.top() + rect.height() * t0;
+        let y1 = rect.top() + rect.height() * t1 + 0.5;
+        p.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), y0),
+                egui::pos2(rect.right(), y1),
+            ),
+            0.0,
+            c,
+        );
+    }
+
+    // 左上 / 右下径向光晕（对齐 HTML radial-gradient）
+    paint_soft_glow(
+        p,
+        egui::pos2(
+            rect.left() + rect.width() * 0.12,
+            rect.top() + rect.height() * 0.18,
+        ),
+        rect.width().max(rect.height()) * 0.42,
+        (0x2F, 0x5D, 0x4A),
+        58,
     );
-    ui.painter().rect_filled(
-        glow,
-        0.0,
-        Color32::from_rgba_unmultiplied(0x1A, 0x2A, 0x44, 40),
+    paint_soft_glow(
+        p,
+        egui::pos2(
+            rect.left() + rect.width() * 0.78,
+            rect.top() + rect.height() * 0.88,
+        ),
+        rect.width().max(rect.height()) * 0.36,
+        (0x1E, 0x3F, 0x32),
+        42,
     );
+
+    // 左侧淡网格（48px，低透明）
+    let grid = Color32::from_rgba_unmultiplied(0x14, 0x22, 0x1C, 9);
+    let step = 48.0;
+    let grid_right = rect.left() + rect.width() * if wide { 0.58 } else { 1.0 };
+    let mut x = rect.left();
+    while x < grid_right {
+        let fade = 1.0 - ((x - rect.left()) / (grid_right - rect.left() + 1.0)).clamp(0.0, 1.0);
+        let a = (9.0 * fade * 0.9) as u8;
+        if a >= 2 {
+            p.vline(
+                x,
+                rect.y_range(),
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x14, 0x22, 0x1C, a)),
+            );
+        }
+        x += step;
+        let _ = grid;
+    }
+    let mut y = rect.top();
+    while y < rect.bottom() {
+        p.hline(
+            rect.left()..=grid_right,
+            y,
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x14, 0x22, 0x1C, 7)),
+        );
+        y += step;
+    }
+
+    // 宽屏右侧磨砂面板（白 → 纸绿）
+    if wide {
+        let split = rect.left() + rect.width() * 0.55;
+        const RB: i32 = 24;
+        for i in 0..RB {
+            let t0 = i as f32 / RB as f32;
+            let t1 = (i + 1) as f32 / RB as f32;
+            let c = lerp_color(
+                Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 184),
+                Color32::from_rgba_unmultiplied(0xF3, 0xF6, 0xF2, 235),
+                t0,
+            );
+            let y0 = rect.top() + rect.height() * t0;
+            let y1 = rect.top() + rect.height() * t1 + 0.5;
+            p.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(split, y0),
+                    egui::pos2(rect.right(), y1),
+                ),
+                0.0,
+                c,
+            );
+        }
+        p.vline(
+            split,
+            rect.y_range(),
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x14, 0x22, 0x1C, 15)),
+        );
+    }
 }
 
-/// 特色能力（登录页左侧营销）。
-const CAPABILITY_ROWS: &[(&str, &str)] = &[
-    ("任务日历", "日/周安排、到期提醒与过期摘要"),
-    ("备忘归档", "账号、证件等长期资料本地保存"),
-    ("私密空间", "独立加密隔离，不进普通列表"),
-    ("局域网同步", "授权节点密文托管与公开同步"),
-    ("桌面便签", "置顶小窗，即改即存回本条"),
-    ("身份密钥", "换机导入 .memokey 即可认领"),
-    ("关怀健康", "经期推算与体检提醒（可选）"),
-    ("加密备份", "登录密码密封私钥与数据备份"),
-];
+/// 登录卡内密码框：纸白底 + 松针描边/聚焦光环。
+fn gate_password_field(
+    ui: &mut egui::Ui,
+    password: &mut String,
+    hint: &str,
+    width: f32,
+    height: f32,
+) -> egui::Response {
+    let size = Vec2::new(width, height);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let pad_x = 14.0_f32;
+    let round = egui::Rounding::same(11.0);
+    let id = ui.make_persistent_id(("gate_pw", hint));
+    let focused = ui.memory(|m| m.has_focus(id));
 
-/// 信任卖点：补足左侧空白。
-const TRUST_LINES: &[&str] = &[
-    "数据默认落本机，只有你授权才上局域网",
-    "无云账号绑架：绿色单文件，开箱即用",
-    "Ed25519 身份与审计链，换机不丢数据",
-    "空闲自动锁定，Esc 一键回到选人页",
-];
+    ui.painter().rect(
+        rect,
+        round,
+        if focused {
+            Color32::WHITE
+        } else {
+            gate_field_bg()
+        },
+        Stroke::new(
+            if focused { 1.25 } else { 1.0 },
+            if focused { gate_accent() } else { gate_line() },
+        ),
+    );
+    if focused {
+        ui.painter().rect_stroke(
+            rect.expand(2.5),
+            egui::Rounding::same(13.0),
+            Stroke::new(3.0, Color32::from_rgba_unmultiplied(0x2F, 0x5D, 0x4A, 40)),
+        );
+    }
 
-fn draw_feature_row(ui: &mut egui::Ui, title: &str, desc: &str, compact: bool) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
-        ui.painter()
-            .circle_filled(rect.center(), 3.0, theme::shell_accent());
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new(title)
-                .size(if compact { 12.5 } else { 13.5 })
-                .strong()
-                .color(Color32::WHITE),
+    let response = ui.put(
+        rect,
+        egui::TextEdit::singleline(password)
+            .id(id)
+            .password(true)
+            .frame(false)
+            .vertical_align(Align::Center)
+            .horizontal_align(Align::LEFT)
+            .margin(Margin::symmetric(pad_x, 0.0))
+            .min_size(size)
+            .desired_width(width)
+            .text_color(gate_ink()),
+    );
+    if password.is_empty() && !hint.is_empty() && !response.has_focus() {
+        let font = FontId::proportional(14.0);
+        let galley = ui.fonts(|f| f.layout_no_wrap(hint.to_owned(), font, gate_muted()));
+        let text_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + pad_x, rect.top()),
+            Vec2::new((rect.width() - pad_x * 2.0).max(1.0), rect.height()),
         );
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new(desc)
-                .size(if compact { 11.5 } else { 12.5 })
-                .color(Color32::from_rgb(0x8E, 0x8E, 0x93)),
-        );
-    });
+        let pos = Align2::LEFT_CENTER
+            .align_size_within_rect(galley.size(), text_rect)
+            .min;
+        ui.painter().galley(pos, galley, gate_muted());
+    }
+    response
 }
 
-/// 左侧品牌 + 特色功能 + 信任文案。宽屏钉住底部标语以吃满高度。
-fn draw_capability_showcase(ui: &mut egui::Ui, wide: bool, compact: bool) {
+const PROMISE_CHIPS: &[&str] = &["本地加密", "绿色单文件", "换机可认领"];
+
+/// 左侧品牌主区：产品名是首屏主信号，承诺三词，无能力清单。
+fn draw_brand_showcase(ui: &mut egui::Ui, wide: bool, compact: bool) {
     let title_size = if wide && !compact {
-        28.0
+        42.0
     } else if wide {
-        24.0
+        34.0
     } else {
-        20.0
+        28.0
     };
     let icon = if wide && !compact {
-        48.0
+        52.0
     } else if wide {
-        40.0
+        44.0
     } else {
-        32.0
+        36.0
     };
-    let row_gap = if compact { 4.0 } else { 8.0 };
-    let section_gap = if compact { 12.0 } else { 18.0 };
 
     let draw_body = |ui: &mut egui::Ui| {
-        ui.horizontal(|ui| {
-            app_icon::show(ui, icon);
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new(theme::APP_NAME)
-                        .size(title_size)
-                        .strong()
-                        .color(Color32::from_rgb(0xF5, 0xF5, 0xF7)),
+        // 松针绿徽标（对齐 HTML .logo）
+        Frame::none()
+            .fill(gate_accent_mid())
+            .rounding(egui::Rounding::same(14.0))
+            .inner_margin(Margin::same(8.0))
+            .shadow(egui::epaint::Shadow {
+                offset: Vec2::new(0.0, 10.0),
+                blur: 22.0,
+                spread: 0.0,
+                color: Color32::from_rgba_unmultiplied(0x2F, 0x5D, 0x4A, 90),
+            })
+            .show(ui, |ui| {
+                let side = (icon - 16.0_f32).max(28.0_f32);
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(r.left(), r.center().y),
+                        r.right_bottom(),
+                    ),
+                    egui::Rounding {
+                        nw: 0.0,
+                        ne: 0.0,
+                        sw: 10.0,
+                        se: 10.0,
+                    },
+                    gate_accent(),
                 );
-                ui.label(
-                    RichText::new(theme::APP_DESCRIPTION)
-                        .size(12.5)
-                        .color(Color32::from_rgb(0xA1, 0xA1, 0xA6)),
-                );
+                ui.allocate_ui_at_rect(r, |ui| {
+                    app_icon::show(ui, side);
+                });
             });
+        ui.add_space(if compact { 18.0 } else { 28.0 });
+        ui.label(
+            RichText::new(theme::APP_NAME)
+                .size(title_size)
+                .strong()
+                .color(gate_ink()),
+        );
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new("任务、备忘与私密资料，本机加密存放。需要时再授权局域网同步。")
+                .size(if compact { 13.5 } else { 16.0 })
+                .color(gate_ink_soft()),
+        );
+        ui.add_space(if compact { 16.0 } else { 24.0 });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.y = 8.0;
+            for chip in PROMISE_CHIPS {
+                Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 148))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(0x2F, 0x5D, 0x4A, 41),
+                    ))
+                    .rounding(egui::Rounding::same(99.0))
+                    .inner_margin(Margin::symmetric(12.0, 7.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(*chip)
+                                .size(12.5)
+                                .strong()
+                                .color(gate_accent_deep()),
+                        );
+                    });
+            }
         });
-        ui.add_space(section_gap);
-        if compact {
-            ui.label(
-                RichText::new("个人备忘与任务，本机加密存放；需要时再授权局域网同步。")
-                    .size(13.0)
-                    .color(Color32::from_rgb(0xD1, 0xD1, 0xD6)),
-            );
-        } else {
-            ui.label(
-                RichText::new("把任务、备忘与私密资料收进一个本地加密壳层——")
-                    .size(14.5)
-                    .color(Color32::from_rgb(0xD1, 0xD1, 0xD6)),
-            );
-            ui.label(
-                RichText::new("需要同步时再授权节点，换机导入密钥即可认领数据。")
-                    .size(14.5)
-                    .color(Color32::from_rgb(0xD1, 0xD1, 0xD6)),
-            );
-        }
-        ui.add_space(section_gap);
-        ui.label(
-            RichText::new("特色能力")
-                .size(12.0)
-                .strong()
-                .color(Color32::from_rgb(0x64, 0xB5, 0xF6)),
-        );
-        ui.add_space(if compact { 6.0 } else { 10.0 });
-
-        // 窄屏少列几条；宽屏（含 640 紧凑）打赏已在右侧，左侧可列全
-        let n = if wide {
-            CAPABILITY_ROWS.len()
-        } else {
-            5.min(CAPABILITY_ROWS.len())
-        };
-        for (title, desc) in &CAPABILITY_ROWS[..n] {
-            draw_feature_row(ui, title, desc, compact);
-            ui.add_space(row_gap);
-        }
-
-        ui.add_space(if compact { 6.0 } else { 10.0 });
-        ui.label(
-            RichText::new("为什么放心")
-                .size(12.0)
-                .strong()
-                .color(Color32::from_rgb(0x64, 0xB5, 0xF6)),
-        );
-        ui.add_space(if compact { 6.0 } else { 8.0 });
-        let trust_n = if !wide {
-            2
-        } else if compact {
-            3
-        } else {
-            TRUST_LINES.len()
-        };
-        for line in &TRUST_LINES[..trust_n.min(TRUST_LINES.len())] {
-            ui.label(
-                RichText::new(format!("· {line}"))
-                    .size(if compact { 11.5 } else { 12.5 })
-                    .color(Color32::from_rgb(0xA1, 0xA1, 0xA6)),
-            );
-            ui.add_space(if compact { 3.0 } else { 5.0 });
-        }
     };
 
     if wide {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            ui.add_space(if compact { 10.0 } else { 18.0 });
+            ui.add_space(if compact { 12.0 } else { 20.0 });
             ui.label(
-                RichText::new("绿色单文件 · 开箱即用 · 当前版本功能全开")
-                    .size(12.0)
-                    .color(Color32::from_rgb(0x6E, 0x6E, 0x73)),
+                RichText::new("当前版本功能全开 · 无云账号绑架")
+                    .size(12.5)
+                    .color(gate_muted()),
             );
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                draw_body(ui);
-            });
+            ui.with_layout(Layout::top_down(Align::Min), draw_body);
         });
     } else {
         draw_body(ui);
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new("当前版本功能全开 · 无云账号绑架")
+                .size(12.0)
+                .color(gate_muted()),
+        );
     }
 }
 
 /// 打赏码块尺寸（含白边与文案），供右下角绝对定位。
 fn tip_corner_size(compact: bool) -> (f32, f32, f32) {
-    let qr: f32 = if compact { 144.0 } else { 192.0 };
-    let frame_pad = 8.0;
+    let qr: f32 = if compact { 96.0 } else { 112.0 };
+    let frame_pad = 10.0;
     let w = qr + frame_pad * 2.0;
-    // 码 + 间距 + 三行文案
-    let h = qr + frame_pad * 2.0 + 6.0 + 48.0;
+    let h = qr + frame_pad * 2.0 + 8.0 + 36.0;
     (qr, w, h)
 }
 
@@ -331,14 +564,32 @@ fn tip_corner_size(compact: bool) -> (f32, f32, f32) {
 fn draw_gate_tip_corner(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool) {
     let (qr, _, _) = tip_corner_size(compact);
     let frame = Frame::none()
-        .fill(Color32::WHITE)
-        .stroke(Stroke::new(1.0, Color32::from_rgb(0x2A, 0x2A, 0x30)))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(8.0));
-    ui.with_layout(Layout::top_down(Align::Max), |ui| {
+        .fill(Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 235))
+        .stroke(Stroke::new(1.0, gate_line()))
+        .rounding(egui::Rounding::same(14.0))
+        .inner_margin(egui::Margin::same(10.0))
+        .shadow(egui::epaint::Shadow {
+            offset: Vec2::new(0.0, 8.0),
+            blur: 20.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(28),
+        });
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
         let r = frame
             .show(ui, |ui| {
                 tip_code::show(ui, qr);
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("打赏作者")
+                        .size(12.5)
+                        .strong()
+                        .color(gate_ink_soft()),
+                );
+                ui.label(
+                    RichText::new("自愿 · 请喝杯咖啡")
+                        .size(11.0)
+                        .color(gate_muted()),
+                );
             })
             .response
             .interact(Sense::click())
@@ -347,35 +598,13 @@ fn draw_gate_tip_corner(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool) {
         if r.clicked() {
             *show_tip = true;
         }
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("打赏作者")
-                .size(12.5)
-                .strong()
-                .color(Color32::from_rgb(0xD1, 0xD1, 0xD6)),
-        );
-        ui.label(
-            RichText::new("扫码请喝杯咖啡 · 纯属自愿")
-                .size(11.0)
-                .color(Color32::from_rgb(0x8E, 0x8E, 0x93)),
-        );
-        if ui
-            .link(
-                RichText::new("查看大图")
-                    .size(11.5)
-                    .color(Color32::from_rgb(0x64, 0xB5, 0xF6)),
-            )
-            .clicked()
-        {
-            *show_tip = true;
-        }
     });
 }
 
 /// 贴在面板真正的右下角绘制打赏码。
 fn place_tip_bottom_right(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool) {
     let (_, tip_w, tip_h) = tip_corner_size(compact);
-    let margin = 20.0;
+    let margin = 24.0;
     let panel = ui.max_rect();
     let tip_rect = egui::Rect::from_min_size(
         egui::pos2(
@@ -390,77 +619,50 @@ fn place_tip_bottom_right(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool)
     });
 }
 
-/// 登录卡下方黑底区：能力芯片 + 完整版本号 / 说明，吃掉右侧空白。
-fn draw_right_black_footer(ui: &mut egui::Ui, show_help: &mut bool) {
-    ui.add_space(18.0);
-    // 宽屏紧凑时左侧只列了前 4 条，这里补后两条；窄屏则展示前 4 条摘要
-    let chips: &[&str] = if ui.available_width() >= 360.0 {
-        &["桌面便签", "身份密钥", "本地加密", "可换机"]
-    } else {
-        &["任务日历", "备忘归档", "私密空间", "局域网同步"]
-    };
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.spacing_mut().item_spacing.y = 6.0;
-        for title in chips {
-            Frame::none()
-                .fill(Color32::from_rgb(0x16, 0x16, 0x1A))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(0x2A, 0x2A, 0x30)))
-                .rounding(egui::Rounding::same(8.0))
-                .inner_margin(egui::Margin::symmetric(10.0, 5.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(*title)
-                            .size(12.0)
-                            .color(Color32::from_rgb(0xD1, 0xD1, 0xD6)),
-                    );
-                });
-        }
-    });
+/// 登录卡下方：版本 + 使用说明。
+fn draw_right_meta(ui: &mut egui::Ui, show_help: &mut bool) {
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("版本 {}", theme::APP_FILE_VERSION))
-                .size(12.5)
-                .color(Color32::from_rgb(0xA1, 0xA1, 0xA6)),
+                .size(12.0)
+                .color(gate_muted()),
         );
-        ui.add_space(16.0);
-        if ui
-            .link(
-                RichText::new("使用说明")
-                    .size(12.5)
-                    .color(Color32::from_rgb(0x64, 0xB5, 0xF6)),
-            )
-            .clicked()
-        {
-            *show_help = true;
-        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .link(
+                    RichText::new("使用说明")
+                        .size(12.5)
+                        .strong()
+                        .color(gate_accent_deep()),
+                )
+                .clicked()
+            {
+                *show_help = true;
+            }
+        });
     });
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
-            .size(12.0)
-            .color(theme::mac_text_secondary())
+            .size(11.5)
+            .color(gate_ink_soft())
             .strong(),
     );
-    ui.add_space(4.0);
+    ui.add_space(3.0);
 }
 
 fn mac_status(ui: &mut egui::Ui, status: &str, busy: bool) {
     if status.is_empty() {
         return;
     }
-    ui.add_space(10.0);
+    ui.add_space(8.0);
     ui.label(
         RichText::new(status)
             .size(12.5)
-            .color(if busy {
-                theme::mac_text_secondary()
-            } else {
-                theme::mac_red()
-            }),
+            .color(if busy { gate_muted() } else { gate_warn() }),
     );
 }
 
@@ -503,47 +705,49 @@ pub fn show(
     let mut show_help = false;
     let mut show_tip = false;
 
+    apply_gate_visuals(ui_ctx);
+
     egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(gate_black()))
+        .frame(egui::Frame::none().fill(gate_grad_mid()))
         .show(ui_ctx, |ui| {
-            paint_gate_bg(ui);
             let select_mode =
                 !st.legacy_wipe_confirm && !st.show_init && st.pending_identity.is_none();
             let avail = ui.available_size();
-            // 默认最小窗 960×640：走宽屏紧凑，保证版本号完整可见
+            // 默认最小窗 960×720：走宽屏紧凑
             let wide = avail.x >= 900.0;
             let compact = avail.y <= 680.0;
+            paint_gate_bg(ui, wide);
 
             if wide {
-                let pad = 28.0;
-                let left_w = (avail.x * 0.42).clamp(300.0, 420.0);
-                let gap = 24.0;
-                let right_w = (avail.x - left_w - gap - pad * 2.0).max(380.0);
-                let col_h = (avail.y - 16.0).max(200.0);
+                let pad = 40.0;
+                // 品牌略宽，登录卡收窄（对齐 login.html 约 340 内容宽）
+                let left_w = (avail.x * 0.52).clamp(340.0, 560.0);
+                let gap = 28.0;
+                let right_w = (avail.x - left_w - gap - pad * 2.0).max(300.0);
+                let col_h = (avail.y - 12.0).max(200.0);
+                const CARD_MAX: f32 = 340.0;
                 ui.horizontal(|ui| {
                     ui.add_space(pad);
                     ui.allocate_ui_with_layout(
                         Vec2::new(left_w, col_h),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            // 顶部留白交给 showcase 内 bottom_up，整列吃满营销文案
-                            ui.add_space(if compact { 24.0 } else { 40.0 });
-                            draw_capability_showcase(ui, true, compact);
+                            ui.add_space(if compact { 28.0 } else { 48.0 });
+                            draw_brand_showcase(ui, true, compact);
                         },
                     );
                     ui.add_space(gap);
-                    // 右侧：登录卡 + 页脚；二维码另贴整页右下角
                     ui.allocate_ui_with_layout(
                         Vec2::new(right_w, col_h),
                         Layout::top_down(Align::Center),
                         |ui| {
                             ui.set_max_width(right_w);
-                            let top = if compact { 28.0 } else { 48.0 };
+                            let top = if compact { 40.0 } else { 72.0 };
                             ui.add_space(top);
-                            ui.set_max_width(right_w.min(440.0));
+                            ui.set_max_width(right_w.min(CARD_MAX));
                             draw_gate_card(ui, cfg, st, &mut action, select_mode);
-                            ui.set_max_width(right_w.min(480.0));
-                            draw_right_black_footer(ui, &mut show_help);
+                            ui.set_max_width(right_w.min(CARD_MAX));
+                            draw_right_meta(ui, &mut show_help);
                         },
                     );
                 });
@@ -552,14 +756,13 @@ pub fn show(
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add_space(16.0);
+                        ui.add_space(20.0);
                         ui.vertical_centered(|ui| {
-                            ui.set_max_width(avail.x.min(440.0).max(280.0));
-                            draw_capability_showcase(ui, false, true);
-                            ui.add_space(14.0);
+                            ui.set_max_width(avail.x.min(340.0).max(280.0));
+                            draw_brand_showcase(ui, false, true);
+                            ui.add_space(16.0);
                             draw_gate_card(ui, cfg, st, &mut action, select_mode);
-                            draw_right_black_footer(ui, &mut show_help);
-                            // 为右下角叠加码留空，避免挡住页脚
+                            draw_right_meta(ui, &mut show_help);
                             let (_, _, tip_h) = tip_corner_size(true);
                             ui.add_space(tip_h + 28.0);
                         });
@@ -585,10 +788,19 @@ fn draw_gate_card(
     action: &mut GateAction,
     select_mode: bool,
 ) {
-    let card_w = ui.available_width().min(420.0);
-    theme::mac_sheet_frame()
+    let card_w = ui.available_width().min(340.0);
+    Frame::none()
         .fill(Color32::WHITE)
-        .inner_margin(egui::Margin::symmetric(28.0, 24.0))
+        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x14, 0x22, 0x1C, 15)))
+        .rounding(egui::Rounding::same(20.0))
+        .inner_margin(Margin::symmetric(22.0, 20.0))
+        .shadow(egui::epaint::Shadow {
+            offset: Vec2::new(0.0, 22.0),
+            blur: 48.0,
+            spread: 0.0,
+            // HTML: 0 28px 64px rgba(20,34,28,0.14)
+            color: Color32::from_rgba_unmultiplied(0x14, 0x22, 0x1C, 36),
+        })
         .show(ui, |ui| {
             ui.set_width(card_w);
             if select_mode {
@@ -611,7 +823,8 @@ fn draw_gate_card(
                         .link(
                             RichText::new("选择已有身份")
                                 .size(13.0)
-                                .color(theme::mac_blue()),
+                                .strong()
+                                .color(gate_accent()),
                         )
                         .clicked()
                     {
@@ -944,7 +1157,7 @@ fn draw_select(
     st: &mut IdentityGateState,
     action: &mut GateAction,
 ) {
-    let accent = theme::shell_accent();
+    let accent = gate_accent();
     let data = PathBuf::from(&cfg.data_dir);
     let needs_setup = st
         .selected
@@ -954,44 +1167,41 @@ fn draw_select(
 
     ui.label(
         RichText::new("选择用户")
-            .size(22.0)
+            .size(20.0)
             .strong()
-            .color(Color32::from_rgb(0x1D, 0x1D, 0x1F)),
+            .color(gate_ink()),
     );
-    ui.add_space(6.0);
+    ui.add_space(4.0);
     ui.label(
-        RichText::new("每位用户拥有独立的备忘录和私密空间")
-            .size(13.5)
-            .color(Color32::from_rgb(0x6E, 0x6E, 0x73)),
+        RichText::new("每位用户拥有独立的备忘与私密空间")
+            .size(12.5)
+            .color(gate_muted()),
     );
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     egui::ScrollArea::vertical()
-        .max_height(260.0)
+        .max_height(132.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             if st.identities.is_empty() {
-                ui.add_space(16.0);
+                ui.add_space(10.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new("暂无已保存的用户")
-                            .color(Color32::from_rgb(0x8E, 0x8E, 0x93)),
-                    );
+                    ui.label(RichText::new("暂无已保存的用户").size(12.5).color(gate_muted()));
                 });
-                ui.add_space(16.0);
+                ui.add_space(10.0);
                 return;
             }
             for (idx, m) in st.identities.iter().enumerate() {
                 let sel = st.selected.as_deref() == Some(m.fingerprint.as_str());
                 let fill = if sel {
-                    theme::shell_accent_soft()
+                    gate_accent_soft()
                 } else {
-                    Color32::from_rgb(0xF5, 0xF5, 0xF7)
+                    gate_user_idle()
                 };
                 let stroke = if sel {
-                    egui::Stroke::new(2.0, accent)
+                    Stroke::new(1.5, accent)
                 } else {
-                    egui::Stroke::new(1.0, Color32::from_rgb(0xE5, 0xE5, 0xEA))
+                    Stroke::new(1.0, gate_line())
                 };
                 let alias = if m.alias.is_empty() {
                     "未命名"
@@ -1003,66 +1213,53 @@ fn draw_select(
                     .next()
                     .map(|c| c.to_uppercase().to_string())
                     .unwrap_or_else(|| "?".into());
+                let sub = if idx == 0 {
+                    "本机身份 · 最近使用"
+                } else {
+                    "本机身份"
+                };
 
-                egui::Frame::none()
+                Frame::none()
                     .fill(fill)
                     .stroke(stroke)
                     .rounding(egui::Rounding::same(10.0))
-                    .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                     .show(ui, |ui| {
                         let resp = ui.allocate_response(
-                            Vec2::new(ui.available_width(), 48.0),
+                            Vec2::new(ui.available_width(), 36.0),
                             Sense::click(),
                         );
                         let painter = ui.painter();
                         let r = resp.rect;
-                        let av = theme::avatar_color(idx);
-                        painter.circle_filled(
-                            egui::pos2(r.left() + 18.0, r.center().y),
-                            16.0,
-                            av,
+                        let av_r = 13.0;
+                        let av_c = egui::pos2(r.left() + av_r + 1.0, r.center().y);
+                        painter.circle_filled(av_c, av_r, Color32::WHITE);
+                        painter.circle_stroke(
+                            av_c,
+                            av_r,
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x2F, 0x5D, 0x4A, 46)),
                         );
                         painter.text(
-                            egui::pos2(r.left() + 18.0, r.center().y),
+                            av_c,
                             egui::Align2::CENTER_CENTER,
                             &letter,
-                            egui::FontId::proportional(14.0),
-                            Color32::WHITE,
+                            egui::FontId::proportional(12.5),
+                            gate_accent_deep(),
                         );
+                        let text_x = r.left() + av_r * 2.0 + 12.0;
                         painter.text(
-                            egui::pos2(r.left() + 44.0, r.center().y - 8.0),
+                            egui::pos2(text_x, r.center().y - 7.0),
                             egui::Align2::LEFT_CENTER,
                             alias,
-                            egui::FontId::proportional(15.0),
-                            Color32::from_rgb(0x1D, 0x1D, 0x1F),
-                        );
-                        let name_w = ui.fonts(|f| {
-                            f.layout_no_wrap(
-                                alias.to_owned(),
-                                egui::FontId::proportional(15.0),
-                                Color32::WHITE,
-                            )
-                            .size()
-                            .x
-                        });
-                        let br = egui::Rect::from_min_size(
-                            egui::pos2(r.left() + 44.0 + name_w + 8.0, r.center().y - 16.0),
-                            Vec2::new(36.0, 16.0),
-                        );
-                        painter.rect_filled(br, 4.0, theme::shell_accent_soft());
-                        painter.text(
-                            br.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "私密",
-                            egui::FontId::proportional(10.0),
-                            accent,
+                            egui::FontId::proportional(13.5),
+                            gate_ink(),
                         );
                         painter.text(
-                            egui::pos2(r.left() + 44.0, r.center().y + 10.0),
+                            egui::pos2(text_x, r.center().y + 9.0),
                             egui::Align2::LEFT_CENTER,
-                            IdentityKeys::short_fp(&m.fingerprint),
-                            egui::FontId::proportional(11.5),
-                            Color32::from_rgb(0x8E, 0x8E, 0x93),
+                            sub,
+                            egui::FontId::proportional(11.0),
+                            gate_muted(),
                         );
                         if resp.clicked() {
                             st.selected = Some(m.fingerprint.clone());
@@ -1072,19 +1269,19 @@ fn draw_select(
                             st.focus_select_pass = true;
                         }
                     });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
             }
         });
 
-    ui.add_space(12.0);
+    ui.add_space(10.0);
     if st.selected.is_some() {
         if needs_setup {
             ui.label(
                 RichText::new("此身份尚未设置登录密码，请先设置后再进入。")
-                    .size(12.5)
-                    .color(Color32::from_rgb(0xC9, 0x5A, 0x2C)),
+                    .size(12.0)
+                    .color(Color32::from_rgb(0xB4, 0x23, 0x18)),
             );
-            ui.add_space(8.0);
+            ui.add_space(6.0);
         }
         let focus = st.focus_select_pass;
         let enter_submit = local_password_fields(
@@ -1097,29 +1294,54 @@ fn draw_select(
         if focus {
             st.focus_select_pass = false;
         }
-        ui.add_space(12.0);
 
+        ui.add_space(8.0);
+        ui.add_enabled_ui(autostart::supported(), |ui| {
+            let tip = if autostart::supported() {
+                "与设置中的「开机自启动」同步；开机后托盘启动，仍需解锁身份"
+            } else {
+                "当前系统不支持写入开机启动项"
+            };
+            if ui
+                .checkbox(&mut cfg.start_on_boot, "开机自启动")
+                .on_hover_text(tip)
+                .changed()
+            {
+                let want = cfg.start_on_boot;
+                match autostart::apply_and_persist(cfg, want) {
+                    Ok(msg) => st.status = msg.into(),
+                    Err(e) => {
+                        cfg.start_on_boot = !want;
+                        st.status = format!("开机自启动设置失败: {e}");
+                    }
+                }
+            }
+        });
+
+        ui.add_space(10.0);
         let can = !st.busy;
         let btn_label = if st.busy {
             "打开中…"
         } else if needs_setup {
             "设置密码并进入"
         } else {
-            "进入备忘录"
+            "进入"
         };
         let text = RichText::new(btn_label)
             .color(Color32::WHITE)
             .strong()
-            .size(15.0);
-        let w = ui.available_width().clamp(120.0, 400.0);
+            .size(14.0);
+        let w = ui.available_width().clamp(120.0, 340.0);
         let btn_clicked = ui
             .add_enabled(
                 can,
                 egui::Button::new(text)
-                    .fill(accent)
-                    .rounding(egui::Rounding::same(theme::MAC_ROUND_PILL))
-                    .min_size(Vec2::new(w, 38.0)),
+                    .fill(gate_accent_mid())
+                    .stroke(Stroke::new(1.0, gate_accent_deep()))
+                    .rounding(egui::Rounding::same(12.0))
+                    .min_size(Vec2::new(w, 40.0)),
             )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked();
         if (btn_clicked || enter_submit) && can {
             if let Some(fp) = st.selected.clone() {
@@ -1159,72 +1381,49 @@ fn draw_select(
                 }
             }
         }
+    } else {
+        ui.label(
+            RichText::new("请先选择一位用户")
+                .size(12.5)
+                .color(gate_muted()),
+        );
     }
 
     if !st.status.is_empty() {
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         mac_status(ui, &st.status, st.busy);
     }
-    ui.add_space(8.0);
-    ui.vertical_centered(|ui| {
-        let label = if st.show_more_options {
-            "收起 ▴"
-        } else {
-            "更多选项 ▾"
-        };
-        let resp = ui.add(
-            egui::Label::new(
-                RichText::new(label)
-                    .size(12.5)
-                    .color(theme::mac_text_secondary()),
-            )
-            .sense(Sense::click()),
-        );
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if resp.clicked() {
-            st.show_more_options = !st.show_more_options;
-        }
-    });
 
-    if st.show_more_options {
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(8.0);
-        ui.add_enabled_ui(autostart::supported(), |ui| {
-            let tip = if autostart::supported() {
-                "与设置中的「开机自启动」同步；开机后托盘启动，仍需解锁身份"
-            } else {
-                "当前系统不支持写入开机启动项"
-            };
-            if ui
-                .checkbox(&mut cfg.start_on_boot, "开机时启动 Memo")
-                .on_hover_text(tip)
-                .changed()
-            {
-                let want = cfg.start_on_boot;
-                match autostart::apply_and_persist(cfg, want) {
-                    Ok(msg) => st.status = msg.into(),
-                    Err(e) => {
-                        cfg.start_on_boot = !want;
-                        st.status = format!("开机自启动设置失败: {e}");
-                    }
-                }
-            }
-        });
-        ui.add_space(10.0);
+    ui.add_space(10.0);
+    ui.vertical_centered(|ui| {
         ui.horizontal(|ui| {
-            if theme::mac_secondary_button(ui, "生成新身份").clicked() {
+            ui.spacing_mut().item_spacing.x = 16.0;
+            if ui
+                .link(
+                    RichText::new("生成身份")
+                        .size(12.5)
+                        .strong()
+                        .color(gate_accent()),
+                )
+                .clicked()
+            {
                 st.show_init = true;
                 st.init_mode_import = false;
                 st.status.clear();
             }
-            if theme::mac_secondary_button(ui, "导入身份").clicked() {
+            if ui
+                .link(
+                    RichText::new("导入密钥")
+                        .size(12.5)
+                        .strong()
+                        .color(gate_accent()),
+                )
+                .clicked()
+            {
                 st.show_init = true;
                 st.init_mode_import = true;
                 st.status.clear();
             }
         });
-    }
+    });
 }
