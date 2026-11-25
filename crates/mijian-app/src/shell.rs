@@ -315,23 +315,6 @@ fn format_relative_modified(s: &str) -> String {
     }
 }
 
-fn memo_excerpt(content: &str, max_chars: usize) -> Option<String> {
-    let t = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    let t = t.trim();
-    if t.is_empty() {
-        return None;
-    }
-    let mut out = String::new();
-    for (i, ch) in t.chars().enumerate() {
-        if i >= max_chars {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
-    }
-    Some(out)
-}
-
 fn apply_cred_list_view(
     list: &mut Vec<MemoView>,
     filter: CredFilter,
@@ -711,10 +694,9 @@ fn today_ymd() -> String {
 
 /// 顶栏控件统一外高（分段底 / 搜索 / 工具托盘一致）。
 const TOP_BAR_CTRL_H: f32 = 36.0;
+// TOP_BAR_ITEM_H：顶栏控件内容高度
 /// 分段内项高（页签、图标钮）。
 const TOP_BAR_ITEM_H: f32 = 28.0;
-/// 分段底内边距：外高 = ITEM + 2*PAD。
-const TOP_BAR_SEG_PAD: f32 = 2.0;
 
 /// 顶栏身份入口：头像 + 名称，对齐效果稿胶囊。
 fn show_identity_chip(ui: &mut egui::Ui, alias: &str) -> egui::Response {
@@ -1018,121 +1000,6 @@ fn pill(ui: &mut egui::Ui, bg: Color32, fg: Color32, label: &str, h: f32) -> egu
     resp
 }
 
-#[derive(Clone, Copy)]
-enum TopIcon {
-    Sync,
-    Nodes,
-    Settings,
-    Lock,
-}
-
-fn paint_top_icon(painter: &egui::Painter, center: egui::Pos2, kind: TopIcon, color: Color32) {
-    match kind {
-        TopIcon::Sync => {
-            // 双向弧箭头（同步）
-            let r = 5.5;
-            painter.circle_stroke(center, r, Stroke::new(1.6, color));
-            painter.line_segment(
-                [
-                    egui::pos2(center.x + r * 0.15, center.y - r - 1.0),
-                    egui::pos2(center.x + r + 1.2, center.y - r * 0.2),
-                ],
-                Stroke::new(1.6, color),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(center.x - r * 0.15, center.y + r + 1.0),
-                    egui::pos2(center.x - r - 1.2, center.y + r * 0.2),
-                ],
-                Stroke::new(1.6, color),
-            );
-        }
-        TopIcon::Nodes => {
-            // 三节点小树
-            let top = egui::pos2(center.x, center.y - 5.5);
-            let bl = egui::pos2(center.x - 5.5, center.y + 5.0);
-            let br = egui::pos2(center.x + 5.5, center.y + 5.0);
-            painter.line_segment([top, bl], Stroke::new(1.5, color));
-            painter.line_segment([top, br], Stroke::new(1.5, color));
-            painter.circle_filled(top, 2.2, color);
-            painter.circle_filled(bl, 2.2, color);
-            painter.circle_filled(br, 2.2, color);
-        }
-        TopIcon::Settings => {
-            // 简易齿轮：外圆 + 中心孔 + 十字刻度
-            painter.circle_stroke(center, 6.0, Stroke::new(1.5, color));
-            painter.circle_stroke(center, 2.2, Stroke::new(1.4, color));
-            for (dx, dy) in [
-                (0.0, -7.2),
-                (0.0, 7.2),
-                (-7.2, 0.0),
-                (7.2, 0.0),
-                (5.1, 5.1),
-                (-5.1, 5.1),
-                (5.1, -5.1),
-                (-5.1, -5.1),
-            ] {
-                painter.line_segment(
-                    [
-                        egui::pos2(center.x + dx * 0.55, center.y + dy * 0.55),
-                        egui::pos2(center.x + dx, center.y + dy),
-                    ],
-                    Stroke::new(1.5, color),
-                );
-            }
-        }
-        TopIcon::Lock => {
-            let body = egui::Rect::from_center_size(egui::pos2(center.x, center.y + 1.5), Vec2::new(9.0, 7.0));
-            painter.rect_stroke(body, 1.5, Stroke::new(1.5, color));
-            painter.circle_stroke(
-                egui::pos2(center.x, center.y - 2.5),
-                3.2,
-                Stroke::new(1.5, color),
-            );
-        }
-    }
-}
-
-fn top_icon_button(ui: &mut egui::Ui, kind: TopIcon, tip: &str) -> egui::Response {
-    top_icon_button_on(ui, kind, tip, false)
-}
-
-/// 顶栏工具：仅图标，悬停提示；选中态白底。
-fn top_icon_button_on(
-    ui: &mut egui::Ui,
-    kind: TopIcon,
-    tip: &str,
-    on: bool,
-) -> egui::Response {
-    let size = Vec2::splat(TOP_BAR_ITEM_H);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let hovered = resp.hovered();
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    let fill = if on || hovered {
-        theme::card()
-    } else {
-        Color32::TRANSPARENT
-    };
-    if fill.a() > 0 {
-        ui.painter()
-            .rect(rect, Rounding::same(6.0), fill, Stroke::NONE);
-    }
-    let fg = if on {
-        theme::shell_accent()
-    } else if hovered {
-        match kind {
-            TopIcon::Lock => theme::warn(),
-            TopIcon::Sync => theme::success(),
-            _ => theme::shell_accent(),
-        }
-    } else {
-        theme::text_muted()
-    };
-    paint_top_icon(ui.painter(), rect.center(), kind, fg);
-    resp.on_hover_text(tip)
-}
 
 fn tag_pill(ui: &mut egui::Ui, tag: &str) {
     let label = if tag.starts_with('#') {
@@ -1393,7 +1260,6 @@ pub fn show(
                     selected,
                     editing,
                     nav_locked,
-                    show_settings,
                     &alias_show,
                     show_change_pw,
                     show_help,
@@ -2399,7 +2265,6 @@ fn show_left_rail(
     selected: &mut Option<String>,
     editing: &mut bool,
     nav_locked: bool,
-    show_settings: &mut bool,
     alias_show: &str,
     show_change_pw: &mut bool,
     show_help: &mut bool,
@@ -2500,7 +2365,6 @@ fn show_left_rail(
                 badge,
                 care_pulse,
                 nav_locked,
-                show_settings,
                 selected,
                 editing,
                 &mut shell.list_focus,
@@ -2524,7 +2388,6 @@ fn show_left_rail(
                 badge,
                 None,
                 nav_locked,
-                show_settings,
                 selected,
                 editing,
                 &mut shell.list_focus,
@@ -2549,7 +2412,6 @@ fn show_left_rail(
             },
             None,
             nav_locked,
-            show_settings,
             selected,
             editing,
             &mut shell.list_focus,
@@ -2568,269 +2430,6 @@ fn show_left_rail(
             request_lock(shell, selected, editing, action);
         }
     }
-}
-
-#[allow(dead_code)]
-fn show_top_tabs(
-    ui: &mut egui::Ui,
-    shell: &mut ShellUi,
-    all: &[MemoView],
-    trash_n: usize,
-    task_overdue_n: usize,
-    private_overdue_n: usize,
-    care_needs: bool,
-    selected: &mut Option<String>,
-    editing: &mut bool,
-    nav_locked: bool,
-) {
-    let cred_n = all
-        .iter()
-        .filter(|m| {
-            let c = m.category.canonical();
-            c == MemoCategory::Credentials
-                || (is_memo_archive_cat(c) && m.due_date.trim().is_empty())
-        })
-        .count();
-    let priv_n = all
-        .iter()
-        .filter(|m| m.space == MemoSpace::Private && !is_private_calendar_memo(m))
-        .count();
-
-    // 分段底：统一页签容器（外高 = TOP_BAR_CTRL_H）
-    Frame::none()
-        .fill(Color32::from_rgb(238, 241, 246))
-        .rounding(Rounding::same(10.0))
-        .inner_margin(Margin::same(TOP_BAR_SEG_PAD))
-        .show(ui, |ui| {
-            ui.set_min_height(TOP_BAR_ITEM_H);
-            ui.set_max_height(TOP_BAR_ITEM_H);
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.horizontal(|ui| {
-                ui.set_min_height(TOP_BAR_ITEM_H);
-                ui.set_max_height(TOP_BAR_ITEM_H);
-    for item in NavItem::TABS {
-        let sel = shell.nav == *item;
-        let trash = item.is_trash();
-        // 新建/编辑中：其它页签不可点；当前页仍高亮
-        let tab_locked = nav_locked && !sel;
-                    let h = TOP_BAR_ITEM_H;
-        let label = if trash { "" } else { item.label() };
-        let icon = item.icon();
-        let badge = match item {
-            NavItem::Credentials => cred_n,
-            NavItem::GenderPrivate => priv_n,
-            NavItem::Trash => trash_n,
-            NavItem::Today => task_overdue_n,
-            NavItem::Calendar | NavItem::Nodes | NavItem::Settings => 0,
-        };
-                    // 过期只用标签提示，页签本身不再红框/脉冲底；选中态保持原样
-                    let overdue_tag = if (item.is_calendar() || item.is_today()) && task_overdue_n > 0 {
-                        Some(if task_overdue_n > 99 {
-                            "过期".into()
-                        } else {
-                            format!("过期{task_overdue_n}")
-                        })
-                    } else if item.is_gender_private()
-                        && (care_needs || private_overdue_n > 0)
-                    {
-                        Some(if private_overdue_n > 0 {
-                            if private_overdue_n > 99 {
-                                "过期".into()
-                            } else {
-                                format!("过期{private_overdue_n}")
-                            }
-                        } else {
-                            "关怀".into()
-                        })
-                    } else {
-                        None
-                    };
-                    let icon_fg = if tab_locked {
-                        theme::text_muted().linear_multiply(0.55)
-                    } else if sel {
-                        theme::shell_accent()
-                    } else {
-                        theme::text_muted()
-                    };
-                    let label_fg = if tab_locked {
-                        theme::text_muted().linear_multiply(0.55)
-                    } else if sel {
-                        theme::text()
-                    } else {
-                        theme::text_muted()
-                    };
-                    let icon_g = theme::layout_galley(
-                        ui,
-                        icon,
-                        egui::FontId::proportional(13.0),
-                        icon_fg,
-                    );
-                    let label_g = if label.is_empty() {
-                        None
-                    } else {
-                        Some(theme::layout_galley(
-                            ui,
-                            label,
-                            egui::FontId::proportional(13.0),
-                            label_fg,
-                        ))
-                    };
-                    let overdue_g = overdue_tag.as_ref().map(|t| {
-                        theme::layout_galley(
-                            ui,
-                            t,
-                            egui::FontId::proportional(10.0),
-                            theme::warn_overdue_fg(),
-                        )
-                    });
-                    let icon_slot = 16.0_f32.max(icon_g.mesh_bounds.width());
-                    let text_w = label_g.as_ref().map(|g| g.size().x).unwrap_or(0.0);
-                    let badge_w = if badge > 0 { 20.0 } else { 0.0 };
-                    let overdue_w = overdue_g
-                        .as_ref()
-                        .map(|g| (g.size().x + 10.0).max(28.0))
-                        .unwrap_or(0.0);
-                    let w = if trash {
-                        (8.0 + icon_slot + badge_w + 8.0).max(32.0)
-                    } else {
-                        (10.0
-                            + icon_slot
-                            + 6.0
-                            + text_w
-                            + if badge > 0 { 6.0 + badge_w } else { 0.0 }
-                            + if overdue_w > 0.0 {
-                                6.0 + overdue_w
-                            } else {
-                                0.0
-                            }
-                            + 10.0)
-                            .max(52.0)
-                    };
-                    let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(w, h),
-                        if tab_locked {
-                            Sense::hover()
-                        } else {
-                            Sense::click()
-                        },
-                    );
-                    if resp.hovered() {
-                        ui.ctx().set_cursor_icon(if tab_locked {
-                            egui::CursorIcon::NotAllowed
-                        } else {
-                            egui::CursorIcon::PointingHand
-                        });
-                    }
-                    // 选中 / 悬停（过期不再改整页签底色与边框）
-                    if sel {
-                        ui.painter().rect(
-                            rect,
-                            Rounding::same(8.0),
-                            theme::card(),
-                            Stroke::new(1.0, Color32::from_black_alpha(12)),
-                        );
-                    } else if tab_locked {
-                        // 禁用：无悬停高亮
-                    } else if resp.hovered() {
-                        ui.painter().rect(
-                            rect,
-                            Rounding::same(8.0),
-                            Color32::from_white_alpha(140),
-                            Stroke::NONE,
-                        );
-                    }
-                    let cy = rect.center().y;
-                    let mut x = rect.left() + if trash { 8.0 } else { 10.0 };
-                    ui.painter().galley(
-                        theme::galley_pos_center(
-                            egui::pos2(x + icon_slot * 0.5, cy),
-                            &icon_g,
-                        ),
-                        icon_g,
-                        icon_fg,
-                    );
-                    x += icon_slot;
-                    if let Some(label_g) = label_g {
-                        x += 6.0;
-                        ui.painter().galley(
-                            theme::galley_pos_left_center(egui::pos2(x, cy), &label_g),
-                            label_g,
-                            label_fg,
-                        );
-                        x += text_w;
-                    }
-                    if badge > 0 {
-                        x += if trash { 4.0 } else { 6.0 };
-                        let br = egui::Rect::from_center_size(
-                            egui::pos2(x + badge_w * 0.5, cy),
-                            Vec2::new(badge_w.min(18.0).max(16.0), 16.0),
-                        );
-                        let (bbg, bfg) = if sel {
-                            (theme::shell_accent_soft(), theme::shell_accent())
-                        } else {
-                            (Color32::from_rgb(228, 232, 239), theme::text_muted())
-                        };
-                        ui.painter()
-                            .rect_filled(br, Rounding::same(8.0), bbg);
-                        ui.painter().text(
-                            br.center(),
-                            egui::Align2::CENTER_CENTER,
-                            format!("{badge}"),
-                            egui::FontId::proportional(10.0),
-                            bfg,
-                        );
-                        x += badge_w;
-                    }
-                    if let Some(og) = overdue_g {
-                        x += 6.0;
-                        let tr = egui::Rect::from_center_size(
-                            egui::pos2(x + overdue_w * 0.5, cy),
-                            Vec2::new(overdue_w, 16.0),
-                        );
-                        ui.painter().rect_filled(
-                            tr,
-                            Rounding::same(8.0),
-                            theme::warn_overdue_bg(),
-                        );
-                        ui.painter().galley(
-                            theme::galley_pos_center(tr.center(), &og),
-                            og,
-                            theme::warn_overdue_fg(),
-                        );
-                    }
-        if !tab_locked && resp.clicked() {
-            shell.nav = *item;
-            shell.list_focus = None;
-            if item.is_gender_private() {
-                select_gender_hub(selected, editing);
-            } else {
-                *selected = None;
-                *editing = false;
-            }
-        }
-        if tab_locked {
-            resp.on_hover_text("请先关闭新建或编辑");
-        } else if trash {
-            resp.on_hover_text("回收站");
-                    } else if item.is_calendar() && task_overdue_n > 0 {
-                        resp.on_hover_text(format!("有 {task_overdue_n} 条过期任务"));
-                    } else if item.is_gender_private() && (care_needs || private_overdue_n > 0) {
-                        let tip = match (care_needs, private_overdue_n > 0) {
-                            (true, true) => format!(
-                                "关怀提醒 · {private_overdue_n} 条过期私密"
-                            ),
-                            (true, false) => "有关怀提醒（经期/体检）".into(),
-                            (false, true) => format!("有 {private_overdue_n} 条过期私密"),
-                            _ => String::new(),
-                        };
-                        if !tip.is_empty() {
-                            resp.on_hover_text(tip);
-                        }
-                    }
-                }
-            });
-        });
 }
 
 fn show_period_care_banner(
@@ -2958,7 +2557,6 @@ fn nav_row(
     badge: Option<(usize, BadgeKind)>,
     care_pulse: Option<f32>,
     locked: bool,
-    show_settings: &mut bool,
     selected: &mut Option<String>,
     editing: &mut bool,
     list_focus: &mut Option<String>,

@@ -12,12 +12,6 @@ use std::path::{Path, PathBuf};
 /// 分栏间距。
 pub const PAGE_GAP: f32 = 8.0;
 
-/// 右栏（日历 / 过滤轨）目标宽度（窗口放大时保持，左栏伸展）。
-pub const PAGE_RAIL_TARGET: f32 = 420.0;
-pub const PAGE_RAIL_MIN: f32 = 280.0;
-/// 左列表最小宽度。
-pub const PAGE_LIST_MIN: f32 = 280.0;
-
 /// 右侧抽屉滑入/滑出时长（秒）。
 pub const DRAWER_ANIM_SEC: f32 = 0.22;
 
@@ -396,28 +390,6 @@ pub fn drawer_layout(
     (panel, dim, alpha)
 }
 
-/// 返回 `(list_w, rail_w)`：右轨约 420 优先，左列表吃满剩余。
-/// 窄窗时按真实 `avail` 收缩，**绝不**返回之和超过 `avail`（避免 allocate 退进程）。
-pub fn page_rail_split(avail: f32) -> (f32, f32) {
-    let gap = PAGE_GAP;
-    if !avail.is_finite() || avail <= gap + 2.0 {
-        return (1.0, 1.0);
-    }
-    let usable = avail - gap;
-    let mut rail = PAGE_RAIL_TARGET.min(usable - 1.0).max(1.0);
-    if usable >= PAGE_LIST_MIN + PAGE_RAIL_MIN {
-        if rail + PAGE_LIST_MIN > usable {
-            rail = (usable - PAGE_LIST_MIN).clamp(PAGE_RAIL_MIN, PAGE_RAIL_TARGET);
-        }
-    } else {
-        // 不够双栏软底：按比例拆，不抬高虚拟 avail
-        rail = (usable * 0.45).clamp(1.0, PAGE_RAIL_TARGET);
-    }
-    let list = (usable - rail).max(1.0);
-    debug_assert!(list + rail + gap <= avail + 0.5);
-    (list, rail)
-}
-
 /// 左栏页头：标题 · 计数（新建统一走主顶栏）。
 /// 仅画在左栏，右栏日历可顶对齐上移。
 pub fn show_page_header(ui: &mut egui::Ui, title: &str, count_text: &str) {
@@ -442,25 +414,6 @@ pub fn show_page_header(ui: &mut egui::Ui, title: &str, count_text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn page_rail_split_never_exceeds_avail() {
-        // avail ≤ gap+2 时只能返回占位宽；其余必须 list+rail+gap ≤ avail
-        for &avail in &[1.0_f32, 10.0, 40.0, 120.0, 200.0, 400.0, 568.0, 900.0, 1400.0] {
-            let (list, rail) = page_rail_split(avail);
-            assert!(list >= 1.0 && rail >= 1.0, "avail={avail}");
-            if avail > PAGE_GAP + 2.0 {
-                assert!(
-                    list + rail + PAGE_GAP <= avail + 0.51,
-                    "avail={avail} list={list} rail={rail}"
-                );
-            }
-        }
-        // 回归：旧实现会把 avail 抬到 ≥568，窄窗双栏之和远超真实宽度
-        let (list, rail) = page_rail_split(200.0);
-        assert!(list + rail + PAGE_GAP <= 200.5);
-        assert!(list < 200.0 && rail < 200.0);
-    }
 
     #[test]
     fn split_col_width_fits() {

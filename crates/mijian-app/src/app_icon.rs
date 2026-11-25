@@ -16,10 +16,6 @@ fn color_image_from_rgba(img: &image::RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied(size, img.as_raw())
 }
 
-fn rgba_image() -> ColorImage {
-    color_image_from_rgba(&load_rgba())
-}
-
 /// 窗口 / 任务栏图标（egui IconData）。
 pub fn window_icon() -> egui::IconData {
     let src = load_rgba();

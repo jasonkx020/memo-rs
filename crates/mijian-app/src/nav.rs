@@ -89,13 +89,4 @@ impl NavItem {
 
     /// 系统页（侧栏中段）。
     pub const SYSTEM: &'static [NavItem] = &[NavItem::Nodes, NavItem::Settings];
-
-    /// 兼容旧顶栏枚举遍历（含回收站）。
-    pub const TABS: &'static [NavItem] = &[
-        NavItem::Today,
-        NavItem::Calendar,
-        NavItem::Credentials,
-        NavItem::GenderPrivate,
-        NavItem::Trash,
-    ];
 }

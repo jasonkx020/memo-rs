@@ -211,13 +211,6 @@ impl StickyNote {
         self.category = m.category;
     }
 
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-        if self.dirty_since.is_none() {
-            self.dirty_since = Some(Instant::now());
-        }
-    }
-
     pub fn needs_save(&self) -> bool {
         if !self.dirty {
             return false;
