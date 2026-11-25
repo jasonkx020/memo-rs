@@ -1,7 +1,9 @@
-# 分布式安全备忘录（Rust）
+# 密笺（Mijian）
 
 AES-256-GCM、Argon2id、Ed25519 审计链、LWW-Map、Tokio TCP、egui。  
-**绿色免安装**：单个 `memo.exe` 即可运行，目标机无需安装 .NET / VC++ / 其它运行库。
+**绿色免安装**：单个 `mijian.exe` 即可运行，目标机无需安装 .NET / VC++ / 其它运行库。
+
+**发布版本**：只改根目录 `Cargo.toml` 里 `[workspace.package] version`（当前 `0.3.0`）。界面显示、Windows 文件属性、更新检查、绿色版说明均自动跟从此处；Git 标签建议 `v` + 同号（如 `v0.3.0`）。
 
 ## 系统要求（重要）
 
@@ -16,7 +18,7 @@ AES-256-GCM、Argon2id、Ed25519 审计链、LWW-Map、Tokio TCP、egui。
 
 | 平台 | 桌面（含 UI） | 无 UI 服务器 |
 |------|--------------|--------------|
-| Windows（1.77.2 + 静态 CRT） | `pack-green.bat` → `dist\memo.exe` | `pack-server.bat` → `dist\memo-server.exe`（兼 `memo.exe`） |
+| Windows（1.77.2 + 静态 CRT） | `pack-green.bat` → `dist\mijian.exe` | `pack-server.bat` → `dist\mijian-server.exe`（兼 `mijian.exe`） |
 | Linux（stable ≥ 1.78） | `./pack-green.sh` | `./pack-server.sh` |
 | macOS | `./pack-green-macos.sh` | `./pack-server-macos.sh` |
 
@@ -44,7 +46,7 @@ sudo apt install build-essential pkg-config libgl1-mesa-dev \
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
 ```
 
-服务器不建终端用户：设 `MEMO_LOGIN_PASSWORD` 后 `memo --no-ui` 会自动创建**存储节点身份**。详见 [docs/server-node.md](docs/server-node.md)。
+服务器不建终端用户：设 `MEMO_LOGIN_PASSWORD` 后 `mijian --no-ui` 会自动创建**存储节点身份**。详见 [docs/server-node.md](docs/server-node.md)。
 
 依赖版本为兼容 Win7 构建做了钉死（同一 `Cargo.lock`）；Linux/macOS 仍用新 rustc 编译这些依赖即可。  
 渲染使用 **OpenGL(glow)**。
@@ -53,15 +55,17 @@ sudo apt install build-essential pkg-config libgl1-mesa-dev \
 
 | 平台 | 路径 |
 |------|------|
-| Windows | `%AppData%\DistributedMemo\settings.json` |
-| macOS | `~/Library/Application Support/DistributedMemo/settings.json` |
-| Linux | `~/.config/DistributedMemo/settings.json` |
+| Windows | `%AppData%\Mijian\settings.json` |
+| macOS | `~/Library/Application Support/Mijian/settings.json` |
+| Linux | `~/.config/Mijian/settings.json` |
+
+首次启动若发现旧版 `%AppData%\DistributedMemo\`，会自动迁到 `Mijian`。
 
 ## 运行
 
 ```bash
-memo.exe              # GUI（无黑框）
-memo --no-ui --identity <指纹>   # 无窗口主节点（服务器）
+mijian.exe              # GUI（无黑框）
+mijian --no-ui --identity <指纹>   # 无窗口主节点（服务器）
 ```
 
 Linux 无 `DISPLAY`/`WAYLAND_DISPLAY` 时自动走无 UI，并默认主机角色。详见 [docs/server-node.md](docs/server-node.md)。
@@ -74,7 +78,3 @@ Linux 无 `DISPLAY`/`WAYLAND_DISPLAY` 时自动走无 UI，并默认主机角色
 4. 防火墙放行：**TCP 监听端口**（默认 7000）以及 **UDP 17000**。
 
 Headless 可用 `discover` 查看发现列表，`peers` 查看已连接。
-
-## 与 Go 版
-
-对照工程：`../memo`。本版体积约数 MB，远小于 Fyne 版。

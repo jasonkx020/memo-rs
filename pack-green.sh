@@ -21,12 +21,12 @@ if [[ "${MEMO_NO_TRAY:-0}" == "1" || "${MEMO_NO_UI:-0}" == "1" ]]; then
 fi
 SERVER="${MEMO_SERVER:-0}"
 
-CARGO_ARGS=(build -p memo-cli --release --locked)
-OUT_NAME="memo"
+CARGO_ARGS=(build -p mijian-cli --release --locked)
+OUT_NAME="mijian"
 
 if [[ "$SERVER" == "1" ]]; then
   CARGO_ARGS+=(--no-default-features)
-  OUT_NAME="memo-server"
+  OUT_NAME="mijian-server"
   echo "模式: 服务器（无 UI，不依赖 GTK/X11/OpenGL）"
 else
   echo "模式: 桌面（UI + 托盘）"
@@ -56,21 +56,32 @@ echo "[1/2] 发布构建（${CARGO_ARGS[*]}，toolchain=$(rustc -V)）..."
 cargo "${CARGO_ARGS[@]}"
 
 mkdir -p dist
-cp -f target/release/memo "dist/${OUT_NAME}"
+cp -f target/release/mijian "dist/${OUT_NAME}"
 chmod +x "dist/${OUT_NAME}"
-# 服务器包同时提供 memo 名，便于 systemd ExecStart
+# 服务器包同时提供 mijian 名，便于 systemd ExecStart
 if [[ "$SERVER" == "1" ]]; then
-  cp -f "dist/${OUT_NAME}" dist/memo
-  chmod +x dist/memo
+  cp -f "dist/${OUT_NAME}" dist/mijian
+  chmod +x dist/mijian
 fi
 
+# 与 Cargo.toml [workspace.package] version 同源
+APP_VER="$(awk '/^\[workspace\.package\]/{p=1;next} p&&/^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
+cat > dist/README-绿色版.txt <<EOF
+密笺（Mijian）绿色版 ${APP_VER}
+====================
+复制 mijian 即可运行。
+版本与根目录 Cargo.toml [workspace.package] version 一致。
+
+构建：./pack-green.sh
+EOF
+
 echo
-echo "完成: dist/${OUT_NAME}"
+echo "完成: dist/${OUT_NAME}  （版本 ${APP_VER}）"
 if [[ "$SERVER" == "1" ]]; then
-  echo "首次: export MEMO_LOGIN_PASSWORD=... ; ./dist/memo --no-ui   # 自动建存储节点（非用户账号）"
+  echo "首次: export MEMO_LOGIN_PASSWORD=... ; ./dist/mijian --no-ui   # 自动建存储节点（非用户账号）"
   echo "常驻: 同目录再启即可；可选 --identity <指纹>"
 else
   echo "桌面直接运行；无窗口主节点仍可用 --no-ui"
 fi
 echo
-ls -lh dist/memo*
+ls -lh dist/mijian*

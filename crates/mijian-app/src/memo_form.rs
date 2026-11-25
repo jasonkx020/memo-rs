@@ -1,0 +1,1601 @@
+//! 新建/编辑备忘共用表单（分类下拉 + 标题/日期/优先级/可见性 + 标签 + 备注）。
+
+use crate::date_field;
+use crate::doc_editor::{self, Doc};
+use crate::theme;
+use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding, Sense, Stroke, Vec2};
+use mijian_core::store::{
+    LanShare, MemoCategory, MemoPriority, MemoSpace, MemoVisibility,
+};
+use std::path::PathBuf;
+use uuid::Uuid;
+
+/// 新建弹窗作用域：随主导航收窄分类/类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormScope {
+    /// 编辑：不限制；新建四选一也用 Open
+    #[default]
+    Open,
+    Calendar,
+    Credentials,
+    GenderPrivate,
+}
+
+/// 新建条目类型（四选一）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateEntryKind {
+    #[default]
+    Task,
+    Memo,
+    PrivateTask,
+    PrivateMemo,
+}
+
+impl CreateEntryKind {
+    pub const ALL: &'static [Self] = &[
+        Self::Task,
+        Self::Memo,
+        Self::PrivateTask,
+        Self::PrivateMemo,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Task => "任务",
+            Self::Memo => "备忘",
+            Self::PrivateTask => "私密任务",
+            Self::PrivateMemo => "私密备忘",
+        }
+    }
+
+    pub fn is_memo(self) -> bool {
+        matches!(self, Self::Memo | Self::PrivateMemo)
+    }
+
+    pub fn is_private(self) -> bool {
+        matches!(self, Self::PrivateTask | Self::PrivateMemo)
+    }
+
+    pub fn space(self) -> MemoSpace {
+        if self.is_private() {
+            MemoSpace::Private
+        } else {
+            MemoSpace::Normal
+        }
+    }
+
+    pub fn category(self) -> MemoCategory {
+        if self.is_memo() {
+            MemoCategory::Credentials
+        } else {
+            MemoCategory::Todo
+        }
+    }
+
+    pub fn default_tag(self) -> &'static str {
+        match self {
+            Self::Task => "待办",
+            Self::Memo => "备忘",
+            Self::PrivateTask | Self::PrivateMemo => "私密",
+        }
+    }
+
+    pub fn title_hint(self) -> &'static str {
+        match self {
+            Self::Task => "一句话说清要做什么",
+            Self::Memo => "例如：某网站账号 / 证件名",
+            Self::PrivateTask => "私密待办一句话",
+            Self::PrivateMemo => "例如：私密账号 / 日记名",
+        }
+    }
+
+    pub fn notes_hint(self) -> &'static str {
+        match self {
+            Self::Task => "补充步骤、材料等（可选）",
+            Self::Memo => "账号、号码等说明（可选）",
+            Self::PrivateTask => "仅本机可见的补充说明",
+            Self::PrivateMemo => "敏感信息说明（仅本机）",
+        }
+    }
+
+    pub fn tags_field_hint(self) -> &'static str {
+        match self {
+            Self::Task => "逗号分隔 · 任务常用",
+            Self::Memo => "逗号分隔 · 账号证件",
+            Self::PrivateTask => "逗号分隔 · 私密待办",
+            Self::PrivateMemo => "逗号分隔 · 私密备忘",
+        }
+    }
+
+    pub fn tags_section_hint(self) -> &'static str {
+        match self {
+            Self::Task => "待办相关标签",
+            Self::Memo => "账号证件等标签",
+            Self::PrivateTask => "私密待办标签",
+            Self::PrivateMemo => "私密备忘标签",
+        }
+    }
+
+    pub fn preset_tags(self) -> &'static [&'static str] {
+        match self {
+            Self::Task => &["待办", "提醒", "截止", "工作", "生活", "跟进"],
+            Self::Memo => &["账号", "密码", "证件", "到期", "订阅", "应急"],
+            Self::PrivateTask => &["私密", "健康", "生活", "工作", "跟进", "重要"],
+            Self::PrivateMemo => &["私密", "日记", "财务", "健康", "伴侣", "应急"],
+        }
+    }
+}
+
+pub fn categories_for(scope: FormScope) -> &'static [MemoCategory] {
+    match scope {
+        FormScope::Open | FormScope::GenderPrivate => {
+            &[MemoCategory::Todo, MemoCategory::Credentials]
+        }
+        FormScope::Calendar => &[MemoCategory::Todo],
+        FormScope::Credentials => &[MemoCategory::Credentials],
+    }
+}
+
+pub fn kinds_for(scope: FormScope) -> &'static [DateKind] {
+    match scope {
+        FormScope::Open => &[
+            DateKind::Day,
+            DateKind::Span,
+            DateKind::Parked,
+            DateKind::Credentials,
+        ],
+        FormScope::Calendar | FormScope::GenderPrivate => {
+            &[DateKind::Day, DateKind::Span, DateKind::Parked]
+        }
+        // 备忘作用域统一「不上日历」；分类由上面的类型选择决定
+        FormScope::Credentials => &[DateKind::Credentials],
+    }
+}
+
+fn category_allowed(scope: FormScope, cat: MemoCategory) -> bool {
+    let c = cat.bucket();
+    categories_for(scope).iter().any(|&x| x.bucket() == c)
+}
+
+fn kind_allowed(scope: FormScope, kind: DateKind) -> bool {
+    kinds_for(scope).contains(&kind)
+}
+
+/// 通用跨分类快捷标签。
+const COMMON_TAGS: &[&str] = &["重要", "稍后", "已办", "跟进"];
+
+/// 当前分类桶下的预设标签（旧细类语义并入标签）。
+fn preset_tags_for(cat: MemoCategory, space: MemoSpace) -> &'static [&'static str] {
+    if space == MemoSpace::Private {
+        return &[
+            "私密", "健康", "经期", "体检", "用药", "日记", "伴侣", "工作", "生活", "财务",
+        ];
+    }
+    match cat.bucket() {
+        MemoCategory::Credentials => &[
+            "账号", "密码", "证件", "卡证", "证书", "到期", "双因素", "工作", "学习", "生活",
+            "财务", "订阅", "灵感", "应急", "随手记",
+        ],
+        _ => &[
+            "待办", "提醒", "截止", "复盘", "清单", "工作", "学习", "会议", "项目", "生活",
+            "财务", "应急", "灵感",
+        ],
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormMode {
+    Create,
+    Edit,
+}
+
+/// 表单「这是」：某一天 / 好几天 / 先记着 / 备忘。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateKind {
+    Day,
+    Span,
+    Parked,
+    Credentials,
+}
+
+impl DateKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Day => "某天",
+            Self::Span => "时段",
+            Self::Parked => "先记着",
+            Self::Credentials => "不上日历",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoFormState {
+    pub category: MemoCategory,
+    pub due_date: String,
+    pub end_date: String,
+    pub kind: DateKind,
+    pub remind_before_days: u32,
+    pub priority: MemoPriority,
+    pub tags: String,
+    pub doc: Doc,
+    pub done: bool,
+    /// 兼容旧草稿；UI 以 space / lan_share 为准。
+    pub visibility: MemoVisibility,
+    pub space: MemoSpace,
+    pub lan_share: LanShare,
+    /// 附件目录用的备忘 id（新建时预生成，保存时沿用）
+    pub attach_id: String,
+    /// 数据目录（插图读写）；打开表单时填入
+    pub data_dir: Option<PathBuf>,
+    /// 新建弹窗导航作用域；编辑为 Open
+    pub scope: FormScope,
+    /// 新建四选一类型（编辑忽略）
+    pub create_kind: CreateEntryKind,
+    /// 下一帧聚焦标题框（校验失败时）
+    focus_title: bool,
+    /// 外层 ScrollArea 强制滚到顶部的剩余帧数（标题在表单上部）
+    force_scroll_top: u8,
+    /// 标题输入框闪烁提示剩余帧数
+    flash_title_frames: u8,
+    /// 上次自动套用的标题/正文，用于判断是否可随分类刷新模板
+    auto_title: String,
+    auto_body: String,
+    /// 上次按类型自动写入的标签（用户手改后不再随类型覆盖）
+    auto_tags: String,
+}
+
+impl Default for MemoFormState {
+    fn default() -> Self {
+        Self {
+            category: MemoCategory::Todo,
+            due_date: String::new(),
+            end_date: String::new(),
+            kind: DateKind::Parked,
+            remind_before_days: 0,
+            priority: MemoPriority::Normal,
+            tags: String::new(),
+            doc: Doc::empty(),
+            done: false,
+            visibility: MemoVisibility::Private,
+            space: MemoSpace::Normal,
+            lan_share: LanShare::Off,
+            attach_id: String::new(),
+            data_dir: None,
+            scope: FormScope::Open,
+            create_kind: CreateEntryKind::Task,
+            focus_title: false,
+            force_scroll_top: 0,
+            flash_title_frames: 0,
+            auto_title: String::new(),
+            auto_body: String::new(),
+            auto_tags: String::new(),
+        }
+    }
+}
+
+impl MemoFormState {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// 按新建类型打开草稿（四选一）；`prefill_due` 仅任务类生效。
+    pub fn begin_create(
+        entry: CreateEntryKind,
+        stamp: &str,
+        prefill_due: Option<&str>,
+    ) -> Self {
+        let mut s = Self {
+            scope: FormScope::Open,
+            create_kind: entry,
+            due_date: if entry.is_memo() {
+                String::new()
+            } else {
+                prefill_due.unwrap_or("").to_string()
+            },
+            lan_share: LanShare::Off,
+            visibility: MemoVisibility::Private,
+            attach_id: Uuid::new_v4().to_string().replace('-', ""),
+            ..Self::default()
+        };
+        s.create_kind = entry;
+        s.apply_create_kind(entry, stamp, true);
+        s
+    }
+
+    /// 切换新建类型：同步空间/分类/日期类型，刷新模板与默认标签（手改标签不覆盖）。
+    pub fn apply_create_kind(&mut self, entry: CreateEntryKind, stamp: &str, force: bool) {
+        self.create_kind = entry;
+        self.scope = FormScope::Open;
+        self.space = entry.space();
+        self.category = entry.category();
+        self.lan_share = LanShare::Off;
+        self.visibility = MemoVisibility::Private;
+
+        if entry.is_memo() {
+            self.kind = DateKind::Credentials;
+            self.due_date.clear();
+            self.end_date.clear();
+            self.remind_before_days = 0;
+        } else if self.kind == DateKind::Credentials || force {
+            self.kind = if self.due_date.trim().is_empty() {
+                DateKind::Parked
+            } else {
+                DateKind::Day
+            };
+            if self.kind == DateKind::Day && self.due_date.trim().is_empty() {
+                self.due_date = format!("{} 09:00", today_ymd());
+            }
+        }
+        self.sync_kind_fields();
+        // 四选一已锁定分类，防止 sync 在 Open 下改回
+        self.category = entry.category();
+        self.space = entry.space();
+        self.lan_share = LanShare::Off;
+
+        self.apply_template(stamp, force);
+
+        let tags_pristine = self.tags.trim().is_empty() || self.tags == self.auto_tags;
+        if tags_pristine {
+            self.tags = format_tags(&[entry.default_tag().to_string()]);
+            self.auto_tags = self.tags.clone();
+        }
+    }
+
+    pub fn set_create_kind(&mut self, entry: CreateEntryKind, stamp: &str) {
+        if self.create_kind == entry {
+            return;
+        }
+        // 切到备忘类时丢掉日期；切到任务且无日期则保持 parked
+        if entry.is_memo() {
+            self.due_date.clear();
+            self.end_date.clear();
+        }
+        self.apply_create_kind(entry, stamp, false);
+    }
+
+    pub fn load_from_drafts(
+        category: MemoCategory,
+        title: &str,
+        body: &str,
+        due: &str,
+        end: &str,
+        priority: MemoPriority,
+        tags: &str,
+        done: bool,
+        visibility: MemoVisibility,
+        space: MemoSpace,
+        lan_share: LanShare,
+        remind_before_days: u32,
+        memo_id: &str,
+    ) -> Self {
+        let mut s = Self {
+            category,
+            due_date: due.to_string(),
+            end_date: end.to_string(),
+            kind: infer_kind(category, due, end),
+            remind_before_days,
+            priority,
+            tags: tags.to_string(),
+            doc: Doc::from_store(title, body),
+            done,
+            visibility,
+            space,
+            lan_share,
+            attach_id: if memo_id.trim().is_empty() {
+                Uuid::new_v4().to_string().replace('-', "")
+            } else {
+                memo_id.to_string()
+            },
+            data_dir: None,
+            scope: FormScope::Open,
+            create_kind: CreateEntryKind::Task,
+            focus_title: false,
+            force_scroll_top: 0,
+            flash_title_frames: 0,
+            // 勿把已加载正文当作模板基线，否则改分类会误判 pristine 并整段覆盖
+            auto_title: String::new(),
+            auto_body: String::new(),
+            auto_tags: String::new(),
+        };
+        let raw_cat = category;
+        if raw_cat.is_gender_private() {
+            s.space = MemoSpace::Private;
+            s.lan_share = LanShare::Off;
+            s.category = raw_cat.for_store_with_due(due);
+            append_tag(&mut s.tags, "私密");
+        } else {
+            s.category = category.bucket();
+            if let Some(tag) = raw_cat.legacy_tag() {
+                append_tag(&mut s.tags, tag);
+            }
+        }
+        if s.space == MemoSpace::Private {
+            s.lan_share = LanShare::Off;
+        }
+        s.visibility = if s.lan_share.is_on() {
+            MemoVisibility::Public
+        } else {
+            MemoVisibility::Private
+        };
+        s.sync_kind_fields();
+        s
+    }
+
+    fn sync_kind_fields(&mut self) {
+        match self.kind {
+            DateKind::Credentials => {
+                // 备忘：清日期；不上局域网明文
+                if self.scope != FormScope::Credentials && self.scope != FormScope::GenderPrivate {
+                    self.category = MemoCategory::Credentials;
+                }
+                self.lan_share = LanShare::Off;
+                self.visibility = MemoVisibility::Private;
+                self.due_date.clear();
+                self.end_date.clear();
+                self.remind_before_days = 0;
+            }
+            DateKind::Parked => {
+                self.due_date.clear();
+                self.end_date.clear();
+                self.remind_before_days = 0;
+                // 勿在私密/账号作用域把分类改成 Todo
+                if self.category.canonical() == MemoCategory::Credentials
+                    && self.scope != FormScope::Credentials
+                    && self.scope != FormScope::GenderPrivate
+                {
+                    self.category = MemoCategory::Todo;
+                }
+            }
+            DateKind::Day => {
+                self.end_date.clear();
+                if self.due_date.trim().is_empty() {
+                    self.due_date = format!("{} 09:00", today_ymd());
+                }
+                if self.category.canonical() == MemoCategory::Credentials
+                    && self.scope != FormScope::Credentials
+                    && self.scope != FormScope::GenderPrivate
+                {
+                    self.category = MemoCategory::Todo;
+                }
+            }
+            DateKind::Span => {
+                if self.due_date.trim().is_empty() {
+                    self.due_date = format!("{} 09:00", today_ymd());
+                }
+                if self.end_date.trim().is_empty() {
+                    if let Some(d) = date_field::parse_ymd(&self.due_date) {
+                        self.end_date = date_field::format_ymd(d);
+                    }
+                }
+                if self.category.canonical() == MemoCategory::Credentials
+                    && self.scope != FormScope::Credentials
+                    && self.scope != FormScope::GenderPrivate
+                {
+                    self.category = MemoCategory::Todo;
+                }
+            }
+        }
+        // 作用域内强制合法分类
+        if !category_allowed(self.scope, self.category) {
+            if let Some(&c) = categories_for(self.scope).first() {
+                self.category = c;
+            }
+        }
+    }
+
+    pub fn set_kind(&mut self, kind: DateKind, stamp: &str) {
+        if self.kind == kind {
+            return;
+        }
+        if !kind_allowed(self.scope, kind) {
+            return;
+        }
+        self.kind = kind;
+        // 备忘页可多类型；其它作用域选「备忘」仍落到账号证件分类
+        if kind == DateKind::Credentials
+            && self.scope != FormScope::Credentials
+            && self.category.canonical() != MemoCategory::Credentials
+        {
+            self.set_category(MemoCategory::Credentials, stamp);
+            return;
+        }
+        self.sync_kind_fields();
+    }
+
+    fn current_store(&self) -> (String, String) {
+        self.doc.to_store("未命名备忘")
+    }
+
+    fn is_pristine_template(&self) -> bool {
+        let title = self.doc.title.trim();
+        let serialized = doc_editor::serialize(&self.doc);
+        // 标题为空时 serialize 即为正文，不可再 split（否则会把正文首行当成标题）
+        let body = if title.is_empty() {
+            serialized.trim().to_string()
+        } else {
+            doc_editor::split_note(&serialized, "")
+                .1
+                .trim()
+                .to_string()
+        };
+        let auto_body = self.auto_body.trim();
+        (title.is_empty() && body.is_empty())
+            || (title == self.auto_title.trim() && body == auto_body)
+    }
+
+    pub fn apply_template(&mut self, stamp: &str, force: bool) {
+        if !force && !self.is_pristine_template() {
+            return;
+        }
+        let note = doc_editor::memo_template_for(self.category, stamp);
+        // 模板首行不再写入标题，留给用户填写；仅套用正文
+        let (_tpl_title, body) = doc_editor::split_note(&note, "");
+        // 必须用 from_store("", body)：旧 join+parse 会把正文首行当成标题
+        self.doc = Doc::from_store("", &body);
+        self.auto_title = String::new();
+        self.auto_body = body;
+    }
+
+    /// 保存校验失败时：滚到标题、聚焦，并闪烁提示。
+    pub fn request_title_focus(&mut self) {
+        self.focus_title = true;
+        // 多帧重试：外层 ScrollArea 在下一帧才能应用 offset；动画也可能要几帧
+        self.force_scroll_top = 12;
+        // ~3 次亮暗（每相约 8 帧切换），约 0.8s@60fps
+        self.flash_title_frames = 48;
+    }
+
+    /// 外层 ScrollArea 是否应强制滚到顶部（标题附近）。
+    pub fn force_scroll_top(&self) -> bool {
+        self.force_scroll_top > 0
+    }
+
+    /// 消耗一帧强制滚顶计数。
+    pub fn tick_force_scroll_top(&mut self) {
+        self.force_scroll_top = self.force_scroll_top.saturating_sub(1);
+    }
+
+    fn take_focus_title(&mut self) -> bool {
+        let f = self.focus_title;
+        self.focus_title = false;
+        f
+    }
+
+    pub fn set_category(&mut self, cat: MemoCategory, stamp: &str) {
+        if self.category == cat {
+            return;
+        }
+        let cat = cat.bucket();
+        if !category_allowed(self.scope, cat) {
+            return;
+        }
+        self.category = cat;
+        self.apply_template(stamp, false);
+        if cat == MemoCategory::Credentials {
+            self.lan_share = LanShare::Off;
+            self.visibility = MemoVisibility::Private;
+        }
+        if cat == MemoCategory::Credentials {
+            if kind_allowed(self.scope, DateKind::Credentials) {
+                self.kind = DateKind::Credentials;
+            }
+        } else if self.kind == DateKind::Credentials {
+            self.kind = if self.due_date.trim().is_empty() {
+                DateKind::Parked
+            } else {
+                DateKind::Day
+            };
+            if !kind_allowed(self.scope, self.kind) {
+                self.kind = kinds_for(self.scope)
+                    .first()
+                    .copied()
+                    .unwrap_or(DateKind::Parked);
+            }
+        }
+        self.sync_kind_fields();
+    }
+}
+
+fn infer_kind(category: MemoCategory, due: &str, end: &str) -> DateKind {
+    if category.bucket() == MemoCategory::Credentials {
+        return DateKind::Credentials;
+    }
+    if due.trim().is_empty() {
+        return DateKind::Parked;
+    }
+    match (
+        mijian_core::due_date_part(due),
+        mijian_core::event_end_date(due, end),
+    ) {
+        (Some(a), Some(b)) if b > a => DateKind::Span,
+        _ => DateKind::Day,
+    }
+}
+
+fn today_ymd() -> String {
+    chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+pub fn category_icon(cat: MemoCategory) -> &'static str {
+    match cat.bucket() {
+        MemoCategory::Credentials => "🔑",
+        MemoCategory::GenderPrivate => "🔒",
+        _ => "📌",
+    }
+}
+
+fn category_desc(cat: MemoCategory) -> &'static str {
+    match cat.bucket() {
+        MemoCategory::Credentials => "账号、密码、证件与随手备忘",
+        _ => "待办、提醒与截止日期",
+    }
+}
+
+fn title_hint(cat: MemoCategory) -> &'static str {
+    match cat.bucket() {
+        MemoCategory::Credentials => "例如：某网站账号 / 身份证",
+        _ => "一句话说清要做什么",
+    }
+}
+
+fn parse_tags(s: &str) -> Vec<String> {
+    s.split(|c: char| c == ',' || c == '，' || c == ';' || c == '；' || c.is_whitespace())
+        .map(|t| t.trim().trim_start_matches('#').trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+fn format_tags(tags: &[String]) -> String {
+    tags.iter()
+        .map(|t| {
+            if t.starts_with('#') {
+                t.clone()
+            } else {
+                format!("#{t}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn append_tag(tags_str: &mut String, tag: &str) {
+    let mut tags = parse_tags(tags_str);
+    let t = tag.trim().trim_start_matches('#').to_string();
+    if t.is_empty() {
+        return;
+    }
+    if !tags.iter().any(|x| x == &t) {
+        tags.push(t);
+    }
+    *tags_str = format_tags(&tags);
+}
+
+/// 导航 → 新建默认分类（三类桶）。
+#[allow(dead_code)]
+pub fn default_category_for_nav(nav_category: Option<MemoCategory>) -> MemoCategory {
+    match nav_category {
+        Some(c) => c.bucket(),
+        None => MemoCategory::Todo,
+    }
+}
+
+fn field_label(ui: &mut egui::Ui, text: &str, required: bool) {
+    field_label_hint(ui, text, required, None);
+}
+
+fn field_label_hint(ui: &mut egui::Ui, text: &str, required: bool, hint: Option<&str>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(
+            RichText::new(text)
+                .size(12.0)
+                .strong()
+                .color(theme::text()),
+        );
+        if required {
+            ui.label(RichText::new("*").size(12.0).color(theme::danger()));
+        }
+        if let Some(h) = hint {
+            ui.label(
+                RichText::new(h)
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
+        }
+    });
+}
+
+fn form_w(ui: &egui::Ui) -> f32 {
+    // 给滚动条/描边留缝，避免子控件贴右缘或被裁切
+    (ui.available_width() - 4.0).max(0.0)
+}
+
+/// 表单字段纵向间距（对齐紧凑焦点稿）。
+const FIELD_GAP: f32 = 8.0;
+
+fn split_cols(avail: f32, n: usize, gap: f32) -> f32 {
+    crate::page_shell::split_col_width(avail, n, gap)
+}
+
+fn fit_col_width(ui: &egui::Ui, want: f32) -> f32 {
+    crate::page_shell::fit_avail_width(ui, want)
+}
+
+/// 事件/备忘编号短码（完整 id 悬停「复制」可见）。
+fn short_event_id(id: &str) -> String {
+    let t = id.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    t.chars().take(8).collect()
+}
+
+fn show_due_priority(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    let col_w = fit_col_width(ui, col_w);
+    ui.set_max_width(col_w);
+    ui.set_width(col_w);
+    field_label(
+        ui,
+        if state.kind == DateKind::Span {
+            "从哪天"
+        } else {
+            "日期"
+        },
+        false,
+    );
+    ui.add_space(2.0);
+    date_field::show_datetime(ui, &format!("{id_salt}_due"), &mut state.due_date, true);
+}
+
+fn show_end_date(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    let col_w = fit_col_width(ui, col_w);
+    ui.set_max_width(col_w);
+    ui.set_width(col_w);
+    field_label(ui, "到哪天", false);
+    ui.add_space(2.0);
+    date_field::show(ui, &format!("{id_salt}_end"), &mut state.end_date, true);
+}
+
+fn kind_hint(kind: DateKind) -> &'static str {
+    match kind {
+        DateKind::Day => "出现在选中的那一天。",
+        DateKind::Span => "月历上画一条横跨多天的色条。",
+        DateKind::Parked => "进右侧「未安排」，以后再放到某一天。",
+        DateKind::Credentials => "永久档案：不上日历；账号证件类强制私密。",
+    }
+}
+
+/// 与分类下拉同高，保证「分类 | 这是」两框中线对齐。
+const KIND_SEG_H: f32 = 30.0;
+
+fn kinds_for_create(entry: CreateEntryKind) -> &'static [DateKind] {
+    if entry.is_memo() {
+        &[DateKind::Credentials]
+    } else {
+        &[DateKind::Day, DateKind::Span, DateKind::Parked]
+    }
+}
+
+/// 新建四选一：任务 / 备忘 / 私密任务 / 私密备忘。
+fn show_create_kind_seg(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str) {
+    let seg_w = fit_col_width(ui, ui.available_width());
+    ui.label(
+        RichText::new("新建类型")
+            .size(11.5)
+            .color(theme::text_muted()),
+    );
+    ui.add_space(2.0);
+    Frame::none()
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(2.0, 2.0))
+        .show(ui, |ui| {
+            let seg_w = fit_col_width(ui, seg_w);
+            ui.set_max_width(seg_w);
+            ui.set_width(seg_w);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let n = CreateEntryKind::ALL.len() as f32;
+                let gaps = 2.0 * (n - 1.0);
+                let avail = (ui.available_width() - gaps).max(0.0);
+                let btn_w = (avail / n).floor().max(1.0).min(96.0);
+                for &k in CreateEntryKind::ALL {
+                    let on = state.create_kind == k;
+                    let fill = if on {
+                        theme::shell_accent_soft()
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let fg = if on {
+                        theme::shell_accent()
+                    } else {
+                        theme::text_muted()
+                    };
+                    let btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(k.label())
+                                .size(12.0)
+                                .color(fg)
+                                .strong(),
+                        )
+                        .fill(fill)
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(btn_w, 28.0)),
+                    );
+                    if btn.clicked() {
+                        state.set_create_kind(k, stamp);
+                    }
+                }
+            });
+        });
+    ui.add_space(6.0);
+}
+
+/// 紧凑分段控件「这是」的选项条（不含标签；标签由调用方与分类列对称绘制）。
+fn show_kinds_seg(ui: &mut egui::Ui, state: &mut MemoFormState, stamp: &str, create_mode: bool) {
+    let kinds = if create_mode {
+        kinds_for_create(state.create_kind)
+    } else {
+        kinds_for(state.scope)
+    };
+    if kinds.len() <= 1 {
+        let k = kinds.first().copied().unwrap_or(state.kind);
+        if state.kind != k {
+            state.kind = k;
+            state.sync_kind_fields();
+        }
+    }
+    let seg_w = fit_col_width(ui, ui.available_width());
+    // inner 2+2 + 按钮 26 = 30，与分类下拉 h 一致
+    Frame::none()
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(2.0, 2.0))
+        .show(ui, |ui| {
+            let seg_w = fit_col_width(ui, seg_w);
+            ui.set_max_width(seg_w);
+            ui.set_width(seg_w);
+            // 固定行高内用 horizontal（勿 horizontal_centered：ScrollArea 里交叉轴会按整段可视高居中并撑破）
+            ui.set_height(KIND_SEG_H - 4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let locked = kinds.len() <= 1;
+                let n = kinds.len().max(1) as f32;
+                let gaps = 2.0 * (n - 1.0);
+                let avail = (ui.available_width() - gaps).max(0.0);
+                // 绝不能 .max(36)：窄列会让 n×36 超过 available → allocate 退进程
+                let btn_w = (avail / n).floor().max(1.0);
+                for &k in kinds {
+                    let on = state.kind == k;
+                    let fill = if on {
+                        theme::card()
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let fg = if on {
+                        theme::text()
+                    } else {
+                        theme::text_muted()
+                    };
+                    // 窄列用短标签，完整说明放 hover
+                    let label = if btn_w < 72.0 && k == DateKind::Credentials {
+                        "备忘"
+                    } else {
+                        k.label()
+                    };
+                    let btn = ui.add_enabled(
+                        !locked || on,
+                        egui::Button::new(
+                            RichText::new(label)
+                                .size(12.0)
+                                .color(fg)
+                                .strong(),
+                        )
+                        .fill(fill)
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(btn_w, 26.0)),
+                    );
+                    let btn = btn.on_hover_text(kind_hint(k));
+                    if !locked && btn.clicked() {
+                        state.set_kind(k, stamp);
+                    }
+                }
+            });
+        });
+}
+
+fn show_priority_field(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    let col_w = fit_col_width(ui, col_w);
+    ui.set_max_width(col_w);
+    ui.set_width(col_w);
+    field_label(ui, "优先级", false);
+    ui.add_space(2.0);
+    egui::ComboBox::from_id_source(format!("{id_salt}_prio"))
+        .width((col_w - 2.0).max(1.0))
+        .selected_text(state.priority.label())
+        .show_ui(ui, |ui| {
+            for &p in MemoPriority::ALL {
+                ui.selectable_value(&mut state.priority, p, p.label());
+            }
+        });
+}
+
+fn show_remind_field(ui: &mut egui::Ui, state: &mut MemoFormState, id_salt: &str, col_w: f32) {
+    let col_w = fit_col_width(ui, col_w);
+    ui.set_max_width(col_w);
+    ui.set_width(col_w);
+    field_label(ui, "提醒", false);
+    ui.add_space(2.0);
+    let has_due = !state.due_date.trim().is_empty();
+    if !has_due {
+        state.remind_before_days = 0;
+    }
+    if ![0, 1, 3, 7].contains(&state.remind_before_days) {
+        state.remind_before_days = 0;
+    }
+    let remind_label = match state.remind_before_days {
+        1 => "提前 1 天",
+        3 => "提前 3 天",
+        7 => "提前 7 天",
+        _ => "到期时",
+    };
+    ui.add_enabled_ui(has_due, |ui| {
+        egui::ComboBox::from_id_source(format!("{id_salt}_remind"))
+            .width((col_w - 2.0).max(1.0))
+            .selected_text(if has_due { remind_label } else { "—" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut state.remind_before_days, 0, "到期时");
+                ui.selectable_value(&mut state.remind_before_days, 1, "提前 1 天");
+                ui.selectable_value(&mut state.remind_before_days, 3, "提前 3 天");
+                ui.selectable_value(&mut state.remind_before_days, 7, "提前 7 天");
+            });
+    });
+}
+
+fn show_category_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    cats: &[MemoCategory],
+    selected_cat: MemoCategory,
+    stamp: &str,
+    state: &mut MemoFormState,
+) {
+    let locked = cats.len() <= 1;
+    let popup_id = ui.make_persistent_id(("memo_cat_combo", id_salt));
+    // 绝不能 .max(80) 再 allocate：双列/抽屉滑入首帧可用宽常 <80，会直接 abort 退进程
+    let w = fit_col_width(ui, form_w(ui));
+    let h = 30.0;
+    if w < 8.0 {
+        ui.allocate_exact_size(Vec2::new(w.max(1.0), h), Sense::hover());
+        return;
+    }
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(w, h),
+        if locked {
+            Sense::hover()
+        } else {
+            Sense::click()
+        },
+    );
+    if !locked && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fill = if !locked && resp.hovered() {
+        theme::c().list_hover
+    } else {
+        theme::card()
+    };
+    ui.painter().rect(
+        rect,
+        Rounding::same(8.0),
+        fill,
+        Stroke::new(1.0, theme::border()),
+    );
+
+    let pad = 10.0;
+    let icon_slot = 28.0;
+    let cy = rect.center().y;
+    let icon_g = theme::layout_galley(
+        ui,
+        category_icon(selected_cat),
+        egui::FontId::proportional(19.5),
+        theme::category_icon_color(selected_cat),
+    );
+    let label_g = theme::layout_galley(
+        ui,
+        selected_cat.label(),
+        egui::FontId::proportional(13.0),
+        theme::text(),
+    );
+    ui.painter().galley(
+        theme::galley_pos_center(
+            egui::pos2(rect.left() + pad + icon_slot * 0.5, cy),
+            &icon_g,
+        ),
+        icon_g,
+        theme::category_icon_color(selected_cat),
+    );
+    ui.painter().galley(
+        theme::galley_pos_left_center(
+            egui::pos2(rect.left() + pad + icon_slot + 8.0, cy),
+            &label_g,
+        ),
+        label_g,
+        theme::text(),
+    );
+    if locked {
+        ui.painter().text(
+            egui::pos2(rect.right() - 14.0, cy),
+            egui::Align2::CENTER_CENTER,
+            "·",
+            egui::FontId::proportional(11.0),
+            theme::text_muted(),
+        );
+    } else {
+        ui.painter().text(
+            egui::pos2(rect.right() - 14.0, cy),
+            egui::Align2::CENTER_CENTER,
+            "v",
+            egui::FontId::proportional(11.0),
+            theme::text_muted(),
+        );
+    }
+
+    if locked {
+        return;
+    }
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+    egui::popup_below_widget(ui, popup_id, &resp, |ui| {
+        ui.set_min_width(w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for &cat in cats {
+            if category_option_row(ui, cat, selected_cat == cat).clicked() {
+                state.set_category(cat, stamp);
+                ui.memory_mut(|m| m.close_popup());
+            }
+        }
+    });
+}
+
+fn category_option_row(ui: &mut egui::Ui, cat: MemoCategory, selected: bool) -> egui::Response {
+    // 弹层内也勿 .max(200) 强扩，父级 set_min_width 已决定宽度
+    let w = fit_col_width(ui, ui.available_width());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 50.0), Sense::click());
+    let hovered = resp.hovered();
+    if hovered || selected {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fill = if selected {
+        theme::shell_accent_soft()
+    } else if hovered {
+        theme::c().list_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect(rect, Rounding::same(6.0), fill, Stroke::NONE);
+
+    let fg = if selected {
+        theme::shell_accent()
+    } else {
+        theme::text()
+    };
+    let icon_font = egui::FontId::proportional(24.0);
+    let title_font = egui::FontId::proportional(13.0);
+    let desc_font = egui::FontId::proportional(11.0);
+    let icon_g = theme::layout_galley(
+        ui,
+        category_icon(cat),
+        icon_font,
+        theme::category_icon_color(cat),
+    );
+    let title_g = theme::layout_galley(ui, cat.label(), title_font, fg);
+    let desc_g = theme::layout_galley(ui, category_desc(cat), desc_font, theme::text_muted());
+    let icon_slot = 32.0_f32.max(icon_g.mesh_bounds.width());
+    let title_h = title_g.mesh_bounds.height().max(title_g.size().y);
+    let desc_h = desc_g.mesh_bounds.height().max(desc_g.size().y);
+    let gap = 2.0;
+    let text_h = title_h + gap + desc_h;
+    let cy = rect.center().y;
+    let text_x = rect.left() + 10.0 + icon_slot + 8.0;
+    let text_top = cy - text_h * 0.5;
+    ui.painter().galley(
+        theme::galley_pos_center(
+            egui::pos2(rect.left() + 10.0 + icon_slot * 0.5, cy),
+            &icon_g,
+        ),
+        icon_g,
+        theme::category_icon_color(cat),
+    );
+    ui.painter().galley(
+        theme::galley_pos_left_center(
+            egui::pos2(text_x, text_top + title_h * 0.5),
+            &title_g,
+        ),
+        title_g,
+        fg,
+    );
+    ui.painter().galley(
+        theme::galley_pos_left_center(
+            egui::pos2(text_x, text_top + title_h + gap + desc_h * 0.5),
+            &desc_g,
+        ),
+        desc_g,
+        theme::text_muted(),
+    );
+    resp
+}
+
+/// 绘制表单主体（不含底部取消/保存按钮）。
+/// 布局对齐 `docs/memo-form-compact-focus.html`：编号→标题→备注→分类|类型→日期网格→可见性→标签。
+pub fn show_fields(
+    ui: &mut egui::Ui,
+    state: &mut MemoFormState,
+    mode: FormMode,
+    id_salt: &str,
+) {
+    let stamp = today_ymd();
+    let is_create = mode == FormMode::Create;
+    // 编辑用完整列表；新建四选一用 Open + create_kind
+    let scope = if mode == FormMode::Edit {
+        FormScope::Open
+    } else {
+        FormScope::Open
+    };
+    let cats = categories_for(scope);
+    if is_create {
+        state.space = state.create_kind.space();
+        state.category = state.create_kind.category();
+        if state.create_kind.is_private() {
+            state.lan_share = LanShare::Off;
+        }
+    } else if state.space == MemoSpace::Private || state.scope == FormScope::GenderPrivate {
+        state.space = MemoSpace::Private;
+        state.lan_share = LanShare::Off;
+    }
+    if state.kind == DateKind::Credentials
+        || state.category.bucket() == MemoCategory::Credentials
+    {
+        state.lan_share = LanShare::Off;
+    }
+    state.visibility = if state.lan_share.is_on() {
+        MemoVisibility::Public
+    } else {
+        MemoVisibility::Private
+    };
+    let space_locked = is_create
+        || state.scope == FormScope::GenderPrivate
+        || state.scope == FormScope::Calendar
+        || state.scope == FormScope::Credentials;
+    let lan_locked = state.space == MemoSpace::Private
+        || state.kind == DateKind::Credentials
+        || state.category.bucket() == MemoCategory::Credentials;
+    let w = form_w(ui).max(1.0);
+    // 抽屉动画极窄时勿强行 set_width 超过 available；双列至少约 100 才画完整表单
+    let w = w.min(ui.available_width().max(1.0));
+    if w < 24.0 {
+        ui.allocate_exact_size(egui::vec2(w.max(1.0), 1.0), Sense::hover());
+        return;
+    }
+    ui.set_max_width(w);
+    ui.set_width(w);
+    ui.spacing_mut().item_spacing.y = FIELD_GAP;
+
+    // —— 事件编号 ——
+    if !state.attach_id.trim().is_empty() {
+        let short = short_event_id(&state.attach_id);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(
+                RichText::new("事件编号")
+                    .size(11.5)
+                    .color(theme::text_muted()),
+            );
+            ui.label(
+                RichText::new(&short)
+                    .size(12.0)
+                    .strong()
+                    .color(theme::text())
+                    .monospace(),
+            );
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("复制")
+                            .size(11.0)
+                            .color(theme::text_muted()),
+                    )
+                    .fill(theme::card())
+                    .stroke(Stroke::new(1.0, theme::border()))
+                    .rounding(Rounding::same(5.0))
+                    .min_size(Vec2::new(0.0, 20.0)),
+                )
+                .on_hover_text(format!("完整编号：{}", state.attach_id.trim()))
+                .clicked()
+            {
+                ui.ctx().copy_text(state.attach_id.trim().to_string());
+            }
+        });
+    }
+
+    if is_create {
+        show_create_kind_seg(ui, state, &stamp);
+    }
+
+    let title_ph = if is_create {
+        state.create_kind.title_hint()
+    } else {
+        title_hint(state.category)
+    };
+    let notes_ph = if is_create {
+        state.create_kind.notes_hint()
+    } else {
+        "在此填写备注…"
+    };
+
+    // —— 标题 ——
+    let need_focus = state.take_focus_title();
+    let need_scroll = state.force_scroll_top > 0;
+    let flash_on = state.flash_title_frames > 0 && ((state.flash_title_frames / 8) % 2 == 0);
+    if state.flash_title_frames > 0 {
+        state.flash_title_frames = state.flash_title_frames.saturating_sub(1);
+        ui.ctx().request_repaint();
+    }
+    let title_stroke = if flash_on {
+        Stroke::new(2.0, theme::danger())
+    } else {
+        Stroke::new(1.0, theme::border())
+    };
+    let title_block = ui
+        .vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            field_label_hint(ui, "标题", true, Some("一句话说清楚"));
+            let title_id = ui.make_persistent_id((id_salt, "memo_title"));
+            let title_resp = Frame::none()
+                .stroke(title_stroke)
+                .rounding(Rounding::same(7.0))
+                .inner_margin(Margin::same(1.0))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.doc.title)
+                            .id(title_id)
+                            .desired_width((w - 2.0).clamp(1.0, w.max(1.0)))
+                            .hint_text(theme::hint(title_ph))
+                            .margin(egui::vec2(9.0, 5.0)),
+                    )
+                })
+                .inner;
+            if need_focus {
+                title_resp.request_focus();
+            }
+            title_resp
+        })
+        .response;
+    if need_focus || need_scroll {
+        title_block.scroll_to_me(Some(egui::Align::TOP));
+        ui.scroll_to_rect(title_block.rect, Some(egui::Align::TOP));
+        ui.ctx().request_repaint();
+    }
+
+    // —— 备注：最小 140，随内容无限撑开（抽屉外层滚动）——
+    const NOTES_MIN_H: f32 = 140.0;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 3.0;
+        field_label_hint(
+            ui,
+            "备注",
+            false,
+            if is_create {
+                Some(state.create_kind.notes_hint())
+            } else {
+                Some("可选")
+            },
+        );
+        let notes_w = fit_col_width(ui, ui.available_width());
+        ui.set_max_width(notes_w);
+        ui.set_width(notes_w);
+        doc_editor::show_editor(
+            ui,
+            &mut state.doc,
+            id_salt,
+            state.data_dir.as_deref(),
+            &state.attach_id,
+            NOTES_MIN_H,
+            Some(notes_ph),
+        );
+    });
+
+    // —— 分类 | 这是 ——（新建隐藏分类，由四选一决定；编辑可改分类）
+    let selected_cat = state.category.bucket();
+    let col_gap = 8.0;
+    let row_w = fit_col_width(ui, w);
+    let show_cat_combo = !is_create && cats.len() > 1;
+    let half = if show_cat_combo {
+        split_cols(row_w, 2, col_gap)
+    } else {
+        row_w
+    };
+    ui.horizontal(|ui| {
+        ui.set_max_width(row_w);
+        ui.spacing_mut().item_spacing.x = col_gap;
+        if show_cat_combo {
+            ui.vertical(|ui| {
+                let half = fit_col_width(ui, half);
+                ui.set_max_width(half);
+                ui.set_width(half);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                field_label(ui, "分类", false);
+                ui.add_space(2.0);
+                show_category_combo(ui, id_salt, cats, selected_cat, &stamp, state);
+            });
+        }
+        ui.vertical(|ui| {
+            let half = fit_col_width(ui, half);
+            ui.set_max_width(half);
+            ui.set_width(half);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            field_label(ui, "这是", false);
+            ui.add_space(2.0);
+            show_kinds_seg(ui, state, &stamp, is_create);
+        });
+    });
+
+    // —— 日期 | 优先级 | 提醒 ——
+    let show_dates = matches!(state.kind, DateKind::Day | DateKind::Span);
+    let show_end = state.kind == DateKind::Span;
+    let third = split_cols(row_w, 3, col_gap);
+    if show_dates && show_end {
+        // 时段：从 / 到 占两列，优先级第三列；提醒下行
+        ui.horizontal(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing.x = col_gap;
+            ui.vertical(|ui| {
+                show_due_priority(ui, state, id_salt, third);
+            });
+            ui.vertical(|ui| {
+                show_end_date(ui, state, id_salt, third);
+            });
+            ui.vertical(|ui| {
+                show_priority_field(ui, state, id_salt, third);
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing.x = col_gap;
+            ui.vertical(|ui| {
+                show_remind_field(ui, state, id_salt, third);
+            });
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing.x = col_gap;
+            ui.vertical(|ui| {
+                let third = fit_col_width(ui, third);
+                ui.set_max_width(third);
+                ui.set_width(third);
+                if show_dates {
+                    show_due_priority(ui, state, id_salt, third);
+                } else {
+                    field_label(ui, "日期", false);
+                    ui.add_space(2.0);
+                    ui.add_enabled_ui(false, |ui| {
+                        let mut placeholder = String::from("— 不上日历");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut placeholder)
+                                .desired_width((third - 2.0).max(1.0))
+                                .margin(egui::vec2(9.0, 5.0)),
+                        );
+                    });
+                }
+            });
+            ui.vertical(|ui| {
+                show_priority_field(ui, state, id_salt, third);
+            });
+            ui.vertical(|ui| {
+                show_remind_field(ui, state, id_salt, third);
+            });
+        });
+    }
+
+    // —— 空间 | 局域网共享 ——
+    ui.vertical(|ui| {
+        ui.set_max_width(row_w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        field_label(ui, "空间与共享", false);
+        Frame::none()
+            .fill(theme::panel())
+            .stroke(Stroke::new(1.0, theme::border()))
+            .rounding(Rounding::same(7.0))
+            .inner_margin(Margin::symmetric(10.0, 4.0))
+            .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.add_enabled_ui(!space_locked, |ui| {
+                        ui.radio_value(&mut state.space, MemoSpace::Normal, "普通");
+                        ui.radio_value(&mut state.space, MemoSpace::Private, "私密空间");
+                    });
+                });
+                if state.space == MemoSpace::Private {
+                    state.lan_share = LanShare::Off;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.add_enabled_ui(!lan_locked, |ui| {
+                        ui.radio_value(&mut state.lan_share, LanShare::Off, "不共享");
+                        ui.radio_value(&mut state.lan_share, LanShare::On, "局域网共享");
+                    });
+                });
+                let note = if state.space == MemoSpace::Private {
+                    Some("私密空间条目不上普通栏，且不可局域网共享")
+                } else if lan_locked {
+                    Some("备忘默认不局域网共享")
+                } else {
+                    None
+                };
+                if let Some(n) = note {
+                    ui.label(
+                        RichText::new(n)
+                            .size(11.0)
+                            .color(theme::text_muted()),
+                    );
+                }
+            });
+    });
+
+    // —— 标签 + 预设同行 ——
+    ui.vertical(|ui| {
+        ui.set_max_width(row_w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        if is_create {
+            field_label_hint(ui, "标签", false, Some(state.create_kind.tags_section_hint()));
+        } else {
+            field_label(ui, "标签", false);
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(row_w);
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            // 窄抽屉时 row_w 可能 <80，勿 clamp(80, row_w) 导致 min>max 直接 panic
+            let tag_max = row_w.min(180.0).max(1.0);
+            let tag_w = (ui.available_width() * 0.42)
+                .max(1.0)
+                .min(tag_max);
+            let tag_hint = if is_create {
+                state.create_kind.tags_field_hint()
+            } else {
+                "逗号或空格分隔"
+            };
+            let tag_resp = ui.add(
+                egui::TextEdit::singleline(&mut state.tags)
+                    .desired_width(tag_w)
+                    .hint_text(theme::hint(tag_hint))
+                    .margin(egui::vec2(8.0, 4.0)),
+            );
+            if tag_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let tags = parse_tags(&state.tags);
+                state.tags = format_tags(&tags);
+            }
+            ui.spacing_mut().button_padding = egui::vec2(7.0, 1.5);
+            let mut chips: Vec<&str> = if is_create {
+                state.create_kind.preset_tags().iter().copied().take(6).collect()
+            } else {
+                preset_tags_for(state.category, state.space)
+                    .iter()
+                    .chain(COMMON_TAGS.iter())
+                    .copied()
+                    .take(6)
+                    .collect()
+            };
+            for t in chips.drain(..) {
+                let chip = ui.add(
+                    egui::Button::new(
+                        RichText::new(t)
+                            .size(11.0)
+                            .color(theme::shell_accent()),
+                    )
+                    .fill(theme::shell_tag_bg())
+                    .stroke(Stroke::NONE)
+                    .rounding(Rounding::same(6.0))
+                    .min_size(Vec2::new(0.0, 22.0)),
+                );
+                if chip.clicked() {
+                    append_tag(&mut state.tags, t);
+                }
+            }
+        });
+    });
+
+    if mode == FormMode::Edit {
+        ui.checkbox(&mut state.done, "已完成");
+    }
+}
+
+pub fn tags_vec(state: &MemoFormState) -> Vec<String> {
+    parse_tags(&state.tags)
+}
+
+pub fn validate_title(state: &MemoFormState) -> Result<(String, String), String> {
+    // 必须看 doc.title：to_store 在标题为空时会把正文首行当成标题
+    if state.doc.title.trim().is_empty() {
+        Err("请填写标题".into())
+    } else {
+        Ok(state.current_store())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mijian_core::store::MemoCategory;
+
+    /// 回归：新建/编辑表单在抽屉滑入·收起窄宽下不得 allocate>available 崩进程。
+    #[test]
+    fn create_form_ui_survives_narrow_drawer_widths() {
+        let ctx = egui::Context::default();
+        let stamp = "2026-10-21";
+        // 模拟动画 t→0 收起时的面板内宽序列
+        let widths = [
+            1.0_f32, 12.0, 24.0, 40.0, 71.0, 72.0, 79.0, 80.0, 100.0, 200.0, 420.0,
+        ];
+        for entry in CreateEntryKind::ALL {
+            let cat = entry.category();
+            let mut create = MemoFormState::begin_create(*entry, stamp, None);
+            let mut edit = MemoFormState::load_from_drafts(
+                cat,
+                "历史标题",
+                "历史正文",
+                "",
+                "",
+                MemoPriority::Normal,
+                "标签",
+                false,
+                MemoVisibility::Private,
+                MemoSpace::Normal,
+                LanShare::Off,
+                0,
+                "deadbeefcafe",
+            );
+            for &w in &widths {
+                for (form, mode, salt) in [
+                    (&mut create, FormMode::Create, "smoke_new"),
+                    (&mut edit, FormMode::Edit, "smoke_edit"),
+                ] {
+                    let mut input = egui::RawInput::default();
+                    input.screen_rect = Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(900.0, 700.0),
+                    ));
+                    let _ = ctx.begin_frame(input);
+                    // 更接近真抽屉：外层竖滚 + 高视口，避免漏掉 ScrollArea 布局路径
+                    egui::CentralPanel::default().show(&ctx, |ui| {
+                        ui.set_max_width(w);
+                        ui.set_width(w);
+                        egui::ScrollArea::vertical()
+                            .id_source(("smoke_scroll", salt, w.to_bits()))
+                            .max_height(640.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_max_width(w);
+                                show_fields(ui, form, mode, salt);
+                            });
+                    });
+                    let _ = ctx.end_frame();
+                }
+            }
+        }
+        assert!(crate::page_shell::drawer_panel_too_narrow(70.0, 12.0));
+        assert!(!crate::page_shell::drawer_panel_too_narrow(120.0, 12.0));
+    }
+}

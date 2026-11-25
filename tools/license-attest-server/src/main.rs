@@ -7,8 +7,8 @@
 
 use chrono::Utc;
 use clap::Parser;
-use memo_core::license::{self, LicenseInfo, LicenseStatus, LICENSE_PUBKEY_HEX};
-use memo_core::session::{self, SessionTicket};
+use mijian_core::license::{self, LicenseInfo, LicenseStatus, LICENSE_PUBKEY_HEX};
+use mijian_core::session::{self, SessionTicket};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use serde::{Deserialize, Serialize};
@@ -186,7 +186,7 @@ fn load_or_create_tls(data_dir: &Path) -> anyhow::Result<(ServerConfig, String, 
     } else {
         let mut params = CertificateParams::new(vec![
             "localhost".into(),
-            "license.memo-rs.example".into(),
+            "license.mijian.example".into(),
         ]);
         params.distinguished_name = DistinguishedName::new();
         params
@@ -194,7 +194,7 @@ fn load_or_create_tls(data_dir: &Path) -> anyhow::Result<(ServerConfig, String, 
             .push(DnType::CommonName, "memo-attest");
         params.subject_alt_names = vec![
             SanType::DnsName("localhost".into()),
-            SanType::DnsName("license.memo-rs.example".into()),
+            SanType::DnsName("license.mijian.example".into()),
         ];
         let cert = rcgen::Certificate::from_params(params)?;
         let cert_pem = cert.serialize_pem_with_signer(&ca)?;
@@ -509,7 +509,7 @@ fn find_header_end(raw: &[u8]) -> Option<usize> {
 }
 
 fn pin_hex(cert_pem: &str) -> String {
-    memo_core::attest::pin_hex_for_cert_pem(cert_pem).unwrap_or_default()
+    mijian_core::attest::pin_hex_for_cert_pem(cert_pem).unwrap_or_default()
 }
 
 #[tokio::main]

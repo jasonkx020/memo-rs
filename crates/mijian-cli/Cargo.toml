@@ -1,0 +1,29 @@
+[package]
+name = "mijian-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mijian"
+path = "src/main.rs"
+
+[features]
+# 默认带桌面 UI。游戏/无图形服务器：
+#   cargo build -p mijian-cli --release --no-default-features
+default = ["ui"]
+ui = ["dep:mijian-app", "mijian-app/tray"]
+
+[dependencies]
+mijian-core = { workspace = true }
+mijian-sync = { workspace = true }
+mijian-app = { workspace = true, optional = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+rpassword = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.52.0", features = ["Win32_System_Console", "Win32_Foundation"] }
+
+[build-dependencies]
+winres = "=0.1.12"

@@ -27,11 +27,11 @@ fi
 SERVER="${MEMO_SERVER:-0}"
 ARCH="$(uname -m)"
 
-CARGO_ARGS=(build -p memo-cli --release --locked)
-OUT_NAME="memo"
+CARGO_ARGS=(build -p mijian-cli --release --locked)
+OUT_NAME="mijian"
 if [[ "$SERVER" == "1" ]]; then
   CARGO_ARGS+=(--no-default-features)
-  OUT_NAME="memo-server"
+  OUT_NAME="mijian-server"
   echo "模式: 服务器（无 UI）· ${ARCH}"
 else
   echo "模式: 桌面（UI + 托盘）· ${ARCH}"
@@ -41,16 +41,17 @@ echo "[1/2] 发布构建（${CARGO_ARGS[*]}，toolchain=$(rustc -V)）..."
 cargo "${CARGO_ARGS[@]}"
 
 mkdir -p dist
-cp -f target/release/memo "dist/${OUT_NAME}"
+cp -f target/release/mijian "dist/${OUT_NAME}"
 chmod +x "dist/${OUT_NAME}"
 if [[ "$SERVER" == "1" ]]; then
-  cp -f "dist/${OUT_NAME}" dist/memo
-  chmod +x dist/memo
+  cp -f "dist/${OUT_NAME}" dist/mijian
+  chmod +x dist/mijian
 fi
 
+APP_VER="$(awk '/^\[workspace\.package\]/{p=1;next} p&&/^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
 echo
-echo "完成: dist/${OUT_NAME}"
-echo "无窗口常驻: ./memo --no-ui --identity <指纹>（详见 docs/server-node.md）"
+echo "完成: dist/${OUT_NAME}  （版本 ${APP_VER}）"
+echo "无窗口常驻: ./mijian --no-ui --identity <指纹>（详见 docs/server-node.md）"
 echo "架构: ${ARCH}"
 echo
-ls -lh dist/memo*
+ls -lh dist/mijian*

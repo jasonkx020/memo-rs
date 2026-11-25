@@ -1,15 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/memo-core",
-    "crates/memo-sync",
-    "crates/memo-app",
-    "crates/memo-cli",
+    "crates/mijian-core",
+    "crates/mijian-sync",
+    "crates/mijian-app",
+    "crates/mijian-cli",
 ]
 
 [workspace.package]
-version = "0.1.0"
-edition = "2021"
+# 唯一发布版本源：界面 / winres / 更新检查 / 绿色版说明均跟从此处
+version = "0.3.1"
+edition = "2026"
 license = "MIT"
 
 # 依赖钉死：同一 Cargo.lock 需同时满足
@@ -17,9 +18,9 @@ license = "MIT"
 # - Linux/macOS：较新 stable（可编译这些钉死版本）
 # 勿随意 cargo update 拉高会用到 edition2024 的传递依赖。
 [workspace.dependencies]
-memo-core = { path = "crates/memo-core" }
-memo-sync = { path = "crates/memo-sync" }
-memo-app = { path = "crates/memo-app", default-features = false }
+mijian-core = { path = "crates/mijian-core" }
+mijian-sync = { path = "crates/mijian-sync" }
+mijian-app = { path = "crates/mijian-app", default-features = false }
 
 serde = { version = "=1.0.197", features = ["derive"] }
 serde_json = "=1.0.114"

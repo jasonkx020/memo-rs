@@ -11,9 +11,9 @@
 | 桌面 | `./pack-green.sh` / `pack-green.bat` / `./pack-green-macos.sh` | GTK / X11 / OpenGL 等 |
 | 游戏/无图形服务器 | `./pack-server.sh` / `pack-server.bat` / `./pack-server-macos.sh` | **无需** GTK/X11 |
 
-等价手动：`cargo build -p memo-cli --release --no-default-features`。
+等价手动：`cargo build -p mijian-cli --release --no-default-features`。
 
-服务器包不链接 `memo-app`（eframe/托盘），适合未装桌面组件的机器。
+服务器包不链接 `mijian-app`（eframe/托盘），适合未装桌面组件的机器。
 
 ## 数据目录（重要）
 
@@ -29,7 +29,7 @@
 }
 ```
 
-Linux 默认大致为 `~/.config/DistributedMemo/...`。身份与托管库落在 `data_dir` 下的 `identities/`、`vaults/{指纹}/`（含 `hosted/`），**勿改路径布局**。
+Linux 默认大致为 `~/.config/Mijian/...`。身份与托管库落在 `data_dir` 下的 `identities/`、`vaults/{指纹}/`（含 `hosted/`），**勿改路径布局**。
 
 ## 何时运行时走 no-ui
 

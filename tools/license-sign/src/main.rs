@@ -2,12 +2,12 @@
 //! 或 --key-file（默认读取仓库根目录 gitignored 的 license-private.hex）。
 
 use clap::Parser;
-use memo_core::license;
+use mijian_core::license;
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "license-sign", about = "签发 DistributedMemo license.json")]
+#[command(name = "license-sign", about = "签发 Mijian license.json")]
 struct Args {
     /// 被授权方名称
     #[arg(long)]

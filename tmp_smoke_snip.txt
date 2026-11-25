@@ -5,9 +5,9 @@ fn smoke_show_fields_create_drawer_widths() {
     let stamp = "2026-10-21";
     for scope in [FormScope::Credentials, FormScope::Calendar, FormScope::GenderPrivate, FormScope::Open] {
         let cat = match scope {
-            FormScope::Credentials => memo_core::store::MemoCategory::Credentials,
-            FormScope::GenderPrivate => memo_core::store::MemoCategory::GenderPrivate,
-            _ => memo_core::store::MemoCategory::Todo,
+            FormScope::Credentials => mijian_core::store::MemoCategory::Credentials,
+            FormScope::GenderPrivate => mijian_core::store::MemoCategory::GenderPrivate,
+            _ => mijian_core::store::MemoCategory::Todo,
         };
         let mut form = MemoFormState::begin_create(cat, stamp, None, scope);
         for &w in &[16.0f32, 48.0, 120.0, 280.0, 420.0] {

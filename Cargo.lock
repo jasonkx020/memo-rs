@@ -1907,8 +1907,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "memo-app"
-version = "0.1.0"
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
+name = "mijian-app"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1925,8 +1934,8 @@ dependencies = [
  "image",
  "indexmap",
  "lunar_rust",
- "memo-core",
- "memo-sync",
+ "mijian-core",
+ "mijian-sync",
  "parking_lot",
  "password-hash",
  "proc-macro-crate 2.0.2",
@@ -1942,14 +1951,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "memo-cli"
-version = "0.1.0"
+name = "mijian-cli"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
- "memo-app",
- "memo-core",
- "memo-sync",
+ "mijian-app",
+ "mijian-core",
+ "mijian-sync",
  "rpassword",
  "tokio",
  "windows-sys 0.52.0",
@@ -1957,8 +1966,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "memo-core"
-version = "0.1.0"
+name = "mijian-core"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1994,27 +2003,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "memo-sync"
-version = "0.1.0"
+name = "mijian-sync"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
  "hex",
- "memo-core",
+ "mijian-core",
  "parking_lot",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
-]
-
-[[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
 ]
 
 [[package]]
