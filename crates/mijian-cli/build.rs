@@ -1,6 +1,7 @@
 fn main() {
     #[cfg(windows)]
     {
+        println!("cargo:rerun-if-changed=assets/app_icon.ico");
         let mut res = winres::WindowsResource::new();
         // 使用 ASCII / 简体语言 ID，保证「属性 → 详细信息」可读
         res.set_language(0x0804); // zh-CN

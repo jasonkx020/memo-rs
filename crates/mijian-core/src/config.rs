@@ -169,6 +169,8 @@ fn migrate_legacy_config_dir(new_root: &Path) {
             .map(|mut it| it.next().is_none())
             .unwrap_or(true);
     if !new_empty {
+        // 已迁过或新建过：仍尝试把 settings 里指向旧 AppData 的 data_dir 纠正过来
+        heal_data_dir_paths(new_root);
         return;
     }
     let Some(old_dirs) = ProjectDirs::from("", "", "DistributedMemo") else {
@@ -187,12 +189,81 @@ fn migrate_legacy_config_dir(new_root: &Path) {
     if let Some(parent) = new_root.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let old_s = old_root.to_string_lossy().to_string();
     // 优先 rename；跨盘失败则递归复制
-    if fs::rename(old_root, new_root).is_ok() {
+    let ok = fs::rename(old_root, new_root).is_ok()
+        || (copy_dir_recursive(old_root, new_root).is_ok()
+            && {
+                let _ = fs::remove_dir_all(old_root);
+                true
+            });
+    if ok {
+        rewrite_settings_data_dir(new_root, &old_s);
+    }
+    heal_data_dir_paths(new_root);
+}
+
+/// 整目录改名后，`settings.json` 里的 `data_dir` 常仍写着旧 `DistributedMemo\...`。
+fn rewrite_settings_data_dir(new_root: &Path, old_prefix: &str) {
+    let new_name = new_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Mijian");
+    for rel in ["settings.json", "config/settings.json"] {
+        let path = new_root.join(rel);
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let patched = raw
+            .replace(old_prefix, &new_root.to_string_lossy())
+            .replace("\\DistributedMemo\\", &format!("\\{new_name}\\"))
+            .replace("/DistributedMemo/", &format!("/{new_name}/"))
+            .replace("\\DistributedMemo\"", &format!("\\{new_name}\""))
+            .replace("/DistributedMemo\"", &format!("/{new_name}\""));
+        if patched != raw {
+            let _ = fs::write(&path, patched);
+        }
+    }
+}
+
+/// 若 `data_dir` 已不存在，但同名目录迁到了 `Mijian` 下，则改写并落盘。
+fn heal_data_dir_paths(new_root: &Path) {
+    let path = new_root.join("settings.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut cfg) = serde_json::from_str::<Config>(&raw) else {
+        return;
+    };
+    let old = cfg.data_dir.clone();
+    if old.trim().is_empty() {
         return;
     }
-    if copy_dir_recursive(old_root, new_root).is_ok() {
-        let _ = fs::remove_dir_all(old_root);
+    if PathBuf::from(&old).exists() {
+        return;
+    }
+    let candidate = old
+        .replace("\\DistributedMemo\\", "\\Mijian\\")
+        .replace("/DistributedMemo/", "/Mijian/")
+        .replace("\\DistributedMemo", "\\Mijian")
+        .replace("/DistributedMemo", "/Mijian");
+    let mut changed = false;
+    if candidate != old && PathBuf::from(&candidate).exists() {
+        cfg.data_dir = candidate;
+        changed = true;
+    } else {
+        let under_root = new_root.join("data");
+        if under_root.exists() {
+            cfg.data_dir = under_root.to_string_lossy().into_owned();
+            changed = true;
+        }
+    }
+    if !changed {
+        return;
+    }
+    // 直接写文件，勿走 save_settings→app_root，避免迁移递归
+    if let Ok(body) = serde_json::to_string_pretty(&normalize(cfg)) {
+        let _ = fs::write(path, body);
     }
 }
 
@@ -345,13 +416,26 @@ fn normalize(mut cfg: Config) -> Config {
 /// 从用户配置目录加载；不存在则创建默认并写入。
 pub fn load_settings() -> anyhow::Result<Config> {
     let path = settings_path()?;
+    // settings_path 已触发 migrate；再读一次以防 heal 刚改写了文件
     if !path.exists() {
         let cfg = normalize(default_config()?);
         save_settings(&cfg)?;
         return Ok(cfg);
     }
     let raw = fs::read_to_string(&path)?;
-    let cfg: Config = serde_json::from_str(&raw)?;
+    let mut cfg: Config = serde_json::from_str(&raw)?;
+    // 若 data_dir 指向已搬家的 DistributedMemo，纠正到 Mijian
+    if let Ok(root) = app_root() {
+        let before = cfg.data_dir.clone();
+        if !before.is_empty() && !PathBuf::from(&before).exists() {
+            heal_data_dir_paths(&root);
+            if let Ok(raw2) = fs::read_to_string(&path) {
+                if let Ok(cfg2) = serde_json::from_str::<Config>(&raw2) {
+                    cfg = cfg2;
+                }
+            }
+        }
+    }
     let cfg = normalize(cfg);
     Ok(cfg)
 }

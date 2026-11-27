@@ -8,14 +8,13 @@ use crate::app_icon;
 use crate::autostart;
 use crate::save_dialog;
 use crate::theme;
-use crate::tip_code;
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, Vec2,
     Visuals,
 };
 use mijian_core::config::{self, Config};
 use mijian_core::identity_keys::{self, IdentityKeys, IdentityMeta};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct IdentityGateState {
     pub identities: Vec<IdentityMeta>,
@@ -26,6 +25,8 @@ pub struct IdentityGateState {
     pub show_init: bool,
     pub init_alias: String,
     pub init_drive: String,
+    /// 自定义数据根目录；`None` 时按 `init_drive` → MemoData/node_id
+    pub init_data_dir_override: Option<String>,
     pub init_import_path: String,
     pub init_export_path: String,
     /// 旧版加密 .memokey 的解密口令（新明文包不需要）
@@ -47,22 +48,37 @@ pub struct IdentityGateState {
 impl IdentityGateState {
     pub fn from_cfg(cfg: &Config) -> Self {
         let data = PathBuf::from(&cfg.data_dir);
-        let legacy = identity_keys::looks_like_legacy_data(&data);
+        let mut legacy = identity_keys::looks_like_legacy_data(&data);
+        let mut status = String::new();
+        let mut selected = None;
+        if legacy {
+            match identity_keys::migrate_legacy_data_dir(&data, &cfg.node_display_name) {
+                Ok(id) => {
+                    legacy = false;
+                    selected = Some(id.fingerprint.clone());
+                    status = format!(
+                        "已从旧版升级身份 {}，请设置登录密码后进入",
+                        IdentityKeys::short_fp(&id.fingerprint)
+                    );
+                }
+                Err(e) => {
+                    status = format!("自动升级失败：{e}。可手动升级，或备份后清空重建。");
+                }
+            }
+        }
         let identities = IdentityKeys::list(&data).unwrap_or_default();
         let show_init = identities.is_empty() && !legacy;
+        let focus_select_pass = selected.is_some();
         Self {
             identities,
-            selected: None,
-            status: if legacy {
-                "检测到旧版数据，与当前版本不兼容。请备份后确认清空并重新初始化。".into()
-            } else {
-                String::new()
-            },
+            selected,
+            status,
             busy: false,
             legacy_wipe_confirm: legacy,
             show_init,
             init_alias: String::new(),
             init_drive: config::default_data_drive(),
+            init_data_dir_override: None,
             init_import_path: String::new(),
             init_export_path: String::new(),
             init_legacy_pack_pass: String::new(),
@@ -70,7 +86,7 @@ impl IdentityGateState {
             init_local_pass2: String::new(),
             select_pass: String::new(),
             select_pass2: String::new(),
-            focus_select_pass: false,
+            focus_select_pass,
             init_mode_import: false,
             pending_identity: None,
             skip_auto_unlock: false,
@@ -81,6 +97,19 @@ impl IdentityGateState {
         let data = PathBuf::from(&cfg.data_dir);
         self.identities = IdentityKeys::list(&data).unwrap_or_default();
     }
+}
+
+/// 新建/导入时将使用的数据目录（自定义优先，否则盘符规则）。
+fn resolved_init_data_dir(st: &IdentityGateState, cfg: &Config) -> String {
+    if let Some(p) = st.init_data_dir_override.as_ref() {
+        let t = p.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    config::memo_data_path(&st.init_drive, &cfg.node_id)
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub enum GateAction {
@@ -531,34 +560,31 @@ fn draw_brand_showcase(ui: &mut egui::Ui, wide: bool, compact: bool) {
     }
 }
 
-/// 打赏码块尺寸（含白边与文案），供右下角绝对定位。
-fn tip_corner_size(compact: bool) -> (f32, f32, f32) {
-    let qr: f32 = if compact { 96.0 } else { 112.0 };
-    let frame_pad = 10.0;
-    let w = qr + frame_pad * 2.0;
-    let h = qr + frame_pad * 2.0 + 8.0 + 36.0;
-    (qr, w, h)
+/// 右下角打赏入口尺寸（无二维码，点击后再弹窗展示）。
+fn tip_corner_size(compact: bool) -> (f32, f32) {
+    if compact {
+        (118.0, 52.0)
+    } else {
+        (128.0, 56.0)
+    }
 }
 
-/// 登录页右下角打赏码；点击打开大图弹窗。
-fn draw_gate_tip_corner(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool) {
-    let (qr, _, _) = tip_corner_size(compact);
+/// 登录页右下角打赏入口；默认不展示二维码，点击打开弹窗。
+fn draw_gate_tip_corner(ui: &mut egui::Ui, _compact: bool, show_tip: &mut bool) {
     let frame = Frame::none()
         .fill(Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 235))
         .stroke(Stroke::new(1.0, gate_line()))
-        .rounding(egui::Rounding::same(14.0))
-        .inner_margin(egui::Margin::same(10.0))
+        .rounding(egui::Rounding::same(12.0))
+        .inner_margin(Margin::symmetric(12.0, 8.0))
         .shadow(egui::epaint::Shadow {
-            offset: Vec2::new(0.0, 8.0),
-            blur: 20.0,
+            offset: Vec2::new(0.0, 6.0),
+            blur: 14.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(28),
+            color: Color32::from_black_alpha(22),
         });
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         let r = frame
             .show(ui, |ui| {
-                tip_code::show(ui, qr);
-                ui.add_space(8.0);
                 ui.label(
                     RichText::new("打赏作者")
                         .size(12.5)
@@ -566,7 +592,7 @@ fn draw_gate_tip_corner(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool) {
                         .color(gate_ink_soft()),
                 );
                 ui.label(
-                    RichText::new("自愿 · 请喝杯咖啡")
+                    RichText::new("自愿支持")
                         .size(11.0)
                         .color(gate_muted()),
                 );
@@ -574,29 +600,27 @@ fn draw_gate_tip_corner(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool) {
             .response
             .interact(Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("点击放大");
+            .on_hover_text("点击查看打赏码");
         if r.clicked() {
             *show_tip = true;
         }
     });
 }
 
-/// 贴在面板真正的右下角绘制打赏码。
+/// 贴在整页右下角绘制打赏入口（先于登录卡绘制，层次在下）。
+/// 必须用 `child_ui` 而非 `allocate_ui_at_rect`：后者会按 tip 矩形推进游标，
+/// 把后续品牌区/登录卡的可用高度吃光，表现为「其它内容都不见了」。
 fn place_tip_bottom_right(ui: &mut egui::Ui, compact: bool, show_tip: &mut bool) {
-    let (_, tip_w, tip_h) = tip_corner_size(compact);
+    let (tip_w, tip_h) = tip_corner_size(compact);
     let margin = 24.0;
     let panel = ui.max_rect();
     let tip_rect = egui::Rect::from_min_size(
-        egui::pos2(
-            panel.max.x - tip_w - margin,
-            panel.max.y - tip_h - margin,
-        ),
+        egui::pos2(panel.max.x - tip_w - margin, panel.max.y - tip_h - margin),
         Vec2::new(tip_w, tip_h),
     );
-    ui.allocate_ui_at_rect(tip_rect, |ui| {
-        ui.set_clip_rect(tip_rect);
-        draw_gate_tip_corner(ui, compact, show_tip);
-    });
+    let mut child = ui.child_ui(tip_rect, Layout::top_down(Align::Center));
+    child.set_clip_rect(tip_rect);
+    draw_gate_tip_corner(&mut child, compact, show_tip);
 }
 
 /// 登录卡下方：版本 + 使用说明。
@@ -697,6 +721,8 @@ pub fn show(
             let wide = avail.x >= 900.0;
             let compact = avail.y <= 680.0;
             paint_gate_bg(ui, wide);
+            // 先绘打赏入口（整页右下角），再绘登录卡 → 登录窗在上层
+            place_tip_bottom_right(ui, compact, &mut show_tip);
 
             if wide {
                 let pad = 40.0;
@@ -731,8 +757,8 @@ pub fn show(
                         },
                     );
                 });
-                place_tip_bottom_right(ui, compact, &mut show_tip);
             } else {
+                let (_, tip_h) = tip_corner_size(true);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -743,11 +769,9 @@ pub fn show(
                             ui.add_space(16.0);
                             draw_gate_card(ui, cfg, st, &mut action, select_mode);
                             draw_right_meta(ui, &mut show_help);
-                            let (_, _, tip_h) = tip_corner_size(true);
                             ui.add_space(tip_h + 28.0);
                         });
                     });
-                place_tip_bottom_right(ui, true, &mut show_tip);
             }
         });
 
@@ -822,19 +846,45 @@ fn draw_gate_card(
 
 fn draw_legacy(ui: &mut egui::Ui, cfg: &mut Config, st: &mut IdentityGateState) {
     ui.label(
-        RichText::new("需要重新初始化")
+        RichText::new("检测到旧版数据")
             .size(17.0)
             .strong()
             .color(theme::mac_text()),
     );
     ui.add_space(6.0);
     ui.label(
-        RichText::new("检测到旧版数据目录，与当前身份模型不兼容。请先自行备份，再清空并继续。")
-            .size(13.0)
-            .color(theme::mac_text_secondary()),
+        RichText::new(
+            "可将旧版节点密钥升级为当前「身份」格式并保留原数据。升级后需设置登录密码。若升级失败，再考虑清空或换新目录。",
+        )
+        .size(13.0)
+        .color(theme::mac_text_secondary()),
     );
-    ui.add_space(18.0);
-    if theme::mac_primary_button(ui, "我已备份，清空并继续", !st.busy).clicked() {
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new(format!("当前目录：{}", cfg.data_dir))
+            .size(11.5)
+            .color(theme::mac_text_tertiary()),
+    );
+    ui.add_space(14.0);
+    if theme::mac_primary_button(ui, "升级到当前版本", !st.busy).clicked() {
+        let dir = PathBuf::from(&cfg.data_dir);
+        match identity_keys::migrate_legacy_data_dir(&dir, &cfg.node_display_name) {
+            Ok(id) => {
+                st.legacy_wipe_confirm = false;
+                st.show_init = false;
+                st.refresh_list(cfg);
+                st.selected = Some(id.fingerprint.clone());
+                st.focus_select_pass = true;
+                st.status = format!(
+                    "升级完成（{}），请设置登录密码后进入",
+                    IdentityKeys::short_fp(&id.fingerprint)
+                );
+            }
+            Err(e) => st.status = format!("升级失败：{e}"),
+        }
+    }
+    ui.add_space(8.0);
+    if !st.busy && theme::mac_secondary_button(ui, "我已备份，清空并继续").clicked() {
         let dir = PathBuf::from(&cfg.data_dir);
         match identity_keys::wipe_data_dir(&dir) {
             Ok(()) => {
@@ -845,6 +895,53 @@ fn draw_legacy(ui: &mut egui::Ui, cfg: &mut Config, st: &mut IdentityGateState) 
             Err(e) => st.status = e.to_string(),
         }
     }
+    ui.add_space(8.0);
+    if !st.busy && theme::mac_secondary_button(ui, "换新数据目录（保留旧文件）").clicked() {
+        // 在同盘新建 node 目录，旧目录文件不动
+        let drive = config::default_data_drive();
+        let new_id = format!(
+            "node-{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
+        );
+        cfg.node_id = new_id.clone();
+        cfg.data_dir = config::memo_data_path(&drive, &new_id)
+            .to_string_lossy()
+            .into_owned();
+        let _ = config::save_settings(cfg);
+        st.legacy_wipe_confirm = false;
+        st.show_init = true;
+        st.status = format!("已改用 {}，请生成或导入身份", cfg.data_dir);
+    }
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| {
+        if ui
+            .link(
+                RichText::new("导入已有 .memokey 密钥包")
+                    .size(13.0)
+                    .strong()
+                    .color(gate_accent()),
+            )
+            .clicked()
+        {
+            // 仍用当前 data_dir：若目录有旧文件，导入可能冲突；先引导换新目录更安全
+            let drive = config::default_data_drive();
+            if identity_keys::looks_like_legacy_data(Path::new(&cfg.data_dir)) {
+                let new_id = format!(
+                    "node-{}",
+                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
+                );
+                cfg.node_id = new_id.clone();
+                cfg.data_dir = config::memo_data_path(&drive, &new_id)
+                    .to_string_lossy()
+                    .into_owned();
+                let _ = config::save_settings(cfg);
+            }
+            st.legacy_wipe_confirm = false;
+            st.show_init = true;
+            st.init_mode_import = true;
+            st.status = "请选择 .memokey 导入".into();
+        }
+    });
 }
 
 fn draw_init_create(
@@ -884,19 +981,82 @@ fn draw_init_create(
         ui.add_space(12.0);
     }
 
+    field_label(ui, "数据位置");
     #[cfg(windows)]
     {
-        field_label(ui, "数据盘");
-        egui::ComboBox::from_id_source("mac_drive")
-            .width(ui.available_width())
-            .selected_text(st.init_drive.as_str())
-            .show_ui(ui, |ui| {
-                for d in config::list_drives() {
-                    ui.selectable_value(&mut st.init_drive, d.clone(), d);
+        ui.horizontal(|ui| {
+            let combo_w = (ui.available_width() - 96.0).max(120.0);
+            egui::ComboBox::from_id_source("mac_drive")
+                .width(combo_w)
+                .selected_text(if st.init_data_dir_override.is_some() {
+                    "自定义"
+                } else {
+                    st.init_drive.as_str()
+                })
+                .show_ui(ui, |ui| {
+                    for d in config::list_drives() {
+                        if ui
+                            .selectable_label(
+                                st.init_data_dir_override.is_none()
+                                    && st.init_drive.eq_ignore_ascii_case(&d),
+                                &d,
+                            )
+                            .clicked()
+                        {
+                            st.init_drive = d;
+                            st.init_data_dir_override = None;
+                        }
+                    }
+                });
+            ui.add_space(8.0);
+            if ui
+                .add_sized(
+                    [88.0, 32.0],
+                    egui::Button::new(
+                        RichText::new("自定义…")
+                            .size(13.0)
+                            .color(theme::mac_text()),
+                    )
+                    .fill(theme::mac_fill())
+                    .rounding(egui::Rounding::same(theme::MAC_ROUND_CTRL)),
+                )
+                .clicked()
+            {
+                let initial = resolved_init_data_dir(st, cfg);
+                if let Some(p) = save_dialog::pick_folder_dialog(&initial) {
+                    st.init_data_dir_override = Some(p.to_string_lossy().into_owned());
                 }
-            });
-        ui.add_space(12.0);
+            }
+        });
     }
+    #[cfg(not(windows))]
+    {
+        if ui
+            .add_sized(
+                [120.0, 32.0],
+                egui::Button::new(
+                    RichText::new("自定义目录…")
+                        .size(13.0)
+                        .color(theme::mac_text()),
+                )
+                .fill(theme::mac_fill())
+                .rounding(egui::Rounding::same(theme::MAC_ROUND_CTRL)),
+            )
+            .clicked()
+        {
+            let initial = resolved_init_data_dir(st, cfg);
+            if let Some(p) = save_dialog::pick_folder_dialog(&initial) {
+                st.init_data_dir_override = Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!("数据将存于：{}", resolved_init_data_dir(st, cfg)))
+            .size(11.5)
+            .color(theme::mac_text_secondary()),
+    );
+    ui.add_space(12.0);
 
     if st.init_mode_import {
         field_label(ui, "密钥文件 (.memokey)");
@@ -978,9 +1138,7 @@ fn draw_init_create(
             };
             match IdentityKeys::import_file(p.as_path(), import_pass) {
                 Ok(id) => {
-                    cfg.data_dir = config::memo_data_path(&st.init_drive, &cfg.node_id)
-                        .to_string_lossy()
-                        .into_owned();
+                    cfg.data_dir = resolved_init_data_dir(st, cfg);
                     let _ = config::save_settings(cfg);
                     st.busy = true;
                     st.status = format!("正在以「{}」打开…", id.alias);
@@ -1000,9 +1158,7 @@ fn draw_init_create(
                 st.status = "请填写显示别名".into();
             } else {
                 let id = IdentityKeys::generate(alias);
-                cfg.data_dir = config::memo_data_path(&st.init_drive, &cfg.node_id)
-                    .to_string_lossy()
-                    .into_owned();
+                cfg.data_dir = resolved_init_data_dir(st, cfg);
                 let _ = config::save_settings(cfg);
                 st.pending_identity = Some(id);
                 st.init_local_pass.clear();

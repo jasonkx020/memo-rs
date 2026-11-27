@@ -24,6 +24,7 @@ mod save_dialog;
 mod shell;
 mod single_instance;
 mod sticky_note;
+mod sticky_win32;
 mod commercial;
 mod theme;
 mod tip_code;

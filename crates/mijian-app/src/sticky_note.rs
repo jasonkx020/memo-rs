@@ -135,6 +135,10 @@ pub struct StickyNote {
     pub apply_geom: bool,
     /// 切换置顶后需发 WindowLevel
     pub apply_pin: bool,
+    /// Windows 子视口 HWND 缓存（对抗「显示桌面」最小化）
+    pub hwnd: isize,
+    /// 上次应用到 Win32 的临时浮起状态（避免每帧 SetWindowPos 抢主窗）
+    pub win_float: Option<bool>,
 }
 
 /// 新建便签默认不置顶：返回桌面即可看见，可被其它窗覆盖；需要时再点「钉」。
@@ -198,6 +202,8 @@ impl StickyNote {
             flush_now: false,
             apply_geom: apply_geom && pos.is_some(),
             apply_pin: false,
+            hwnd: 0,
+            win_float: None,
         }))
     }
 
@@ -343,6 +349,8 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
 
     let window_title = format!("{} · {}", origin, display_title(&title));
     let vid = ViewportId::from_hash_of(("sticky", id_str.as_str()));
+    // 显示桌面时桌面壳会盖住 Normal 窗；未置顶便签在此期间临时 AlwaysOnTop，有其它应用窗后再降回。
+    let float_over = pinned || crate::sticky_win32::should_float_over_desktop();
     let mut builder = ViewportBuilder::default()
         .with_title(window_title.clone())
         .with_decorations(false)
@@ -350,7 +358,7 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
         .with_inner_size(size)
         .with_min_inner_size([200.0, 120.0])
         .with_resizable(true);
-    if pinned {
+    if float_over {
         builder = builder.with_always_on_top();
     }
     if let Some(p) = pos {
@@ -366,18 +374,33 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
     ctx.send_viewport_cmd_to(vid, ViewportCommand::Visible(true));
     ctx.send_viewport_cmd_to(
         vid,
-        ViewportCommand::WindowLevel(if pinned {
+        ViewportCommand::WindowLevel(if float_over {
             WindowLevel::AlwaysOnTop
         } else {
             WindowLevel::Normal
         }),
     );
+    // Win32：最小化用无焦点拉回；显示桌面期间未置顶也临时 TOPMOST，避免被桌面壳盖住
+    {
+        let mut n = note.lock();
+        let mut hwnd = n.hwnd;
+        let mut win_float = n.win_float;
+        crate::sticky_win32::ensure_visible(
+            &mut hwnd,
+            &window_title,
+            float_over,
+            &mut win_float,
+        );
+        n.hwnd = hwnd;
+        n.win_float = win_float;
+    }
 
     let note_cb = note.clone();
     ctx.show_viewport_deferred(vid, builder, move |ctx, class| {
         let mut note = note_cb.lock();
         // Close 不会立刻拆窗；停画后 GL 会留下黑框。先 Visible(false) 藏掉。
         if note.closed {
+            note.hwnd = 0;
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
@@ -385,13 +408,25 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
 
         // 子视口内再确认一次：从「显示桌面」回来时无需主窗抢焦点
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        let level = if note.pinned {
+        let float_over = note.pinned || crate::sticky_win32::should_float_over_desktop();
+        let level = if float_over {
             WindowLevel::AlwaysOnTop
         } else {
             WindowLevel::Normal
         };
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
         note.apply_pin = false;
+        let sticky_title = format!("{} · {}", note.origin_label(), display_title(&note.title));
+        let mut hwnd = note.hwnd;
+        let mut win_float = note.win_float;
+        crate::sticky_win32::ensure_visible(
+            &mut hwnd,
+            &sticky_title,
+            float_over,
+            &mut win_float,
+        );
+        note.hwnd = hwnd;
+        note.win_float = win_float;
 
         // 恢复历史位置：强制 OuterPosition，避免 winit 忽略 builder.with_position
         if note.apply_geom {
@@ -465,6 +500,7 @@ pub fn show_viewport(ctx: &egui::Context, note: &StickyHandle) {
         if close_os || close_btn {
             note.flush_now = true;
             note.closed = true;
+            note.hwnd = 0;
             // 立刻隐藏，避免主窗在托盘时 GC 延迟留下黑框
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             ctx.send_viewport_cmd(ViewportCommand::Close);

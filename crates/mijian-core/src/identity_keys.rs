@@ -581,10 +581,184 @@ pub fn looks_like_legacy_data(data_dir: &Path) -> bool {
     if is_v2_data_dir(data_dir) {
         return false;
     }
+    let keys = data_dir.join("keys");
     data_dir.join("verifier.dat").exists()
         || data_dir.join("audit.jsonl").exists()
-        || data_dir.join("keys").join("private.key").exists()
+        || keys.join("private.key").exists()
+        || keys.join("private.pem").exists()
         || data_dir.join("persons.json.enc").exists()
+}
+
+/// 从旧版 `keys/private.pem` 或 `keys/private.key` 读取 Ed25519 种子。
+pub fn load_legacy_ed25519_secret(data_dir: &Path) -> anyhow::Result<[u8; 32]> {
+    let keys = data_dir.join("keys");
+    let pem_path = keys.join("private.pem");
+    let hex_path = keys.join("private.key");
+    if pem_path.exists() {
+        let raw = fs::read_to_string(&pem_path)?;
+        return parse_ed25519_private_pem(&raw);
+    }
+    if hex_path.exists() {
+        let hex_str = fs::read_to_string(&hex_path)?;
+        let bytes = hex::decode(hex_str.trim())?;
+        if bytes.len() != 32 {
+            anyhow::bail!("旧版私钥长度错误（需要 32 字节）");
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        return Ok(arr);
+    }
+    anyhow::bail!("未找到旧版私钥（keys/private.pem 或 keys/private.key）");
+}
+
+fn parse_ed25519_private_pem(pem: &str) -> anyhow::Result<[u8; 32]> {
+    let mut b64 = String::new();
+    let mut in_body = false;
+    for line in pem.lines() {
+        let t = line.trim();
+        if t.starts_with("-----BEGIN") && t.contains("PRIVATE") {
+            in_body = true;
+            continue;
+        }
+        if t.starts_with("-----END") {
+            break;
+        }
+        if in_body && !t.is_empty() {
+            b64.push_str(t);
+        }
+    }
+    if b64.is_empty() {
+        anyhow::bail!("旧版 PEM 私钥格式无效");
+    }
+    let raw = B64
+        .decode(b64.as_bytes())
+        .map_err(|_| anyhow::anyhow!("旧版 PEM 私钥 Base64 无效"))?;
+    // 常见：32 字节种子，或 64 字节（种子 + 公钥）
+    let seed = if raw.len() == 32 {
+        raw.as_slice()
+    } else if raw.len() >= 32 {
+        &raw[..32]
+    } else {
+        anyhow::bail!("旧版 PEM 私钥过短");
+    };
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(seed);
+    Ok(arr)
+}
+
+fn try_rename_path(from: &Path, to: &Path) -> anyhow::Result<()> {
+    if !from.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if to.exists() {
+        if to.is_dir() {
+            fs::remove_dir_all(to)?;
+        } else {
+            fs::remove_file(to)?;
+        }
+    }
+    fs::rename(from, to)?;
+    Ok(())
+}
+
+/// 将旧版数据目录升级为 identities/ + vaults/{fp}/。
+/// 保留原 Ed25519 节点密钥作为身份；本机 `secret.key` 先以明文写入，须随后设置登录密码。
+pub fn migrate_legacy_data_dir(data_dir: &Path, alias: &str) -> anyhow::Result<IdentityKeys> {
+    if !data_dir.exists() {
+        anyhow::bail!("数据目录不存在");
+    }
+    if is_v2_data_dir(data_dir) {
+        anyhow::bail!("已是当前版本数据格式，无需升级");
+    }
+    if !looks_like_legacy_data(data_dir) {
+        anyhow::bail!("未检测到可升级的旧版数据");
+    }
+
+    let secret = load_legacy_ed25519_secret(data_dir)?;
+    let alias = {
+        let t = alias.trim();
+        if t.is_empty() {
+            "本机"
+        } else {
+            t
+        }
+    };
+    let id = IdentityKeys::from_secret(secret, alias);
+
+    let idir = IdentityKeys::identity_dir(data_dir, &id.fingerprint);
+    fs::create_dir_all(&idir)?;
+    let secret_path = idir.join("secret.key");
+    if !secret_path.exists() {
+        fs::write(&secret_path, id.secret_hex())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&secret_path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&secret_path, perms)?;
+        }
+    }
+    fs::write(idir.join("public.key"), id.public_hex())?;
+    let meta = IdentityMeta {
+        fingerprint: id.fingerprint.clone(),
+        alias: id.alias.clone(),
+        exported_once: false,
+        created_at: chrono::Local::now().to_rfc3339(),
+        has_password: false,
+    };
+    fs::write(idir.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
+
+    let vault = IdentityKeys::vault_dir(data_dir, &id.fingerprint);
+    fs::create_dir_all(&vault)?;
+
+    // 根目录业务文件迁入该身份 vault
+    const ROOT_FILES: &[&str] = &[
+        "audit.jsonl",
+        "persons.json.enc",
+        "verifier.dat",
+        "cycle.json.enc",
+        "male_health.json.enc",
+        "hosted_index.json",
+        "peer_acl.json",
+    ];
+    for name in ROOT_FILES {
+        try_rename_path(&data_dir.join(name), &vault.join(name))?;
+    }
+    for name in ["attachments", "hosted"] {
+        try_rename_path(&data_dir.join(name), &vault.join(name))?;
+    }
+
+    // 审计签名密钥：与身份种子一致，保证旧 audit 验签仍可用
+    let vault_keys = vault.join("keys");
+    fs::create_dir_all(&vault_keys)?;
+    if !vault_keys.join("private.key").exists() {
+        fs::write(vault_keys.join("private.key"), hex::encode(secret))?;
+        fs::write(vault_keys.join("public.key"), id.public_hex())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let priv_path = vault_keys.join("private.key");
+            let mut perms = fs::metadata(&priv_path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&priv_path, perms)?;
+        }
+    }
+
+    // 归档旧 keys，避免再次被判定为 legacy
+    let legacy_keys = data_dir.join("keys");
+    if legacy_keys.exists() {
+        let bak = data_dir.join("keys.legacy.bak");
+        if bak.exists() {
+            let _ = fs::remove_dir_all(&bak);
+        }
+        fs::rename(&legacy_keys, &bak)?;
+    }
+
+    write_schema_marker(data_dir)?;
+    Ok(id)
 }
 
 pub fn write_schema_marker(data_dir: &Path) -> anyhow::Result<()> {
@@ -675,6 +849,46 @@ mod tests {
             .unwrap();
         assert!(IdentityKeys::load(&dir, &id.fingerprint, "oldpass1").is_err());
         IdentityKeys::load(&dir, &id.fingerprint, "newpass2").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_legacy_pem_to_v2() {
+        let dir = tmp_data_dir("legacy-mig");
+        let seed = [0x42u8; 32];
+        let signing = SigningKey::from_bytes(&seed);
+        let vk = signing.verifying_key();
+        let keys = dir.join("keys");
+        fs::create_dir_all(&keys).unwrap();
+        // 64-byte PEM body = seed || public（旧版常见）
+        let mut body = Vec::with_capacity(64);
+        body.extend_from_slice(&seed);
+        body.extend_from_slice(vk.as_bytes());
+        let pem = format!(
+            "-----BEGIN ED25519 PRIVATE KEY-----\n{}\n-----END ED25519 PRIVATE KEY-----\n",
+            B64.encode(&body)
+        );
+        fs::write(keys.join("private.pem"), pem).unwrap();
+        fs::write(
+            keys.join("public.pem"),
+            format!(
+                "-----BEGIN ED25519 PUBLIC KEY-----\n{}\n-----END ED25519 PUBLIC KEY-----\n",
+                B64.encode(vk.as_bytes())
+            ),
+        )
+        .unwrap();
+        fs::write(dir.join("audit.jsonl"), "").unwrap();
+
+        assert!(looks_like_legacy_data(&dir));
+        let id = migrate_legacy_data_dir(&dir, "升级测试").unwrap();
+        assert!(!looks_like_legacy_data(&dir));
+        assert!(is_v2_data_dir(&dir));
+        assert_eq!(id.signing.to_bytes(), seed);
+        assert!(IdentityKeys::needs_password_setup(&dir, &id.fingerprint));
+        assert!(IdentityKeys::vault_dir(&dir, &id.fingerprint)
+            .join("audit.jsonl")
+            .exists());
+        assert!(dir.join("keys.legacy.bak").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

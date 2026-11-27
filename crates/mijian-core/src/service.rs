@@ -1358,9 +1358,15 @@ pub fn unlock_with_identity(
     crate::config::ensure_data_dir(&cfg)?;
     let data_dir = PathBuf::from(&cfg.data_dir);
     if identity_keys::looks_like_legacy_data(&data_dir) {
-        anyhow::bail!(
-            "检测到旧版数据且与当前版本不兼容。请自行备份后删除数据目录，再重新初始化。"
-        );
+        // 兼容升级：把旧 keys/PEM + 根目录业务文件迁入 identities/vaults
+        let migrated =
+            identity_keys::migrate_legacy_data_dir(&data_dir, &cfg.node_display_name)?;
+        if migrated.fingerprint != identity.fingerprint {
+            anyhow::bail!(
+                "旧版数据已升级为身份 {}，请选择该身份登录（当前选择不一致）",
+                IdentityKeys::short_fp(&migrated.fingerprint)
+            );
+        }
     }
     identity_keys::write_schema_marker(&data_dir)?;
     identity.ensure_sealed(&data_dir, local_password)?;

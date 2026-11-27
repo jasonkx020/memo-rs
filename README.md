@@ -48,6 +48,8 @@ sudo apt install build-essential pkg-config libgl1-mesa-dev \
 
 服务器不建终端用户：设 `MEMO_LOGIN_PASSWORD` 后 `mijian --no-ui` 会自动创建**存储节点身份**。详见 [docs/server-node.md](docs/server-node.md)。
 
+运维（打包发布、数据目录、检查更新域名、密钥注意）：[docs/ops.md](docs/ops.md)。
+
 依赖版本为兼容 Win7 构建做了钉死（同一 `Cargo.lock`）；Linux/macOS 仍用新 rustc 编译这些依赖即可。  
 渲染使用 **OpenGL(glow)**。
 
